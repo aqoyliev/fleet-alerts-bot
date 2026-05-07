@@ -24,6 +24,19 @@ def event_type_keyboard(company_slug: str) -> types.InlineKeyboardMarkup:
     return kb
 
 
+def report_company_picker_keyboard(companies: list[dict], action: str) -> types.InlineKeyboardMarkup:
+    # action: "rpt:today", "rpt:yesterday", "top:10"
+    # callback_data: "rpt_pick:{cmd}:{arg}:{slug}"
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    cmd, arg = action.split(":", 1)
+    for c in companies:
+        kb.add(types.InlineKeyboardButton(
+            c["name"],
+            callback_data=f"rpt_pick:{cmd}:{arg}:{c['slug']}"
+        ))
+    return kb
+
+
 def top10_keyboard(rows: list[dict], company_slug: str, period: str, event_type: str) -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup(row_width=2)
     # Period toggle row — checkmark on the active period

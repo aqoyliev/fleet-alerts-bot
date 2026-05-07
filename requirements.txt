@@ -3,3 +3,4 @@ environs~=8.0.0
 marshmallow~=3.13.0
 asyncpg~=0.29
 aiohttp~=3.9
+pytest~=8.0

@@ -36,6 +36,21 @@ async def get_accessible_companies(telegram_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_company_by_group_id(telegram_group_id: int) -> dict | None:
+    """Returns {id, slug, name} for the company that owns this group, or None."""
+    row = await db.fetchrow(
+        """
+        SELECT c.id, c.slug, c.name
+        FROM company_groups cg
+        JOIN companies c ON c.id = cg.company_id
+        WHERE cg.telegram_group_id = $1
+        LIMIT 1
+        """,
+        telegram_group_id,
+    )
+    return dict(row) if row else None
+
+
 async def get_company_groups(company_slug: str) -> list[int]:
     """Returns all telegram_group_ids configured for a company (ignores event type filter)."""
     rows = await db.fetch(
