@@ -135,13 +135,13 @@ def _verify_hmac(secret: str, body: bytes, provided: str) -> bool:
 
 
 async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict | None:
-    """Poll harsh event API for up to 2 minutes, waiting for both video URLs. First call is immediate; subsequent attempts wait 20s."""
+    """Poll harsh event API up to 3 times (~40s total), waiting for both video URLs. First call is immediate; subsequent attempts wait 20s."""
     url = f"https://api.samsara.com/v1/fleet/vehicles/{vehicle_id}/safety/harsh_event"
     headers = {"Authorization": f"Bearer {config.SAMSARA_API_KEY}"}
     last_data = None
     ever_got_url = False
-    type_logged = False
-    for attempt in range(1, 7):
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
         if attempt > 1:
             await asyncio.sleep(20)
         try:
@@ -156,9 +156,6 @@ async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict
                     fwd = data.get("downloadForwardVideoUrl") or ""
                     inward = data.get("downloadInwardVideoUrl") or ""
                     resolved_type = _SAMSARA_HARSH_TYPE_MAP.get(harsh_type, "")
-                    if resolved_type and not type_logged:
-                        logger.info(f"[samsara] Resolved type={resolved_type} (attempt {attempt}) — fwd={bool(fwd)} inward={bool(inward)}")
-                        type_logged = True
                     if fwd and inward:
                         logger.info(f"[samsara] Both video URLs ready on attempt {attempt}")
                         return data
@@ -167,17 +164,18 @@ async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict
                         return data
                     if fwd or inward:
                         ever_got_url = True
-                    if attempt >= 3 and not ever_got_url:
+                    if attempt == max_attempts and not ever_got_url:
                         logger.warning(f"[samsara] No URLs after {attempt} attempts — sending with no media")
                         return last_data
-                    logger.info(f"[samsara] Attempt {attempt}/6 type={resolved_type or 'unknown'}: fwd={bool(fwd)} inward={bool(inward)} — retrying in 20s")
+                    tail = " — retrying in 20s" if attempt < max_attempts else ""
+                    logger.info(f"[samsara] Attempt {attempt}/{max_attempts} type={resolved_type or 'unknown'}: fwd={bool(fwd)} inward={bool(inward)}{tail}")
                 else:
                     body_text = await r.text()
                     logger.error(f"[samsara] harsh_event API HTTP {r.status} on attempt {attempt} — giving up")
                     return None
         except Exception as e:
             logger.error(f"[samsara] harsh_event API error attempt {attempt}: {e}")
-    logger.warning("[samsara] Gave up after 6 attempts — sending with available URLs")
+    logger.warning(f"[samsara] Gave up after {max_attempts} attempts — sending with available URLs")
     return last_data
 
 
@@ -322,13 +320,17 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
     try:
         # Enrich Samsara AlertIncident events: fetch harsh event data (type, location, video)
         if event.get("_samsara_vehicle_id") and event.get("_samsara_timestamp_ms"):
-            logger.info(f"Received unit={_get_unit_num(event)} id={event.get('id', '?')} — fetching harsh event details")
             harsh_data = await _fetch_samsara_harsh_event(
                 event["_samsara_vehicle_id"], event["_samsara_timestamp_ms"]
             )
             if harsh_data is None:
                 logger.info(f"[samsara] API returned no data — skipping event id={event.get('id')}")
                 return
+            if not harsh_data:
+                # Empty {} after polling — Samsara never populated the event record.
+                # Skip groups but still DM subscribed admins so the issue is visible.
+                logger.warning(f"[samsara] Empty response after polling — DM-only id={event.get('id')}")
+                event = {**event, "_incomplete": True}
             if harsh_data:
                 harsh_type = harsh_data.get("harshEventType") or ""
                 resolved_type = _SAMSARA_HARSH_TYPE_MAP.get(harsh_type, "harsh_event")
@@ -402,12 +404,17 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
         )
 
         group_ids = await get_groups_for_event(company_slug, event_type)
-        if not group_ids:
-            logger.info(f"No groups configured for company='{company_slug}' event='{event_type}' — skipping")
+        if event.get("_incomplete"):
+            group_ids = []  # incomplete events: DM-only, skip groups
+        dm_ids = await get_subscribed_admins(event_type, company_slug)
+        if not group_ids and not dm_ids:
+            logger.info(f"No targets for company='{company_slug}' event='{event_type}' — skipping")
             return
 
         company_display = await get_company_name(company_slug) or company_slug.title()
         text = _format_event(event, company_display)
+        if event.get("_incomplete"):
+            text = "🔍 <i>Possible error — incomplete Samsara data</i>\n\n" + text
         video_urls, image_urls = _get_camera_media_info(event)
 
         if not video_urls and not image_urls and event.get("camera_media") is None and event_type != "speeding":
@@ -428,7 +435,6 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
         for chat_id in group_ids:
             await _send_with_retry(bot, chat_id, text, is_video, media)
 
-        dm_ids = await get_subscribed_admins(event_type, company_slug)
         for telegram_id in dm_ids:
             await _send_with_retry(bot, telegram_id, text, is_video, media)
 
