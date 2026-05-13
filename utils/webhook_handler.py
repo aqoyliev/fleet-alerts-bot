@@ -270,7 +270,7 @@ def _format_event(event: dict, company_name: str = "") -> str:
         vehicle_fmt = f"<code>{num}</code> <code>{rest}</code>"
     else:
         vehicle_fmt = f"<code>{v}</code>" if v else "—"
-    lines.append(f"🚛 <b>Vehicle:</b> unit #{vehicle_fmt}")
+    lines.append(f"🚛 <b>Vehicle:</b> {vehicle_fmt}")
     if driver and driver != "Unidentified":
         lines.append(f"👤 <b>Driver:</b> {driver}")
     if sev_display and event_type not in {"driver_facing_cam_obstruction", "road_facing_cam_obstruction"}:

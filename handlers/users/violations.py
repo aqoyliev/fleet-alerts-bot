@@ -132,7 +132,6 @@ async def cb_download(call: types.CallbackQuery):
     ]
     if event_type == "speeding":
         lines.append("Filter: Speeding only")
-        lines.append("Note: Only days with 3+ speeding events per unit are listed.")
         lines.append("")
     elif event_type == "other":
         lines.append("Filter: Other violations (excl. speeding)")
@@ -154,12 +153,11 @@ async def cb_download(call: types.CallbackQuery):
                 by_date.setdefault(day, []).append(time_str)
             day_lines = []
             for day, times in by_date.items():
-                if len(times) >= 3:
-                    day_lines.append(f"     • {day}, {', '.join(times)} — {len(times)} times")
+                day_lines.append(f"     • {day}, {', '.join(times)} — {len(times)} time{'s' if len(times) != 1 else ''}")
             if not day_lines:
                 continue
-            total_shown = sum(len(by_date[d]) for d in by_date if len(by_date[d]) >= 3)
-            lines.append(f"{rank}. Unit {unit} — {total_shown} speeding events")
+            total_shown = sum(len(v) for v in by_date.values())
+            lines.append(f"{rank}. Unit {unit} — {total_shown} speeding event{'s' if total_shown != 1 else ''}")
             lines.extend(day_lines)
         else:
             total = row["total"]

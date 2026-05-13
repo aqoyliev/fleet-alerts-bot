@@ -19,8 +19,7 @@ async def bot_help(message: types.Message):
         "From the main menu, tap <b>Violations Report</b> to view top offending units.",
         "• Choose <b>Speeding</b> or <b>Other Violations</b>",
         "• Toggle between <b>Last Week</b> and <b>Last Month</b>",
-        "• Download a full detailed report as a text file\n",
-        "<b>Speeding report note:</b> The download only lists days where a unit had <b>3 or more</b> speeding events.",
+        "• Download a full detailed report as a text file",
     ]
     if await is_super_admin(message.from_user.id):
         text += [
