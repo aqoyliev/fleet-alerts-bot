@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,7 +22,7 @@ async def on_startup(dispatcher):
     await init_pool()
     await set_default_commands(dispatcher)
     await on_startup_notify(dispatcher)
-    await start_webhook_server(bot, port=8081)
+    await start_webhook_server(bot, port=int(os.environ.get("PORT", 8081)))
     asyncio.create_task(schedule_daily_reports(bot))
 
 

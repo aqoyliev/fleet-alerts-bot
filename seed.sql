@@ -1,9 +1,9 @@
--- One-time setup for HAULAGE FREIGHT LLC on the shared mz_cargo_alerts_bot DB.
--- Schema already exists in this DB — do NOT re-run schemas.sql.
--- Fill in the placeholder <<TELEGRAM_GROUP_ID>> and run:
+-- One-time setup for HAULAGE FREIGHT LLC on a fresh Railway Postgres DB.
+-- Run schema first, then this seed:
+--   psql "$DATABASE_URL" -f utils/db_api/schemas.sql
 --   psql "$DATABASE_URL" -f seed.sql
--- Akbar (telegram_id 8678782589) is the sole admin — already a super-admin in
--- the existing DB, so no admin_companies row is needed (super applies globally).
+-- Akbar (telegram_id 8678782589) is the sole admin and gets the super flag,
+-- which grants global access across any future companies in this DB.
 
 BEGIN;
 
@@ -41,6 +41,13 @@ FROM g, (VALUES
 ) AS t(event_type)
 ON CONFLICT DO NOTHING;
 
--- (Admins step skipped: Akbar is the sole admin and already global super-admin.)
+-- 4. Sole admin: Akbar (super, so future companies inherit access automatically)
+INSERT INTO users (telegram_id, full_name, username)
+VALUES (8678782589::BIGINT, 'Akbar', NULL)
+ON CONFLICT (telegram_id) DO NOTHING;
+
+INSERT INTO admins (telegram_id, is_super, is_active)
+VALUES (8678782589::BIGINT, TRUE, TRUE)
+ON CONFLICT (telegram_id) DO UPDATE SET is_super = TRUE, is_active = TRUE;
 
 COMMIT;
