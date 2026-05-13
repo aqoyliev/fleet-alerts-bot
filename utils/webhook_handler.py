@@ -599,8 +599,13 @@ async def samsara_webhook(request: web.Request) -> web.Response:
         body_bytes = await request.read()
 
         if config.SAMSARA_WEBHOOK_SECRET:
-            sig = request.headers.get("X-Samsara-Hmac-Sha256", "")
-            if not _verify_hmac(config.SAMSARA_WEBHOOK_SECRET, body_bytes, sig):
+            # Samsara v2 signature: X-Samsara-Signature: v1=<hex>
+            # signed payload = "<timestamp>.<raw_body>"
+            sig_header = request.headers.get("X-Samsara-Signature", "")
+            provided = sig_header.split("=", 1)[1] if "=" in sig_header else sig_header
+            timestamp = request.headers.get("X-Samsara-Timestamp", "")
+            signed_payload = timestamp.encode() + b"." + body_bytes
+            if not _verify_hmac(config.SAMSARA_WEBHOOK_SECRET, signed_payload, provided):
                 logger.warning(f"[samsara] Invalid HMAC signature from {request.remote}")
                 return web.Response(text="Forbidden", status=403)
 
