@@ -14,7 +14,7 @@ ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name;
 
 -- 2. Main Telegram group for this company
 INSERT INTO company_groups (company_id, telegram_group_id, label)
-SELECT id, -5231861833::BIGINT, 'main'
+SELECT id, -1003786362177::BIGINT, 'main'
 FROM companies WHERE slug = 'hf'
 ON CONFLICT DO NOTHING;
 

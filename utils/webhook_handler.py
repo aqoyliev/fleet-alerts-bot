@@ -85,6 +85,10 @@ ALLOWED_TYPES = set(EVENT_TYPE_MAP.keys())
 # Motive speeding webhook uses "action" field with these values
 SPEEDING_ACTIONS = {"speeding_event_created"}
 
+# Event types where only the inward (driver-facing) camera carries evidence —
+# polling returns as soon as inward URL is ready, skipping the wait for forward.
+_INWARD_ONLY_TYPES: frozenset[str] = frozenset({"cell_phone", "drowsy_driving", "no_seat_belt", "inattentive_driving"})
+
 # Samsara legacy harsh event API harshEventType string → internal event type
 _SAMSARA_HARSH_TYPE_MAP: dict[str, str] = {
     "Harsh Braking":       "hard_brake",
@@ -131,34 +135,42 @@ def _verify_hmac(secret: str, body: bytes, provided: str) -> bool:
 
 
 async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict | None:
-    """Poll harsh event API every 20s for up to 2 minutes, waiting for both video URLs."""
+    """Poll harsh event API for up to 2 minutes, waiting for both video URLs. First call is immediate; subsequent attempts wait 20s."""
     url = f"https://api.samsara.com/v1/fleet/vehicles/{vehicle_id}/safety/harsh_event"
     headers = {"Authorization": f"Bearer {config.SAMSARA_API_KEY}"}
     last_data = None
     ever_got_url = False
+    type_logged = False
     for attempt in range(1, 7):
-        await asyncio.sleep(20)
+        if attempt > 1:
+            await asyncio.sleep(20)
         try:
             async with _http_session.get(url, headers=headers, params={"timestamp": timestamp_ms}) as r:
                 if r.status == 200:
                     data = await r.json()
                     last_data = data
-                    # logger.info(f"[samsara] harsh_event API response (attempt {attempt}):\n{json.dumps(data, indent=2)}")
                     harsh_type = data.get("harshEventType") or ""
                     if harsh_type == "Obstructed Camera":
                         logger.info(f"[samsara] Obstructed Camera — skipping event")
                         return None
                     fwd = data.get("downloadForwardVideoUrl") or ""
                     inward = data.get("downloadInwardVideoUrl") or ""
+                    resolved_type = _SAMSARA_HARSH_TYPE_MAP.get(harsh_type, "")
+                    if resolved_type and not type_logged:
+                        logger.info(f"[samsara] Resolved type={resolved_type} (attempt {attempt}) — fwd={bool(fwd)} inward={bool(inward)}")
+                        type_logged = True
                     if fwd and inward:
                         logger.info(f"[samsara] Both video URLs ready on attempt {attempt}")
+                        return data
+                    if resolved_type in _INWARD_ONLY_TYPES and inward:
+                        logger.info(f"[samsara] Inward-only type '{resolved_type}' ready on attempt {attempt} — short-circuit")
                         return data
                     if fwd or inward:
                         ever_got_url = True
                     if attempt >= 3 and not ever_got_url:
                         logger.warning(f"[samsara] No URLs after {attempt} attempts — sending with no media")
                         return last_data
-                    logger.info(f"[samsara] Attempt {attempt}/6: fwd={bool(fwd)} inward={bool(inward)} — retrying in 20s")
+                    logger.info(f"[samsara] Attempt {attempt}/6 type={resolved_type or 'unknown'}: fwd={bool(fwd)} inward={bool(inward)} — retrying in 20s")
                 else:
                     body_text = await r.text()
                     logger.error(f"[samsara] harsh_event API HTTP {r.status} on attempt {attempt} — giving up")
@@ -292,8 +304,6 @@ def _format_event(event: dict, company_name: str = "") -> str:
         if duration:
             lines.append(f"⏱ <b>Duration:</b> {duration}s")
 
-    source = "Samsara" if event.get("_source") == "samsara" else "Motive"
-    lines.append(f"\n<i>via {source}</i>")
     return "\n".join(lines)
 
 
@@ -315,6 +325,7 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
     try:
         # Enrich Samsara AlertIncident events: fetch harsh event data (type, location, video)
         if event.get("_samsara_vehicle_id") and event.get("_samsara_timestamp_ms"):
+            logger.info(f"Received unit={_get_unit_num(event)} id={event.get('id', '?')} — fetching harsh event details")
             harsh_data = await _fetch_samsara_harsh_event(
                 event["_samsara_vehicle_id"], event["_samsara_timestamp_ms"]
             )
