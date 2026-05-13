@@ -66,7 +66,7 @@ EVENT_TYPE_MAP = {
     "hard_brake":                   ("🛑", "HARD BRAKE"),
     "crash":                        ("💥", "CRASH DETECTED"),
     "cell_phone":                   ("📵", "CELL PHONE USAGE"),
-    "stop_sign_violation":          ("🛑", "STOP SIGN VIOLATION"),
+    "stop_sign_violation":          ("🛑", "ROLLING STOP"),
     "forward_collision_warning":    ("⚠️", "FORWARD COLLISION WARNING"),
     "unsafe_parking":               ("🅿️", "UNSAFE PARKING"),
     "speeding":                     ("🚨", "SPEEDING OVER POSTED"),
@@ -101,6 +101,9 @@ _SAMSARA_HARSH_TYPE_MAP: dict[str, str] = {
     "Generic Distraction": "inattentive_driving",
     "Tailgating":          "tailgating",
     "Harsh Turn":          "harsh_turn",
+    "Rolling Stop":        "stop_sign_violation",
+    "Did Not Stop":        "stop_sign_violation",
+    "Near Collision":      "forward_collision_warning",
 }
 
 

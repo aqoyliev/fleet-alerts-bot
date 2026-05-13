@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 
+from data import config
 from utils.db_api.companies import get_all_companies, get_company_groups
 from utils.db_api.violations import get_violations_by_type
 
@@ -33,7 +34,7 @@ _EVENT_LABEL = {
     "hard_brake":                    "Hard Brake",
     "crash":                         "Crash",
     "cell_phone":                    "Cell Phone Usage",
-    "stop_sign_violation":           "Stop Sign Violation",
+    "stop_sign_violation":           "Rolling Stop",
     "road_facing_cam_obstruction":   "Road Camera Obstructed",
     "driver_facing_cam_obstruction": "Driver Camera Obstructed",
     "forward_collision_warning":     "Forward Collision Warning",
@@ -87,6 +88,8 @@ async def send_daily_reports(bot: Bot):
     date_str = yesterday_start.strftime("%b %d, %Y")
 
     companies = await get_all_companies()
+    # Restrict to this bot's company so a shared DB doesn't cause cross-tenant sends.
+    companies = [c for c in companies if c["slug"] == config.COMPANY_SLUG]
     for company in companies:
         try:
             rows = await get_violations_by_type(company["slug"], since=yesterday_start, until=today_start)

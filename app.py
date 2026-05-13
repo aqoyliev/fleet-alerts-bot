@@ -21,7 +21,7 @@ async def on_startup(dispatcher):
     await init_pool()
     await set_default_commands(dispatcher)
     await on_startup_notify(dispatcher)
-    await start_webhook_server(bot, port=8080)
+    await start_webhook_server(bot, port=8081)
     asyncio.create_task(schedule_daily_reports(bot))
 
 
