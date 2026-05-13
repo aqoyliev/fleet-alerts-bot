@@ -1,12 +1,18 @@
+import os
+
 import asyncpg
 from data import config
 
 pool: asyncpg.Pool | None = None
+_SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schemas.sql")
 
 
 async def init_pool():
     global pool
     pool = await asyncpg.create_pool(config.DATABASE_URL)
+    with open(_SCHEMA_PATH, encoding="utf-8") as f:
+        async with pool.acquire() as conn:
+            await conn.execute(f.read())
 
 
 async def close_pool():
