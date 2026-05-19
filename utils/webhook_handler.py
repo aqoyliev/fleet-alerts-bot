@@ -51,6 +51,7 @@ EVENT_TYPE_MAP = {
     "forward_collision_warning":    ("⚠️", "FORWARD COLLISION WARNING"),
     "unsafe_parking":               ("🅿️", "UNSAFE PARKING"),
     "speeding":                     ("🚨", "SPEEDING OVER POSTED"),
+    "seat_belt_violation":          ("🔒", "SEAT BELT VIOLATION"),
 }
 
 # Only process these event types — everything else is ignored
