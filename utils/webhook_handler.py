@@ -53,6 +53,7 @@ EVENT_TYPE_MAP = {
     "speeding":                     ("🚨", "SPEEDING OVER POSTED"),
     "seat_belt_violation":          ("🔒", "SEAT BELT VIOLATION"),
     "aggregated_lane_swerving":     ("🔀", "LANE SWERVING"),
+    "near_miss":                    ("⚠️", "NEAR MISS"),
 }
 
 # Only process these event types — everything else is ignored
