@@ -408,7 +408,7 @@ def _format_crash_initial(event: dict) -> str:
     """First crash alert: the FULL details, sent the instant the crash is detected —
     before the video uploads. Everyone (groups and DMs) gets this, so the complete
     record is delivered even when no video ever resolves."""
-    return _format_event(event) + "\n\n📹 <i>Video to follow if available</i>"
+    return _format_event(event) + "\n\n📹 <i>Video pending…</i>"
 
 
 def _format_crash_video_caption(event: dict) -> str:
@@ -570,9 +570,14 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = ""):
         if crash_card_sent:
             # The full details already went out at first detection (to everyone). The
             # follow-up is ONLY the video, with a short caption. With no media there's
-            # nothing left to send — recipients already have the complete card.
+            # no clip to send — but the first alert's "Video pending…" line leaves
+            # recipients waiting, so send a short closure note so they know none is
+            # coming, to the same crash targets.
             if not media:
-                logger.info(f"[samsara] Crash had no media — full alert already sent, no follow-up id={event_id}")
+                logger.info(f"[samsara] Crash had no media — sending no-video closure note id={event_id}")
+                for chat_id in [*group_ids, *dm_ids]:
+                    await _send_text(bot, chat_id, "📹 <i>No video available for this crash.</i>",
+                                     retries=3, delay=5.0)
                 return
             if not crash_first_had_location and event.get("location"):
                 # The location wasn't ready for the first alert but is now — send the

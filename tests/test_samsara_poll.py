@@ -206,7 +206,7 @@ async def test_handle_event_crash_video_caption_falls_back_to_full_when_location
     assert all("I-95 N" in c.args[2] and "CRASH DETECTED" in c.args[2]
                for c in send_full.await_args_list)
 
-async def test_handle_event_crash_no_media_full_alert_to_all_no_followup(monkeypatch):
+async def test_handle_event_crash_no_media_full_alert_then_closure_note(monkeypatch):
     save, sent_text, send_full = _patch_handle_event_deps(monkeypatch, groups=[111], dms=[222])
     # Crash that never produces a clip → polls the full window, no media.
     monkeypatch.setattr(wh, "_http_session",
@@ -214,9 +214,13 @@ async def test_handle_event_crash_no_media_full_alert_to_all_no_followup(monkeyp
 
     await wh._handle_event(MagicMock(), _samsara_event(), company_slug="hf")
 
-    # Full details reached BOTH groups and DMs at first detection — admins are informed
-    # even with no video.
-    assert {cid for cid, _ in sent_text} == {111, 222}
-    assert all("CRASH DETECTED" in t and "I-95 N" in t for _, t in sent_text)
-    # No video → no second message to anyone (full card already delivered).
+    # First alert: full details reached BOTH groups and DMs at detection.
+    full_alerts = [(cid, t) for cid, t in sent_text if "CRASH DETECTED" in t]
+    assert {cid for cid, _ in full_alerts} == {111, 222}
+    assert all("I-95 N" in t for _, t in full_alerts)
+    # No video → no clip is sent (the video path stays untouched)...
     assert send_full.await_count == 0
+    # ...but a short closure note tells the SAME targets no video is coming, so they're
+    # not left waiting on the first alert's "Video pending…" line.
+    closure = [(cid, t) for cid, t in sent_text if "No video available" in t]
+    assert {cid for cid, _ in closure} == {111, 222}

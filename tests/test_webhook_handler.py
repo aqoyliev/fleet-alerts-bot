@@ -233,7 +233,7 @@ def test_format_crash_initial_is_full_card_plus_video_note():
     assert "<code>528609</code>" in out
     assert "📍 <b>Location:</b> I-95 N &amp; Exit 12" in out
     assert "D &amp; J" in out                      # escaped
-    assert "Video to follow" in out
+    assert "Video pending" in out
 
 def test_format_crash_video_caption_is_short():
     event = {"vehicle": {"number": "Unit 528609 D & J"}}
