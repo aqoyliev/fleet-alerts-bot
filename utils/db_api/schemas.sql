@@ -5,8 +5,18 @@ CREATE TABLE IF NOT EXISTS companies (
     slug                    VARCHAR(50)  UNIQUE NOT NULL,
     name                    VARCHAR(255) NOT NULL,
     speeding_min_severity   VARCHAR(20)  NOT NULL DEFAULT 'high',
+    -- Per-company Samsara credentials. NULL = company has no Samsara fleet.
+    -- API key is the bearer token used for the harsh-event poll callback;
+    -- webhook secret signs inbound Samsara webhooks (NULL = skip verification).
+    samsara_api_key         VARCHAR(255),
+    samsara_webhook_secret  VARCHAR(255),
     created_at              TIMESTAMPTZ  DEFAULT NOW()
 );
+
+-- Add Samsara columns to an existing companies table (CREATE TABLE IF NOT EXISTS
+-- above is a no-op when the table already exists, so these run for upgrades).
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS samsara_api_key        VARCHAR(255);
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS samsara_webhook_secret VARCHAR(255);
 
 CREATE TABLE IF NOT EXISTS company_groups (
     id                SERIAL PRIMARY KEY,
