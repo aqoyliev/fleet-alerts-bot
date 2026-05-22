@@ -185,6 +185,30 @@ def test_samsara_raw_body_without_v1_prefix_fails():
     assert _verify_hmac(_SECRET, _BODY, sig) is False
 
 
+# ── Motive webhook HMAC verification (HMAC-SHA1 hex, X-KT-Webhook-Signature) ───────
+# Motive's own documented example: payload + shared secret → expected signature. The
+# 40-char hex confirms SHA1, not SHA256 — the bug that 403'd every live Motive webhook.
+
+_MOTIVE_SECRET = "d9d36bea41c44ae49d1bfc4a48ba2abe"
+_MOTIVE_BODY = b'["fault_code_closed"]'
+_MOTIVE_SIG = "f04a8386a21a6cba0447024e83b3f0983352bb72"
+
+
+def test_motive_documented_example_verifies_with_sha1():
+    assert _verify_hmac(_MOTIVE_SECRET, _MOTIVE_BODY, _MOTIVE_SIG, hashlib.sha1) is True
+
+def test_motive_sha256_rejects_motive_signature():
+    # Regression guard: the default SHA256 path must NOT validate a SHA1 signature.
+    assert _verify_hmac(_MOTIVE_SECRET, _MOTIVE_BODY, _MOTIVE_SIG, hashlib.sha256) is False
+
+def test_motive_tampered_body_fails():
+    assert _verify_hmac(_MOTIVE_SECRET, _MOTIVE_BODY + b"x", _MOTIVE_SIG, hashlib.sha1) is False
+
+def test_motive_empty_signature_fails():
+    # Wrong/missing header → empty sig → must fail, never silently pass.
+    assert _verify_hmac(_MOTIVE_SECRET, _MOTIVE_BODY, "", hashlib.sha1) is False
+
+
 # ── Samsara harsh-event polling config ────────────────────────────────────────────
 
 def test_inward_only_types_are_producible_by_harsh_type_map():

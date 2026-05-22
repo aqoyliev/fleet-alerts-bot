@@ -151,12 +151,17 @@ def _kph_to_mph(kph: float) -> float:
     return kph * 0.621371
 
 
-def _verify_hmac(secret: str, body: bytes, provided: str) -> bool:
-    """Constant-time HMAC-SHA256 verification. Tries raw string key and base64-decoded key, hex and base64 output."""
+def _verify_hmac(secret: str, body: bytes, provided: str, digestmod=hashlib.sha256) -> bool:
+    """Constant-time HMAC verification. Tries raw string key and base64-decoded key, hex
+    and base64 output. digestmod selects the hash: Samsara signs with SHA256, Motive (née
+    KeepTruckin) with SHA1."""
     import base64
 
+    if not provided:
+        return False
+
     def _check(key: bytes) -> bool:
-        mac = hmac.new(key, body, hashlib.sha256)
+        mac = hmac.new(key, body, digestmod)
         return (
             hmac.compare_digest(mac.hexdigest(), provided)
             or hmac.compare_digest(base64.b64encode(mac.digest()).decode(), provided)
@@ -845,8 +850,11 @@ async def motive_webhook(request: web.Request) -> web.Response:
         body_bytes = await request.read()
 
         if config.MOTIVE_WEBHOOK_SECRET:
-            sig = request.headers.get("X-Motive-Hmac-Sha256", "")
-            if not _verify_hmac(config.MOTIVE_WEBHOOK_SECRET, body_bytes, sig):
+            # Motive (formerly KeepTruckin) signs with an HMAC-SHA1 hex digest of the raw
+            # body, delivered in the X-KT-Webhook-Signature header. NOT SHA256, and NOT an
+            # X-Motive-* header — the old code used both, so every real webhook 403'd.
+            sig = request.headers.get("X-KT-Webhook-Signature", "")
+            if not _verify_hmac(config.MOTIVE_WEBHOOK_SECRET, body_bytes, sig, hashlib.sha1):
                 logger.warning(f"[motive] Invalid HMAC signature from {request.remote}")
                 return web.Response(text="Forbidden", status=403)
 
