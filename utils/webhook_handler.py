@@ -163,6 +163,12 @@ def _verify_hmac(secret: str, body: bytes, provided: str) -> bool:
         return False
 
 
+def _samsara_signed_payload(timestamp: str, body: bytes) -> bytes:
+    """The exact message Samsara signs for its v1 webhook signature: the literal
+    'v1:', the X-Samsara-Timestamp header, and the raw request body, colon-joined."""
+    return b"v1:" + timestamp.encode() + b":" + body
+
+
 async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int) -> dict | None:
     """Poll harsh event API every 20s for up to 2 minutes, waiting for both video URLs."""
     url = f"https://api.samsara.com/v1/fleet/vehicles/{vehicle_id}/safety/harsh_event"
@@ -667,8 +673,16 @@ async def samsara_webhook(request: web.Request) -> web.Response:
         body_bytes = await request.read()
 
         if config.SAMSARA_WEBHOOK_SECRET:
-            sig = request.headers.get("X-Samsara-Hmac-Sha256", "")
-            if not _verify_hmac(config.SAMSARA_WEBHOOK_SECRET, body_bytes, sig):
+            # Samsara's documented v1 scheme (verified against live webhooks on the hf
+            # deployment): header is "X-Samsara-Signature: v1=<hex>" and the signed
+            # message is "v1:<timestamp>:<body>", not the raw body. The old code signed
+            # the raw body under an X-Samsara-Hmac-Sha256 header that Samsara never sends,
+            # so enabling the secret would have 403'd every legitimate webhook.
+            sig_header = request.headers.get("X-Samsara-Signature", "")
+            provided = sig_header.split("=", 1)[1] if "=" in sig_header else sig_header
+            timestamp = request.headers.get("X-Samsara-Timestamp", "")
+            signed_payload = _samsara_signed_payload(timestamp, body_bytes)
+            if not _verify_hmac(config.SAMSARA_WEBHOOK_SECRET, signed_payload, provided):
                 logger.warning(f"[samsara] Invalid HMAC signature from {request.remote}")
                 return web.Response(text="Forbidden", status=403)
 

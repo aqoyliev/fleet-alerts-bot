@@ -1,3 +1,7 @@
+import base64
+import hashlib
+import hmac
+
 from utils.webhook_handler import (
     ALLOWED_TYPES,
     _clean_vehicle,
@@ -5,6 +9,8 @@ from utils.webhook_handler import (
     _format_event,
     _get_event_type,
     _get_vehicle,
+    _samsara_signed_payload,
+    _verify_hmac,
 )
 
 
@@ -132,3 +138,43 @@ def test_format_event_escapes_driver_and_location():
     assert "5th & Main <St>" not in out
     # layout tags are still real HTML
     assert "<b>" in out and "</b>" in out
+
+
+# ── Samsara v1 webhook HMAC verification ──────────────────────────────────────────
+
+_SECRET = "supersecret"
+_TS = "1714382131519"
+_BODY = b'{"eventId":"86f91905-f4b7-4a32-8d63-26bece8b7cb2"}'
+
+
+def _samsara_sign(secret: str, timestamp: str, body: bytes) -> str:
+    """Reproduce what Samsara puts in X-Samsara-Signature: hex HMAC over v1:<ts>:<body>."""
+    msg = _samsara_signed_payload(timestamp, body)
+    return hmac.new(secret.encode(), msg, hashlib.sha256).hexdigest()
+
+def test_samsara_signed_payload_format():
+    assert _samsara_signed_payload("123", b"abc") == b"v1:123:abc"
+
+def test_samsara_valid_signature_verifies():
+    sig = _samsara_sign(_SECRET, _TS, _BODY)
+    assert _verify_hmac(_SECRET, _samsara_signed_payload(_TS, _BODY), sig) is True
+
+def test_samsara_base64_encoded_signature_verifies():
+    # Samsara may send the digest base64-encoded; _verify_hmac must accept that too.
+    msg = _samsara_signed_payload(_TS, _BODY)
+    sig_b64 = base64.b64encode(hmac.new(_SECRET.encode(), msg, hashlib.sha256).digest()).decode()
+    assert _verify_hmac(_SECRET, msg, sig_b64) is True
+
+def test_samsara_tampered_body_fails():
+    sig = _samsara_sign(_SECRET, _TS, _BODY)
+    assert _verify_hmac(_SECRET, _samsara_signed_payload(_TS, _BODY + b"x"), sig) is False
+
+def test_samsara_wrong_timestamp_fails():
+    # Replaying the body under a different timestamp must not validate.
+    sig = _samsara_sign(_SECRET, _TS, _BODY)
+    assert _verify_hmac(_SECRET, _samsara_signed_payload("9999999999999", _BODY), sig) is False
+
+def test_samsara_raw_body_without_v1_prefix_fails():
+    # Guards the regression: signing the raw body (the old scheme) must not pass.
+    sig = _samsara_sign(_SECRET, _TS, _BODY)
+    assert _verify_hmac(_SECRET, _BODY, sig) is False
