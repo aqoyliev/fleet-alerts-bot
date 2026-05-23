@@ -140,7 +140,9 @@ def patch_poll(monkeypatch):
 
     def _install(responses):
         session = _FakeSession(responses)
-        monkeypatch.setattr(wh.aiohttp, "ClientSession", lambda *a, **k: session)
+        # The poll now reuses one shared session via _get_http_session() instead of
+        # opening a ClientSession per call, so patch the accessor.
+        monkeypatch.setattr(wh, "_get_http_session", lambda: session)
         state["session"] = session
         return session
 
@@ -212,3 +214,101 @@ async def test_poll_on_first_hook_fires_once(patch_poll):
 
     await wh._fetch_samsara_harsh_event("v1", 1, "key", on_first=_on_first)
     assert seen == ["Crash"]  # exactly once, on the first typed response
+
+
+# ── resource-use optimizations ──────────────────────────────────────────────────
+
+def _async_const(value):
+    """An async function that ignores its args and returns `value`."""
+    async def _f(*_a, **_k):
+        return value
+    return _f
+
+
+class _FakeBot:
+    """Records which chats each send went to, so we can count per-recipient sends."""
+    def __init__(self):
+        self.video_calls = []
+        self.photo_calls = []
+        self.media_group_calls = []
+        self.message_calls = []
+
+    async def send_video(self, chat_id, media, caption=None, parse_mode=None):
+        self.video_calls.append(chat_id)
+
+    async def send_photo(self, chat_id, media, caption=None, parse_mode=None):
+        self.photo_calls.append(chat_id)
+
+    async def send_media_group(self, chat_id, media):
+        self.media_group_calls.append(chat_id)
+
+    async def send_message(self, chat_id, text, parse_mode=None, disable_web_page_preview=None):
+        self.message_calls.append(chat_id)
+
+
+def test_is_duplicate_suppresses_repeat_then_evicts_after_ttl(monkeypatch):
+    wh._seen_event_ids.clear()
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(wh.time, "monotonic", lambda: clock["now"])
+
+    assert wh._is_duplicate("evt-A") is False   # first sighting
+    assert wh._is_duplicate("evt-A") is True    # immediate redelivery suppressed
+    assert wh._is_duplicate("") is False        # empty id is never a duplicate
+
+    # Past the TTL window the stale entry is evicted from the front, so A is new again.
+    clock["now"] += wh._DEDUP_TTL + 1
+    assert wh._is_duplicate("evt-A") is False
+    assert len(wh._seen_event_ids) == 1         # only the fresh A remains; B-less, no leak
+
+
+async def test_download_media_downloads_each_url_once(monkeypatch):
+    calls = []
+
+    async def _fake_download(url):
+        calls.append(url)
+        return b"DATA-" + url.encode()
+
+    monkeypatch.setattr(wh, "_download", _fake_download)
+
+    media, is_video = await wh._download_media(["v1", "v2"], [])
+    assert calls == ["v1", "v2"]                 # each url fetched exactly once
+    assert media == [b"DATA-v1", b"DATA-v2"]
+    assert is_video is True
+
+    calls.clear()
+    media, is_video = await wh._download_media([], ["img1"])
+    assert calls == ["img1"]
+    assert is_video is False                     # images, not video
+
+
+async def test_handle_event_downloads_media_once_for_all_recipients(monkeypatch):
+    """The expensive provider download happens a single time and the bytes are reused
+    for every recipient — not re-downloaded per chat."""
+    downloads = []
+
+    async def _fake_download(url):
+        downloads.append(url)
+        return b"VIDEOBYTES"
+
+    monkeypatch.setattr(wh, "_download", _fake_download)
+    monkeypatch.setattr(wh, "get_company_name", _async_const("Co"))
+    monkeypatch.setattr(wh, "save_violation", _async_const(None))
+    monkeypatch.setattr(wh, "get_groups_for_event", _async_const([1, 2]))
+    monkeypatch.setattr(wh, "get_subscribed_admins", _async_const([3]))
+
+    bot = _FakeBot()
+    event = {
+        "id": "555",
+        "type": "hard_brake",
+        "vehicle": {"number": "TRUCK-1"},
+        "start_time": "2026-05-23T00:00:00Z",
+        "camera_media": {
+            "available": True,
+            "downloadable_videos": {"front_facing_plain_url": "http://vid/forward.mp4"},
+            "downloadable_images": {},
+        },
+    }
+    await wh._handle_event(bot, event, "co")
+
+    assert len(downloads) == 1                   # ONE download for the single clip...
+    assert bot.video_calls == [1, 2, 3]          # ...delivered to all three recipients
