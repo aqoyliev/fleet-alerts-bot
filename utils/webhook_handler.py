@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import time
+from collections import OrderedDict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -27,11 +28,38 @@ from utils.db_api.admins import get_subscribed_admins
 logger = logging.getLogger(__name__)
 
 _download_timeout = aiohttp.ClientTimeout(total=300)
+_samsara_poll_timeout = aiohttp.ClientTimeout(total=30)
+
+# Single shared aiohttp session reused for every outbound request (media downloads +
+# Samsara polls). Opening a ClientSession per request also stands up a fresh
+# connection pool each time and can't reuse keep-alive connections; one long-lived
+# session avoids that. Timeouts are passed per-request rather than on the session.
+# Created lazily inside the running loop; closed on server shutdown.
+_http_session: aiohttp.ClientSession | None = None
+
+
+def _get_http_session() -> aiohttp.ClientSession:
+    """Return the shared session, creating it on first use (or if it was closed)."""
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        _http_session = aiohttp.ClientSession()
+    return _http_session
+
+
+async def _close_http_session(*_a) -> None:
+    """Close the shared session. Wired into the aiohttp app's on_cleanup."""
+    global _http_session
+    if _http_session is not None and not _http_session.closed:
+        await _http_session.close()
+    _http_session = None
+
 
 # In-memory deduplication: event_id -> processed monotonic timestamp. Samsara (and
 # batched Motive) can redeliver, so a short TTL window suppresses immediate repeats;
-# the violations.event_id UNIQUE constraint is the durable backstop.
-_seen_event_ids: dict[str, float] = {}
+# the violations.event_id UNIQUE constraint is the durable backstop. An OrderedDict
+# keeps entries in first-seen order, so expired ones cluster at the oldest end and a
+# single front-eviction pass is amortized O(1) per webhook (vs. scanning every key).
+_seen_event_ids: "OrderedDict[str, float]" = OrderedDict()
 _DEDUP_TTL = 300  # seconds
 
 
@@ -40,9 +68,14 @@ def _is_duplicate(event_id: str) -> bool:
     if not event_id:
         return False
     now = time.monotonic()
-    for k in list(_seen_event_ids):
-        if now - _seen_event_ids[k] > _DEDUP_TTL:
-            del _seen_event_ids[k]
+    # Evict expired entries from the oldest end. Insertion order == time order, so we
+    # can stop at the first entry still inside the window.
+    while _seen_event_ids:
+        oldest = next(iter(_seen_event_ids))
+        if now - _seen_event_ids[oldest] > _DEDUP_TTL:
+            del _seen_event_ids[oldest]
+        else:
+            break
     if event_id in _seen_event_ids:
         return True
     _seen_event_ids[event_id] = now
@@ -68,11 +101,11 @@ def _event_id_to_bigint(raw) -> int | None:
 
 async def _download(url: str) -> bytes | None:
     try:
-        async with aiohttp.ClientSession(timeout=_download_timeout) as s:
-            async with s.get(url) as r:
-                if r.status == 200:
-                    return await r.read()
-                logger.error(f"Download failed HTTP {r.status}: {url}")
+        session = _get_http_session()
+        async with session.get(url, timeout=_download_timeout) as r:
+            if r.status == 200:
+                return await r.read()
+            logger.error(f"Download failed HTTP {r.status}: {url}")
     except Exception as e:
         logger.error(f"Download error: {e}")
     return None
@@ -354,52 +387,52 @@ async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int, api_key
     notified = False
     max_attempts = 3  # bumped to 15 once a Crash is detected
     attempt = 0
-    timeout = aiohttp.ClientTimeout(total=30)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        while attempt < max_attempts:
-            attempt += 1
-            await asyncio.sleep(20)
-            try:
-                async with session.get(url, headers=headers, params={"timestamp": timestamp_ms}) as r:
-                    if r.status != 200:
-                        logger.error(f"[samsara] harsh_event API HTTP {r.status} on attempt {attempt} — giving up")
-                        return None
-                    data = await r.json()
-                    last_data = data
-                    harsh_type = data.get("harshEventType") or ""
-                    if harsh_type == "Obstructed Camera":
-                        logger.info("[samsara] Obstructed Camera — skipping event")
-                        return None
-                    if harsh_type == "Crash" and not is_crash:
-                        is_crash = True
-                        max_attempts = 15  # ~5 min total at 20s intervals
-                        logger.info(f"[samsara] Crash detected — extending poll window to {max_attempts} attempts (~5 min)")
-                    # First response with a known type: let the caller persist + alert
-                    # before we keep waiting on the (possibly slow) video upload.
-                    if on_first is not None and not notified and harsh_type:
-                        notified = True
-                        try:
-                            await on_first(data)
-                        except Exception as e:
-                            logger.error(f"[samsara] on_first hook failed: {e}", exc_info=True)
-                    fwd = data.get("downloadForwardVideoUrl") or ""
-                    inward = data.get("downloadInwardVideoUrl") or ""
-                    resolved_type = _SAMSARA_HARSH_TYPE_MAP.get(harsh_type, "")
-                    if fwd and inward:
-                        logger.info(f"[samsara] Both video URLs ready on attempt {attempt} (type={harsh_type})")
-                        return data
-                    if resolved_type in _INWARD_ONLY_TYPES and inward:
-                        logger.info(f"[samsara] Inward-only type '{resolved_type}' ready on attempt {attempt} — short-circuit")
-                        return data
-                    if fwd or inward:
-                        ever_got_url = True
-                    if not is_crash and attempt == max_attempts and not ever_got_url:
-                        logger.warning(f"[samsara] No URLs after {attempt} attempts — sending with no media")
-                        return last_data
-                    tail = " — retrying in 20s" if attempt < max_attempts else ""
-                    logger.info(f"[samsara] Attempt {attempt}/{max_attempts} type={resolved_type or 'unknown'}: fwd={bool(fwd)} inward={bool(inward)}{tail}")
-            except Exception as e:
-                logger.error(f"[samsara] harsh_event API error attempt {attempt}: {e}")
+    session = _get_http_session()
+    while attempt < max_attempts:
+        attempt += 1
+        await asyncio.sleep(20)
+        try:
+            async with session.get(url, headers=headers, params={"timestamp": timestamp_ms},
+                                   timeout=_samsara_poll_timeout) as r:
+                if r.status != 200:
+                    logger.error(f"[samsara] harsh_event API HTTP {r.status} on attempt {attempt} — giving up")
+                    return None
+                data = await r.json()
+                last_data = data
+                harsh_type = data.get("harshEventType") or ""
+                if harsh_type == "Obstructed Camera":
+                    logger.info("[samsara] Obstructed Camera — skipping event")
+                    return None
+                if harsh_type == "Crash" and not is_crash:
+                    is_crash = True
+                    max_attempts = 15  # ~5 min total at 20s intervals
+                    logger.info(f"[samsara] Crash detected — extending poll window to {max_attempts} attempts (~5 min)")
+                # First response with a known type: let the caller persist + alert
+                # before we keep waiting on the (possibly slow) video upload.
+                if on_first is not None and not notified and harsh_type:
+                    notified = True
+                    try:
+                        await on_first(data)
+                    except Exception as e:
+                        logger.error(f"[samsara] on_first hook failed: {e}", exc_info=True)
+                fwd = data.get("downloadForwardVideoUrl") or ""
+                inward = data.get("downloadInwardVideoUrl") or ""
+                resolved_type = _SAMSARA_HARSH_TYPE_MAP.get(harsh_type, "")
+                if fwd and inward:
+                    logger.info(f"[samsara] Both video URLs ready on attempt {attempt} (type={harsh_type})")
+                    return data
+                if resolved_type in _INWARD_ONLY_TYPES and inward:
+                    logger.info(f"[samsara] Inward-only type '{resolved_type}' ready on attempt {attempt} — short-circuit")
+                    return data
+                if fwd or inward:
+                    ever_got_url = True
+                if not is_crash and attempt == max_attempts and not ever_got_url:
+                    logger.warning(f"[samsara] No URLs after {attempt} attempts — sending with no media")
+                    return last_data
+                tail = " — retrying in 20s" if attempt < max_attempts else ""
+                logger.info(f"[samsara] Attempt {attempt}/{max_attempts} type={resolved_type or 'unknown'}: fwd={bool(fwd)} inward={bool(inward)}{tail}")
+        except Exception as e:
+            logger.error(f"[samsara] harsh_event API error attempt {attempt}: {e}")
     logger.warning(f"[samsara] Gave up after {attempt} attempts (crash={is_crash}) — sending with available URLs")
     return last_data
 
@@ -642,8 +675,11 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
             if not video_urls and not image_urls and event.get("camera_media") is None and event_type != "speeding":
                 text += "\n\n📷 <i>No camera media available</i>"
 
+        # Download the media ONCE up front and reuse the bytes for every recipient,
+        # rather than re-downloading (potentially large crash clips) per chat.
+        media, is_video = await _download_media(video_urls, image_urls)
         for chat_id in [*group_ids, *dm_ids]:
-            await _send_with_retry(bot, chat_id, text, video_urls, image_urls)
+            await _send_with_retry(bot, chat_id, text, media, is_video)
 
     except Exception as e:
         logger.error(f"Event handling error: {e}", exc_info=True)
@@ -658,55 +694,57 @@ async def _migrate_group(old_id: int, new_id: int) -> None:
     logger.info(f"DB updated: group {old_id} → {new_id}")
 
 
-async def _send_with_retry(bot: Bot, chat_id: int, text: str, video_urls: list[str] = None,
-                           image_urls: list[str] = None, retries: int = 3, delay: float = 5.0):
-    """Send alert to a single chat. Tries videos/images by URL; falls back to text+links on failure."""
-    media_urls = video_urls or image_urls or []
+async def _download_media(video_urls: list[str], image_urls: list[str]) -> tuple[list[bytes], bool]:
+    """Download each media URL exactly once so the bytes can be reused for every
+    recipient, instead of re-downloading (potentially large) clips per chat.
+    Returns (downloaded_bytes_in_order, is_video)."""
+    urls = video_urls or image_urls or []
     is_video = bool(video_urls)
+    downloaded: list[bytes] = []
+    for i, url in enumerate(urls):
+        data = await _download(url)
+        if data:
+            logger.info(f"Downloaded {len(data)} bytes for media_{i+1}")
+            downloaded.append(data)
+        else:
+            logger.error(f"Download failed for {url}")
+    return downloaded, is_video
 
-    # Try sending media as a group by URL first
-    if media_urls:
+
+async def _send_with_retry(bot: Bot, chat_id: int, text: str, media: list[bytes] = None,
+                           is_video: bool = False, retries: int = 3, delay: float = 5.0):
+    """Send one alert to one chat. `media` is bytes already downloaded once for all
+    recipients (see _download_media); falls back to text only if the media send fails."""
+    if media:
         ext = "mp4" if is_video else "jpg"
         MediaType = InputMediaVideo if is_video else InputMediaPhoto
 
         async def _try_send_group(sources):
-            """sources: list of str (URL) or bytes (downloaded)."""
+            """sources: list of bytes; each is wrapped in a fresh stream per send."""
             if len(sources) == 1:
-                src = sources[0]
-                media = InputFile(io.BytesIO(src), filename=f"media_1.{ext}") if isinstance(src, bytes) else src
+                m = InputFile(io.BytesIO(sources[0]), filename=f"media_1.{ext}")
                 send_fn = bot.send_video if is_video else bot.send_photo
-                await send_fn(chat_id, media, caption=text, parse_mode="HTML")
+                await send_fn(chat_id, m, caption=text, parse_mode="HTML")
             else:
                 def _make(i, src):
-                    m = InputFile(io.BytesIO(src), filename=f"media_{i+1}.{ext}") if isinstance(src, bytes) else src
+                    m = InputFile(io.BytesIO(src), filename=f"media_{i+1}.{ext}")
                     return MediaType(m, caption=text if i == 0 else None, parse_mode="HTML" if i == 0 else None)
                 await bot.send_media_group(chat_id, [_make(i, s) for i, s in enumerate(sources)])
 
-        # Download all files, then send as a group
-        downloaded = []
-        for i, url in enumerate(media_urls):
-            data = await _download(url)
-            if data:
-                logger.info(f"Downloaded {len(data)} bytes for media_{i+1}")
-                downloaded.append(data)
-            else:
-                logger.error(f"Download failed for {url}")
-
-        if downloaded:
-            for attempt in range(3):
-                try:
-                    await _try_send_group(downloaded)
-                    return
-                except MigrateToChat as e:
-                    logger.warning(f"Group {chat_id} migrated to supergroup {e.migrate_to_chat_id} — updating DB and retrying")
-                    await _migrate_group(chat_id, e.migrate_to_chat_id)
-                    chat_id = e.migrate_to_chat_id
-                except RetryAfter as e:
-                    logger.warning(f"Flood control (media) for {chat_id}, waiting {e.timeout}s")
-                    await asyncio.sleep(e.timeout + 1)
-                except (TimeoutError, NetworkError, TelegramAPIError) as e:
-                    logger.warning(f"Media send failed for {chat_id} (attempt {attempt+1}/3): {e} — retrying")
-                    await asyncio.sleep(5)
+        for attempt in range(3):
+            try:
+                await _try_send_group(media)
+                return
+            except MigrateToChat as e:
+                logger.warning(f"Group {chat_id} migrated to supergroup {e.migrate_to_chat_id} — updating DB and retrying")
+                await _migrate_group(chat_id, e.migrate_to_chat_id)
+                chat_id = e.migrate_to_chat_id
+            except RetryAfter as e:
+                logger.warning(f"Flood control (media) for {chat_id}, waiting {e.timeout}s")
+                await asyncio.sleep(e.timeout + 1)
+            except (TimeoutError, NetworkError, TelegramAPIError) as e:
+                logger.warning(f"Media send failed for {chat_id} (attempt {attempt+1}/3): {e} — retrying")
+                await asyncio.sleep(5)
 
         # Last resort: text only so the alert is never lost
         logger.error(f"All media failed for {chat_id}, sending text only")
@@ -829,6 +867,8 @@ async def start_webhook_server(bot: Bot, port: int = 8080):
     app.router.add_post("/webhook/samsara/{company}", samsara_webhook)
     app.router.add_post("/webhook/{company}", motive_webhook)
     app.router.add_get("/health", lambda r: web.Response(text="OK"))
+    # Close the shared aiohttp session when the server shuts down.
+    app.on_cleanup.append(_close_http_session)
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
