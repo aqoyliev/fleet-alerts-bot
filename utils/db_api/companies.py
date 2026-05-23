@@ -75,6 +75,21 @@ async def get_groups_for_event(company_slug: str, event_type: str) -> list[int]:
     return [r["telegram_group_id"] for r in rows]
 
 
+async def get_samsara_credentials(slug: str) -> tuple[str | None, str | None]:
+    """Returns (samsara_api_key, samsara_webhook_secret) for the company, or (None, None).
+
+    Each company is a separate Samsara organization, so the API token (for the
+    harsh-event poll) and the webhook signing secret are stored per-company rather
+    than as a single global key."""
+    row = await db.fetchrow(
+        "SELECT samsara_api_key, samsara_webhook_secret FROM companies WHERE slug = $1",
+        slug,
+    )
+    if not row:
+        return None, None
+    return row["samsara_api_key"], row["samsara_webhook_secret"]
+
+
 async def get_speeding_min_severity(slug: str) -> str:
     """Returns the minimum severity level for speeding alerts (e.g., 'high', 'medium', 'critical')."""
     row = await db.fetchrow("SELECT speeding_min_severity FROM companies WHERE slug = $1", slug)
