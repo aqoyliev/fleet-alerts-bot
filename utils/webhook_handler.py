@@ -21,6 +21,7 @@ from utils.db_api.companies import (
     get_company_name,
     get_speeding_min_severity,
     get_samsara_credentials,
+    get_motive_webhook_secret,
 )
 from utils.db_api.violations import save_violation
 from utils.db_api.admins import get_subscribed_admins
@@ -338,7 +339,8 @@ def _format_crash_video_caption(event: dict) -> str:
 
 def _verify_hmac(secret: str, body: bytes, provided: str, digestmod=hashlib.sha256) -> bool:
     """Constant-time HMAC verification. Tries raw string key and base64-decoded key,
-    hex and base64 output. Samsara signs with SHA256."""
+    hex and base64 output. digestmod selects the hash: Samsara signs with SHA256,
+    Motive (née KeepTruckin) with SHA1."""
     import base64
 
     if not provided:
@@ -827,9 +829,22 @@ async def motive_webhook(request: web.Request) -> web.Response:
     """Receive Motive webhook POST, respond 200 immediately, process async."""
     try:
         company_slug = request.match_info.get("company", "gurman")
-        body = await request.json()
-
+        body_bytes = await request.read()
         bot: Bot = request.app["bot"]
+
+        secret = await get_motive_webhook_secret(company_slug)
+        if secret:
+            # Motive (formerly KeepTruckin) signs with an HMAC-SHA1 hex digest of the
+            # raw body, delivered in the X-KT-Webhook-Signature header. NOT SHA256, and
+            # NOT an X-Motive-* header.
+            sig = request.headers.get("X-KT-Webhook-Signature", "")
+            if not _verify_hmac(secret, body_bytes, sig, hashlib.sha1):
+                logger.warning(f"[motive] Invalid HMAC signature for company='{company_slug}' from {request.remote}")
+                return web.Response(text="Forbidden", status=403)
+        else:
+            logger.warning(f"[motive] No webhook secret for company='{company_slug}' — skipping signature check")
+
+        body = json.loads(body_bytes)
 
         # Verification ping — list of event type strings
         if isinstance(body, list) and all(isinstance(i, str) for i in body):

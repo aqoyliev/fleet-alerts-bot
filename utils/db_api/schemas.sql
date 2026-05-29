@@ -10,13 +10,18 @@ CREATE TABLE IF NOT EXISTS companies (
     -- webhook secret signs inbound Samsara webhooks (NULL = skip verification).
     samsara_api_key         VARCHAR(255),
     samsara_webhook_secret  VARCHAR(255),
+    -- Per-company Motive (née KeepTruckin) webhook signing secret. NULL = skip
+    -- verification. Motive signs with HMAC-SHA1 over the raw body in
+    -- X-KT-Webhook-Signature (NOT SHA256, and NOT an X-Motive-* header).
+    motive_webhook_secret   VARCHAR(255),
     created_at              TIMESTAMPTZ  DEFAULT NOW()
 );
 
--- Add Samsara columns to an existing companies table (CREATE TABLE IF NOT EXISTS
--- above is a no-op when the table already exists, so these run for upgrades).
+-- Add Samsara/Motive columns to an existing companies table (CREATE TABLE IF NOT
+-- EXISTS above is a no-op when the table already exists, so these run for upgrades).
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS samsara_api_key        VARCHAR(255);
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS samsara_webhook_secret VARCHAR(255);
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS motive_webhook_secret  VARCHAR(255);
 
 CREATE TABLE IF NOT EXISTS company_groups (
     id                SERIAL PRIMARY KEY,
