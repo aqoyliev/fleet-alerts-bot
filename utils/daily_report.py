@@ -73,13 +73,13 @@ async def send_daily_reports(bot: Bot):
 
 
 async def schedule_daily_reports(bot: Bot):
-    """Runs forever, sending the daily report at 8am ET each day."""
+    """Runs forever, sending the daily report at midnight ET each day."""
     while True:
         now_et = datetime.now(tz=ET)
-        next_8am = now_et.replace(hour=8, minute=0, second=0, microsecond=0)
-        if now_et >= next_8am:
-            next_8am += timedelta(days=1)
-        wait_seconds = (next_8am - now_et).total_seconds()
-        logger.info(f"Daily report scheduled in {wait_seconds:.0f}s (at {next_8am.strftime('%Y-%m-%d %H:%M %Z')})")
+        next_midnight = (now_et + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        wait_seconds = (next_midnight - now_et).total_seconds()
+        logger.info(f"Daily report scheduled in {wait_seconds:.0f}s (at {next_midnight.strftime('%Y-%m-%d %H:%M %Z')})")
         await asyncio.sleep(wait_seconds)
         await send_daily_reports(bot)
