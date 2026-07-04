@@ -18,6 +18,23 @@ async def is_super_admin(telegram_id: int) -> bool:
     return bool(row and row["is_active"] and row["is_super"])
 
 
+async def seed_super_admins(telegram_ids: list[int]) -> None:
+    """Ensure every bootstrap id from config.ADMINS exists as an active super admin.
+
+    Runs on startup so a brand-new deployment has a working super admin without any
+    manual DB step. Uses ON CONFLICT DO NOTHING — an id that already exists is left
+    exactly as-is, so a super admin who later stepped down via transfer is NOT
+    re-promoted on the next restart."""
+    from utils.db_api.users import ensure_user
+    for tid in telegram_ids:
+        await ensure_user(tid)
+        await db.execute(
+            "INSERT INTO admins (telegram_id, is_super, is_active) VALUES ($1, TRUE, TRUE) "
+            "ON CONFLICT (telegram_id) DO NOTHING",
+            tid,
+        )
+
+
 async def add_admin(telegram_id: int, added_by: int | None = None, is_super: bool = False) -> int:
     """Creates an admin record. User must already exist in users table. Returns admin id."""
     return await db.fetchval(

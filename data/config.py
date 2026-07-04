@@ -26,8 +26,10 @@ COMPANY_NAME = env.str("COMPANY_NAME")            # display name, e.g. "HF Truck
 # receives EVERY unit's alerts. Each driver's own group (auto-registered when the
 # bot is added, keyed by the unit number parsed from its title/description) receives
 # only that unit's alerts, on top of this one. Telegram group ids are negative.
-# Leave 0/unset if there is no all-fleet main group.
-MAIN_GROUP_ID = env.int("MAIN_GROUP_ID", 0) or None
+# Leave blank/unset if there is no all-fleet main group. Read as a string first so an
+# empty value (MAIN_GROUP_ID=) is treated as "unset" rather than crashing startup.
+_main_group_raw = env.str("MAIN_GROUP_ID", "").strip()
+MAIN_GROUP_ID = int(_main_group_raw) if _main_group_raw else None
 
 # Minimum severity a speeding event must reach to be alerted ("low"/"medium"/"high"/"critical").
 SPEEDING_MIN_SEVERITY = env.str("SPEEDING_MIN_SEVERITY", "high")
