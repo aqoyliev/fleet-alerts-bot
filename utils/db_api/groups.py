@@ -1,4 +1,5 @@
 from data import config
+from data.event_catalog import next_event_filter
 from utils.db_api import db
 
 
@@ -15,7 +16,8 @@ async def get_groups_for_event(event_type: str, vehicle_number: str | None = Non
         """
         SELECT g.telegram_group_id
         FROM alert_groups g
-        WHERE (
+        WHERE COALESCE(g.enabled, TRUE)
+          AND (
                   ($2::text   IS NOT NULL AND g.vehicle_number = $2)
                OR ($3::bigint IS NOT NULL AND g.telegram_group_id = $3)
               )
@@ -30,11 +32,12 @@ async def get_groups_for_event(event_type: str, vehicle_number: str | None = Non
 
 
 async def get_all_groups() -> list[int]:
-    """Returns the groups that should receive the all-fleet daily report: the main /
-    catch-all groups (vehicle_number IS NULL). Driver groups are per-unit and are
+    """Returns the groups that should receive the all-fleet daily report: the enabled
+    main / catch-all groups (vehicle_number IS NULL). Driver groups are per-unit and are
     intentionally left out of the company-wide digest."""
     rows = await db.fetch(
-        "SELECT telegram_group_id FROM alert_groups WHERE vehicle_number IS NULL"
+        "SELECT telegram_group_id FROM alert_groups "
+        "WHERE vehicle_number IS NULL AND COALESCE(enabled, TRUE)"
     )
     return [r["telegram_group_id"] for r in rows]
 
@@ -53,6 +56,60 @@ async def register_group(telegram_group_id: int, title: str | None,
         """,
         telegram_group_id, title, vehicle_number,
     )
+
+
+async def get_group(telegram_group_id: int) -> dict | None:
+    """Return the full registration row for a group, or None if it isn't registered."""
+    row = await db.fetchrow(
+        """
+        SELECT id, telegram_group_id, title, vehicle_number, COALESCE(enabled, TRUE) AS enabled
+        FROM alert_groups WHERE telegram_group_id = $1
+        """,
+        telegram_group_id,
+    )
+    return dict(row) if row else None
+
+
+async def set_group_enabled(telegram_group_id: int, enabled: bool) -> None:
+    """Mute (enabled=False) or unmute (enabled=True) a group's alerts."""
+    await db.execute(
+        "UPDATE alert_groups SET enabled = $2 WHERE telegram_group_id = $1",
+        telegram_group_id, enabled,
+    )
+
+
+async def remove_group(telegram_group_id: int) -> None:
+    """Unregister a group (its group_event_types rows cascade away). The bot stays in
+    the chat; the group simply stops receiving alerts until re-registered."""
+    await db.execute(
+        "DELETE FROM alert_groups WHERE telegram_group_id = $1", telegram_group_id
+    )
+
+
+async def set_group_event_types(telegram_group_id: int, event_types: set[str]) -> None:
+    """Replace a group's event-type allowlist. An empty set clears the filter, which
+    (per get_groups_for_event) means the group receives every type."""
+    group_id = await db.fetchval(
+        "SELECT id FROM alert_groups WHERE telegram_group_id = $1", telegram_group_id
+    )
+    if group_id is None:
+        return
+    await db.execute("DELETE FROM group_event_types WHERE group_id = $1", group_id)
+    for event_type in event_types:
+        await db.execute(
+            "INSERT INTO group_event_types (group_id, event_type) VALUES ($1, $2) "
+            "ON CONFLICT DO NOTHING",
+            group_id, event_type,
+        )
+
+
+async def toggle_group_event_type(telegram_group_id: int, event_type: str) -> list[str]:
+    """Toggle one event type in a group's filter and persist. Returns the new allowlist
+    (empty = all types), which the caller uses to redraw the toggle keyboard."""
+    current = set(await get_group_event_types(telegram_group_id))
+    updated = next_event_filter(current, event_type)
+    await set_group_event_types(telegram_group_id, updated)
+    return sorted(updated)
 
 
 async def ensure_main_group() -> None:

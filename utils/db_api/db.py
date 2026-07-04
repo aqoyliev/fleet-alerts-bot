@@ -15,6 +15,7 @@ pool: asyncpg.Pool | None = None
 _MIGRATIONS = [
     "ALTER TABLE alert_groups ADD COLUMN IF NOT EXISTS title VARCHAR(255)",
     "ALTER TABLE alert_groups ADD COLUMN IF NOT EXISTS vehicle_number VARCHAR(50)",
+    "ALTER TABLE alert_groups ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE",
     "CREATE UNIQUE INDEX IF NOT EXISTS alert_groups_tgid ON alert_groups (telegram_group_id)",
     "CREATE INDEX IF NOT EXISTS alert_groups_vehicle ON alert_groups (vehicle_number)",
 ]

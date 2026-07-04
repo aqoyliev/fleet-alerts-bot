@@ -5,17 +5,23 @@ from zoneinfo import ZoneInfo
 
 from aiogram import types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.exceptions import MessageNotModified
 
 from loader import dp, bot
 from data import config
-from utils.db_api.groups import group_exists, get_group_event_types, register_group
-from utils.db_api.admins import get_all_admins
+from utils.db_api.groups import (
+    group_exists, get_group_event_types, register_group, get_group,
+    set_group_enabled, remove_group, set_group_event_types, toggle_group_event_type,
+)
+from utils.db_api.admins import get_all_admins, is_admin
 from utils.db_api.violations import get_violations_by_type, get_top_violators
 from utils.group_parser import extract_vehicle_number
 from utils.webhook_handler import EVENT_TYPE_MAP
+from keyboards.inline.group_settings import group_events_keyboard
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
+GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
 
 
 def _report_text(company_name: str, rows: list[dict], date_str: str) -> str:
@@ -205,3 +211,127 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
 
     elif removed:
         logger.info(f"Bot removed from {chat.type} '{chat.title}' (id={chat.id})")
+
+
+# ── Manual group management ─────────────────────────────────────────────────────────
+
+async def _require_admin_group(message: types.Message) -> bool:
+    """Guard for admin-only group commands: caller must be a bot admin and the group
+    must be registered. Replies with the reason and returns False when either fails."""
+    if not await is_admin(message.from_user.id):
+        await message.reply("⛔ Only bot admins can do that.")
+        return False
+    if not await group_exists(message.chat.id):
+        await message.reply("This group isn't configured. Set its unit with /setunit first.")
+        return False
+    return True
+
+
+@dp.message_handler(commands=["setunit"], chat_type=GROUP_TYPES)
+async def cmd_setunit(message: types.Message):
+    """Manually set (or correct) this group's unit number — open to anyone in the group,
+    for when the bot couldn't auto-detect it from the name/description."""
+    if config.MAIN_GROUP_ID is not None and message.chat.id == config.MAIN_GROUP_ID:
+        await message.reply("This is the main group — it receives every unit and can't be tied to one.")
+        return
+
+    unit = (message.get_args() or "").strip().lstrip("#").strip()
+    if not unit or not any(c.isdigit() for c in unit) or len(unit) > 50:
+        await message.reply("Usage: <code>/setunit 1234</code>", parse_mode="HTML")
+        return
+
+    await register_group(message.chat.id, message.chat.title or "", unit)
+    await message.reply(
+        f"✅ Unit set to <code>{unit}</code>. This group will now receive unit {unit}'s alerts.",
+        parse_mode="HTML",
+    )
+    logger.info(f"Unit for group {message.chat.id} set to {unit} by {message.from_user.id}")
+
+
+@dp.message_handler(commands=["disable", "mute"], chat_type=GROUP_TYPES)
+async def cmd_disable(message: types.Message):
+    """Mute this group's alerts (admin only). Notifies all admins once."""
+    if not await _require_admin_group(message):
+        return
+    await set_group_enabled(message.chat.id, False)
+    await message.reply("🔕 Alerts <b>disabled</b> for this group. Use /enable to turn them back on.", parse_mode="HTML")
+
+    grp = await get_group(message.chat.id)
+    unit = (grp or {}).get("vehicle_number")
+    label = (grp or {}).get("title") or message.chat.title or "a group"
+    unit_str = f" (unit {unit})" if unit else ""
+    who = message.from_user.full_name
+    text = (
+        "🔕 <b>Group alerts muted</b>\n\n"
+        f"<b>{label}</b>{unit_str} (id <code>{message.chat.id}</code>) was muted by {who}."
+    )
+    for admin_id in await _admin_ids():
+        try:
+            await bot.send_message(admin_id, text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to notify admin {admin_id} of mute: {e}")
+
+
+@dp.message_handler(commands=["enable", "unmute"], chat_type=GROUP_TYPES)
+async def cmd_enable(message: types.Message):
+    """Unmute this group's alerts (admin only)."""
+    if not await _require_admin_group(message):
+        return
+    await set_group_enabled(message.chat.id, True)
+    await message.reply("🔔 Alerts <b>enabled</b> for this group.", parse_mode="HTML")
+
+
+@dp.message_handler(commands=["removegroup"], chat_type=GROUP_TYPES)
+async def cmd_removegroup(message: types.Message):
+    """Unregister this group (admin only). The bot stays in the chat but sends nothing
+    until it's re-registered with /setunit."""
+    if not await _require_admin_group(message):
+        return
+    await remove_group(message.chat.id)
+    await message.reply(
+        "🗑 This group has been <b>unregistered</b> and will no longer receive alerts.\n"
+        "Use /setunit to register it again.",
+        parse_mode="HTML",
+    )
+    logger.info(f"Group {message.chat.id} unregistered by {message.from_user.id}")
+
+
+def _events_text() -> str:
+    return (
+        "🎛 <b>Event types for this group</b>\n\n"
+        "Tap to toggle. ✅ = received, ⬜ = blocked.\n"
+        "When everything is ✅ the group receives every event type (including new ones)."
+    )
+
+
+@dp.message_handler(commands=["events"], chat_type=GROUP_TYPES)
+async def cmd_events(message: types.Message):
+    """Admin-only control of which event types this group receives."""
+    if not await _require_admin_group(message):
+        return
+    allowed = await get_group_event_types(message.chat.id)
+    await message.reply(_events_text(), parse_mode="HTML", reply_markup=group_events_keyboard(allowed))
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("grpevt:"))
+async def cb_group_events(call: types.CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        await call.answer("⛔ Admins only.", show_alert=True)
+        return
+    if not await group_exists(call.message.chat.id):
+        await call.answer("This group isn't configured.", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    action = parts[1]
+    if action == "all":
+        await set_group_event_types(call.message.chat.id, set())
+        allowed = []
+    else:  # "tog"
+        allowed = await toggle_group_event_type(call.message.chat.id, parts[2])
+
+    try:
+        await call.message.edit_reply_markup(reply_markup=group_events_keyboard(allowed))
+    except MessageNotModified:
+        pass
+    await call.answer()

@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS alert_groups (
     label             VARCHAR(100),
     title             VARCHAR(255),
     vehicle_number    VARCHAR(50),
+    enabled           BOOLEAN     DEFAULT TRUE,
     created_at        TIMESTAMPTZ DEFAULT NOW()
 );
 
