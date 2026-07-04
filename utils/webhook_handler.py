@@ -638,7 +638,8 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
                 severity=_event_severity(event),
             )
 
-        group_ids = await get_groups_for_event(event_type)
+        # Route to the matching driver group (by unit) plus the main group.
+        group_ids = await get_groups_for_event(event_type, (_get_vehicle(event) or "").strip())
         dm_ids = await get_subscribed_admins(event_type)
         if event_type == "crash":
             # Crash alerts go to subscribed DMs only — never to groups.

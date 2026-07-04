@@ -6,10 +6,12 @@ from zoneinfo import ZoneInfo
 from aiogram import types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from loader import dp
+from loader import dp, bot
 from data import config
-from utils.db_api.groups import group_exists, get_group_event_types
+from utils.db_api.groups import group_exists, get_group_event_types, register_group
+from utils.db_api.admins import get_all_admins
 from utils.db_api.violations import get_violations_by_type, get_top_violators
+from utils.group_parser import extract_vehicle_number
 from utils.webhook_handler import EVENT_TYPE_MAP
 
 logger = logging.getLogger(__name__)
@@ -130,12 +132,76 @@ async def cmd_event_list(message: types.Message):
     await message.reply(text, parse_mode="HTML")
 
 
+async def _admin_ids() -> list[int]:
+    """Active admin Telegram ids (DB admins ∪ bootstrap super-admins from config)."""
+    ids: set[int] = set()
+    try:
+        ids.update(a["telegram_id"] for a in await get_all_admins() if a["is_active"])
+    except Exception as e:
+        logger.error(f"Could not load admins for notify: {e}")
+    for a in config.ADMINS:
+        try:
+            ids.add(int(a))
+        except (TypeError, ValueError):
+            pass
+    return list(ids)
+
+
+async def _notify_admins_parse_failure(chat: types.Chat, title: str, description: str):
+    """DM the admins that a group couldn't be auto-registered because no unit number
+    was found, so they can fix its name/description and re-add the bot."""
+    text = (
+        "⚠️ <b>Couldn't register a group</b>\n\n"
+        f"I was added to <b>{title or 'a group'}</b> "
+        f"(id <code>{chat.id}</code>) but couldn't find a unit number in its name or "
+        "description.\n\n"
+        "Add the unit number (e.g. <code>UNIT: 1234</code> or <code>TRUCK# 1234</code>) "
+        "to the group name or description, then remove and re-add me."
+    )
+    for admin_id in await _admin_ids():
+        try:
+            await bot.send_message(admin_id, text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to notify admin {admin_id} of parse failure: {e}")
+
+
 @dp.my_chat_member_handler()
 async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
     old = update.old_chat_member.status
     new = update.new_chat_member.status
     chat = update.chat
-    if new in ("member", "administrator") and old in ("left", "kicked"):
+
+    added = new in ("member", "administrator") and old in ("left", "kicked")
+    removed = new in ("left", "kicked") and old in ("member", "administrator")
+
+    if added:
         logger.info(f"Bot added to {chat.type} '{chat.title}' (id={chat.id})")
-    elif new in ("left", "kicked") and old in ("member", "administrator"):
+
+        # The membership update carries the title but not the description — fetch the
+        # full chat so we can parse both.
+        description = ""
+        try:
+            full = await bot.get_chat(chat.id)
+            description = full.description or ""
+        except Exception as e:
+            logger.warning(f"Could not fetch chat {chat.id} description: {e}")
+
+        title = chat.title or ""
+        vehicle = extract_vehicle_number(title, description)
+        is_main = config.MAIN_GROUP_ID is not None and chat.id == config.MAIN_GROUP_ID
+
+        if vehicle is None and not is_main:
+            logger.warning(f"No unit number for group '{title}' (id={chat.id}) — not registering")
+            await _notify_admins_parse_failure(chat, title, description)
+            return
+
+        # Main group registers with a NULL vehicle (receives all units); driver groups
+        # register with their parsed unit number.
+        await register_group(chat.id, title, None if is_main else vehicle)
+        if is_main:
+            logger.info(f"Registered MAIN group (id={chat.id})")
+        else:
+            logger.info(f"Registered group id={chat.id} → unit {vehicle}")
+
+    elif removed:
         logger.info(f"Bot removed from {chat.type} '{chat.title}' (id={chat.id})")

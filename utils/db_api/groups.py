@@ -1,33 +1,73 @@
+from data import config
 from utils.db_api import db
 
 
-async def get_groups_for_event(event_type: str) -> list[int]:
-    """Returns telegram_group_ids that should receive this event type.
+async def get_groups_for_event(event_type: str, vehicle_number: str | None = None) -> list[int]:
+    """Returns telegram_group_ids that should receive this event.
 
-    A group with no group_event_types rows receives every type; otherwise it only
-    receives the types explicitly listed for it.
+    Two kinds of group qualify:
+      • the main group (config.MAIN_GROUP_ID) — receives every unit's alerts, and
+      • the driver group whose vehicle_number matches this event's unit.
+    Either way the group's optional group_event_types filter still applies: a group with
+    no rows there receives every type; otherwise only the types listed for it.
     """
     rows = await db.fetch(
         """
         SELECT g.telegram_group_id
         FROM alert_groups g
-        WHERE NOT EXISTS (
-                  SELECT 1 FROM group_event_types WHERE group_id = g.id
+        WHERE (
+                  ($2::text   IS NOT NULL AND g.vehicle_number = $2)
+               OR ($3::bigint IS NOT NULL AND g.telegram_group_id = $3)
               )
-           OR EXISTS (
-                  SELECT 1 FROM group_event_types
-                  WHERE group_id = g.id AND event_type = $1
+          AND (
+                  NOT EXISTS (SELECT 1 FROM group_event_types WHERE group_id = g.id)
+               OR EXISTS (SELECT 1 FROM group_event_types WHERE group_id = g.id AND event_type = $1)
               )
         """,
-        event_type,
+        event_type, vehicle_number, config.MAIN_GROUP_ID,
     )
     return [r["telegram_group_id"] for r in rows]
 
 
 async def get_all_groups() -> list[int]:
-    """Returns every configured alert group's telegram_group_id (used for daily reports)."""
-    rows = await db.fetch("SELECT telegram_group_id FROM alert_groups")
+    """Returns the groups that should receive the all-fleet daily report: the main /
+    catch-all groups (vehicle_number IS NULL). Driver groups are per-unit and are
+    intentionally left out of the company-wide digest."""
+    rows = await db.fetch(
+        "SELECT telegram_group_id FROM alert_groups WHERE vehicle_number IS NULL"
+    )
     return [r["telegram_group_id"] for r in rows]
+
+
+async def register_group(telegram_group_id: int, title: str | None,
+                         vehicle_number: str | None) -> None:
+    """Insert (or update) a group registration. Called when the bot is added to a group;
+    vehicle_number is the parsed unit for driver groups, or NULL for the main group."""
+    await db.execute(
+        """
+        INSERT INTO alert_groups (telegram_group_id, title, vehicle_number)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (telegram_group_id) DO UPDATE
+            SET title = EXCLUDED.title,
+                vehicle_number = EXCLUDED.vehicle_number
+        """,
+        telegram_group_id, title, vehicle_number,
+    )
+
+
+async def ensure_main_group() -> None:
+    """Guarantee config.MAIN_GROUP_ID exists as a (NULL-vehicle) row so it receives all
+    alerts and works with /report even if the bot was never re-added after configuring it."""
+    if not config.MAIN_GROUP_ID:
+        return
+    await db.execute(
+        """
+        INSERT INTO alert_groups (telegram_group_id, vehicle_number)
+        VALUES ($1, NULL)
+        ON CONFLICT (telegram_group_id) DO NOTHING
+        """,
+        config.MAIN_GROUP_ID,
+    )
 
 
 async def group_exists(telegram_group_id: int) -> bool:

@@ -22,6 +22,13 @@ DATABASE_URL = env.str("DATABASE_URL")
 COMPANY_SLUG = env.str("COMPANY_SLUG")            # short id, e.g. "hf" — used in report filenames
 COMPANY_NAME = env.str("COMPANY_NAME")            # display name, e.g. "HF Trucking"
 
+# The company's single "main" Telegram group — the dispatcher/office chat that
+# receives EVERY unit's alerts. Each driver's own group (auto-registered when the
+# bot is added, keyed by the unit number parsed from its title/description) receives
+# only that unit's alerts, on top of this one. Telegram group ids are negative.
+# Leave 0/unset if there is no all-fleet main group.
+MAIN_GROUP_ID = env.int("MAIN_GROUP_ID", 0) or None
+
 # Minimum severity a speeding event must reach to be alerted ("low"/"medium"/"high"/"critical").
 SPEEDING_MIN_SEVERITY = env.str("SPEEDING_MIN_SEVERITY", "high")
 

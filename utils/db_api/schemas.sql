@@ -31,12 +31,21 @@ CREATE TABLE IF NOT EXISTS admin_subscriptions (
 );
 
 -- Telegram groups that receive this company's alerts.
+--
+-- vehicle_number ties a group to a single unit: driver groups (auto-registered when
+-- the bot is added, parsed from the group title/description) carry the unit number and
+-- receive only that unit's alerts. The main group (config.MAIN_GROUP_ID) has a NULL
+-- vehicle_number and receives every unit's alerts.
 CREATE TABLE IF NOT EXISTS alert_groups (
     id                SERIAL      PRIMARY KEY,
-    telegram_group_id BIGINT      NOT NULL,
+    telegram_group_id BIGINT      NOT NULL UNIQUE,
     label             VARCHAR(100),
+    title             VARCHAR(255),
+    vehicle_number    VARCHAR(50),
     created_at        TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS alert_groups_vehicle ON alert_groups (vehicle_number);
 
 -- Optional per-group event-type filter. A group with no rows here receives every type.
 CREATE TABLE IF NOT EXISTS group_event_types (
