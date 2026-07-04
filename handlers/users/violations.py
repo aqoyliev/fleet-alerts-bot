@@ -6,13 +6,11 @@ from aiogram import types
 from aiogram.utils.exceptions import MessageCantBeEdited, MessageNotModified
 
 from loader import dp
+from data import config
 from utils.db_api.admins import is_admin, is_super_admin
-from utils.db_api.companies import get_accessible_companies
 from utils.db_api.violations import get_top_violators, get_vehicle_events
-from utils.db_api.companies import get_company_name as _get_company_name
 from utils.webhook_handler import EVENT_TYPE_MAP
 from keyboards.inline.violations import (
-    companies_keyboard,
     event_type_keyboard,
     top10_keyboard,
     PERIOD_LABELS,
@@ -67,12 +65,11 @@ async def _edit_or_send(call: types.CallbackQuery, text: str, reply_markup, pars
         await call.message.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
 
 
-async def _show_top10(call: types.CallbackQuery, company_slug: str, period: str, event_type: str):
-    company_name = await _get_company_name(company_slug) or company_slug
+async def _show_top10(call: types.CallbackQuery, period: str, event_type: str):
     since, until = _period_range(period)
-    rows = await get_top_violators(company_slug, since, until=until, event_type=event_type, limit=10)
-    text = _format_top10_text(rows, PERIOD_LABELS[period], company_name, event_type)
-    kb = top10_keyboard(rows, company_slug, period, event_type)
+    rows = await get_top_violators(since, until=until, event_type=event_type, limit=10)
+    text = _format_top10_text(rows, PERIOD_LABELS[period], config.COMPANY_NAME, event_type)
+    kb = top10_keyboard(rows, period, event_type)
     await _edit_or_send(call, text, kb)
     await call.answer()
 
@@ -82,47 +79,16 @@ async def show_violations_menu(message: types.Message):
     if not await is_admin(message.from_user.id):
         await message.answer("⛔ Access denied.")
         return
-    companies = await get_accessible_companies(message.from_user.id)
-    if not companies:
-        await message.answer("No companies configured.")
-        return
-    await message.answer("Select a company:", reply_markup=companies_keyboard(companies))
-
-
-# Back: to company list
-@dp.callback_query_handler(lambda c: c.data == "viol_bk_co")
-async def cb_back_companies(call: types.CallbackQuery):
-    if not await is_admin(call.from_user.id):
-        await call.answer("⛔ Access denied.", show_alert=True)
-        return
-    companies = await get_accessible_companies(call.from_user.id)
-    await _edit_or_send(call, "Select a company:", companies_keyboard(companies), parse_mode=None)
-    await call.answer()
+    await message.answer("Select event type:", reply_markup=event_type_keyboard())
 
 
 # Back: to event type selection
-@dp.callback_query_handler(lambda c: c.data.startswith("viol_bk_et:"))
+@dp.callback_query_handler(lambda c: c.data == "viol_bk_et")
 async def cb_back_event_type(call: types.CallbackQuery):
     if not await is_admin(call.from_user.id):
         await call.answer("⛔ Access denied.", show_alert=True)
         return
-    company_slug = call.data.split(":")[1]
-    await _edit_or_send(call, "Select event type:", event_type_keyboard(company_slug), parse_mode=None)
-    await call.answer()
-
-
-# Company selected → event type
-@dp.callback_query_handler(lambda c: c.data.startswith("viol_company:"))
-async def cb_company(call: types.CallbackQuery):
-    if not await is_admin(call.from_user.id):
-        await call.answer("⛔ Access denied.", show_alert=True)
-        return
-    company_slug = call.data.split(":")[1]
-    companies = await get_accessible_companies(call.from_user.id)
-    if not any(c["slug"] == company_slug for c in companies):
-        await call.answer("⛔ Access denied.", show_alert=True)
-        return
-    await _edit_or_send(call, "Select event type:", event_type_keyboard(company_slug), parse_mode=None)
+    await _edit_or_send(call, "Select event type:", event_type_keyboard(), parse_mode=None)
     await call.answer()
 
 
@@ -132,8 +98,8 @@ async def cb_event_type(call: types.CallbackQuery):
     if not await is_admin(call.from_user.id):
         await call.answer("⛔ Access denied.", show_alert=True)
         return
-    _, company_slug, event_type = call.data.split(":")
-    await _show_top10(call, company_slug, "last_week", event_type)
+    event_type = call.data.split(":")[1]
+    await _show_top10(call, "last_week", event_type)
 
 
 # Period toggle
@@ -142,8 +108,8 @@ async def cb_period_toggle(call: types.CallbackQuery):
     if not await is_admin(call.from_user.id):
         await call.answer("⛔ Access denied.", show_alert=True)
         return
-    _, company_slug, event_type, period = call.data.split(":")
-    await _show_top10(call, company_slug, period, event_type)
+    _, event_type, period = call.data.split(":")
+    await _show_top10(call, period, event_type)
 
 
 # Download full report
@@ -153,16 +119,15 @@ async def cb_download(call: types.CallbackQuery):
         await call.answer("⛔ Access denied.", show_alert=True)
         return
     parts = call.data.split(":")
-    company_slug = parts[1]
-    period = parts[2]
-    event_type = parts[3]
+    period = parts[1]
+    event_type = parts[2]
 
     await call.answer("Generating report...")
     super_admin = await is_super_admin(call.from_user.id)
 
-    company_name = await _get_company_name(company_slug) or company_slug
+    company_name = config.COMPANY_NAME
     since, until = _period_range(period)
-    rows = await get_top_violators(company_slug, since, until=until, event_type=event_type, limit=50)
+    rows = await get_top_violators(since, until=until, event_type=event_type, limit=50)
 
     now = datetime.now(tz=ET)
     date_range = f"{since.strftime('%b %d')} — {until.strftime('%b %d, %Y')}"
@@ -182,7 +147,7 @@ async def cb_download(call: types.CallbackQuery):
     rank = 1
     for row in rows:
         unit = row["vehicle_number"]
-        events = await get_vehicle_events(company_slug, unit, since, until=until, event_type=event_type)
+        events = await get_vehicle_events(unit, since, until=until, event_type=event_type)
 
         if event_type == "speeding":
             by_date: dict[str, list[str]] = {}
@@ -218,7 +183,7 @@ async def cb_download(call: types.CallbackQuery):
         rank += 1
 
     content = "\n".join(lines).encode("utf-8")
-    filename = f"{company_slug}_{period}_report.txt"
+    filename = f"{config.COMPANY_SLUG}_{period}_report.txt"
     await call.message.answer_document(
         types.InputFile(io.BytesIO(content), filename=filename),
         caption=f"📊 {company_name} — {PERIOD_LABELS[period]}"

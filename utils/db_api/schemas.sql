@@ -1,41 +1,9 @@
--- Motive Alerts Bot — Database Schema
-
-CREATE TABLE IF NOT EXISTS companies (
-    id                      SERIAL PRIMARY KEY,
-    slug                    VARCHAR(50)  UNIQUE NOT NULL,
-    name                    VARCHAR(255) NOT NULL,
-    speeding_min_severity   VARCHAR(20)  NOT NULL DEFAULT 'high',
-    -- Per-company Samsara credentials. NULL = company has no Samsara fleet.
-    -- API key is the bearer token used for the harsh-event poll callback;
-    -- webhook secret signs inbound Samsara webhooks (NULL = skip verification).
-    samsara_api_key         VARCHAR(255),
-    samsara_webhook_secret  VARCHAR(255),
-    -- Per-company Motive (née KeepTruckin) webhook signing secret. NULL = skip
-    -- verification. Motive signs with HMAC-SHA1 over the raw body in
-    -- X-KT-Webhook-Signature (NOT SHA256, and NOT an X-Motive-* header).
-    motive_webhook_secret   VARCHAR(255),
-    created_at              TIMESTAMPTZ  DEFAULT NOW()
-);
-
--- Add Samsara/Motive columns to an existing companies table (CREATE TABLE IF NOT
--- EXISTS above is a no-op when the table already exists, so these run for upgrades).
-ALTER TABLE companies ADD COLUMN IF NOT EXISTS samsara_api_key        VARCHAR(255);
-ALTER TABLE companies ADD COLUMN IF NOT EXISTS samsara_webhook_secret VARCHAR(255);
-ALTER TABLE companies ADD COLUMN IF NOT EXISTS motive_webhook_secret  VARCHAR(255);
-
-CREATE TABLE IF NOT EXISTS company_groups (
-    id                SERIAL PRIMARY KEY,
-    company_id        INT         REFERENCES companies(id) ON DELETE CASCADE,  -- NULL = all companies
-    telegram_group_id BIGINT      NOT NULL,
-    label             VARCHAR(100),
-    created_at        TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS group_event_types (
-    group_id   INT         NOT NULL REFERENCES company_groups(id) ON DELETE CASCADE,
-    event_type VARCHAR(50) NOT NULL,
-    PRIMARY KEY (group_id, event_type)
-);
+-- Fleet Alerts Bot — Database Schema (single-company build)
+--
+-- This deployment serves exactly ONE company; its identity and provider
+-- credentials come from the .env file (see data/config.py), so there is no
+-- `companies` table here. Everything below is scoped implicitly to that one
+-- company.
 
 CREATE TABLE IF NOT EXISTS users (
     telegram_id   BIGINT       PRIMARY KEY,
@@ -55,28 +23,37 @@ CREATE TABLE IF NOT EXISTS admins (
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS admin_companies (
-    admin_id   INT NOT NULL REFERENCES admins(id)    ON DELETE CASCADE,
-    company_id INT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-    PRIMARY KEY (admin_id, company_id)
-);
-
+-- Per-admin personal DM subscriptions. event_type = 'all' subscribes to every type.
 CREATE TABLE IF NOT EXISTS admin_subscriptions (
     admin_id   INT         NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
     event_type VARCHAR(50) NOT NULL,
     PRIMARY KEY (admin_id, event_type)
 );
 
-CREATE TABLE IF NOT EXISTS violations (
-    id           BIGSERIAL    PRIMARY KEY,
-    company_slug VARCHAR(50)  NOT NULL,
-    vehicle_number VARCHAR(50) NOT NULL,
-    event_type   VARCHAR(50)  NOT NULL,
-    event_id     BIGINT       UNIQUE,
-    severity     VARCHAR(20),
-    occurred_at  TIMESTAMPTZ  NOT NULL,
-    created_at   TIMESTAMPTZ  DEFAULT NOW()
+-- Telegram groups that receive this company's alerts.
+CREATE TABLE IF NOT EXISTS alert_groups (
+    id                SERIAL      PRIMARY KEY,
+    telegram_group_id BIGINT      NOT NULL,
+    label             VARCHAR(100),
+    created_at        TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS violations_company_occurred ON violations (company_slug, occurred_at);
+-- Optional per-group event-type filter. A group with no rows here receives every type.
+CREATE TABLE IF NOT EXISTS group_event_types (
+    group_id   INT         NOT NULL REFERENCES alert_groups(id) ON DELETE CASCADE,
+    event_type VARCHAR(50) NOT NULL,
+    PRIMARY KEY (group_id, event_type)
+);
+
+CREATE TABLE IF NOT EXISTS violations (
+    id             BIGSERIAL    PRIMARY KEY,
+    vehicle_number VARCHAR(50)  NOT NULL,
+    event_type     VARCHAR(50)  NOT NULL,
+    event_id       BIGINT       UNIQUE,
+    severity       VARCHAR(20),
+    occurred_at    TIMESTAMPTZ  NOT NULL,
+    created_at     TIMESTAMPTZ  DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS violations_occurred ON violations (occurred_at);
 CREATE INDEX IF NOT EXISTS violations_vehicle ON violations (vehicle_number);

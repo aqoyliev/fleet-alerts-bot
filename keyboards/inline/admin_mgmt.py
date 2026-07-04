@@ -27,11 +27,6 @@ def admin_detail_keyboard(admin: dict) -> InlineKeyboardMarkup:
         InlineKeyboardButton(toggle_label, callback_data=f"adm_toggle_active:{admin['id']}"),
         InlineKeyboardButton("🗑 Remove", callback_data=f"adm_remove:{admin['id']}"),
     )
-    if not admin["is_super"]:
-        kb.add(InlineKeyboardButton(
-            "🏢 Manage Companies",
-            callback_data=f"adm_companies:{admin['id']}",
-        ))
     kb.add(InlineKeyboardButton("◀ Back to List", callback_data="adm_bk_list"))
     return kb
 
@@ -42,20 +37,4 @@ def admin_remove_confirm_keyboard(admin_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("✅ Yes, Remove", callback_data=f"adm_remove_confirm:{admin_id}"),
         InlineKeyboardButton("❌ Cancel", callback_data=f"adm_detail:{admin_id}"),
     )
-    return kb
-
-
-def admin_companies_keyboard(
-    admin_id: int,
-    all_companies: list[dict],
-    assigned_ids: list[int],
-) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup(row_width=1)
-    for c in all_companies:
-        icon = "✅" if c["id"] in assigned_ids else "❌"
-        kb.add(InlineKeyboardButton(
-            f"{icon} {c['name']}",
-            callback_data=f"adm_co_toggle:{admin_id}:{c['id']}",
-        ))
-    kb.add(InlineKeyboardButton("◀ Back", callback_data=f"adm_bk_detail:{admin_id}"))
     return kb

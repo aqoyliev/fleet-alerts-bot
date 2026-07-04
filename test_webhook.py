@@ -15,11 +15,14 @@ import unittest.mock as mock
 
 data_pkg = types.ModuleType("data")
 config_mod = types.ModuleType("data.config")
-config_mod.MOTIVE_API_KEY = "test"
-config_mod.GROUP_CHAT_ID = 0
 config_mod.ADMINS = []
 config_mod.BOT_TOKEN = "test"
-config_mod.IP = "localhost"
+config_mod.COMPANY_SLUG = "testco"
+config_mod.COMPANY_NAME = "Test Co"
+config_mod.SPEEDING_MIN_SEVERITY = "high"
+config_mod.SAMSARA_API_KEY = ""
+config_mod.SAMSARA_WEBHOOK_SECRET = ""
+config_mod.MOTIVE_WEBHOOK_SECRET = ""
 data_pkg.config = config_mod
 sys.modules["data"] = data_pkg
 sys.modules["data.config"] = config_mod

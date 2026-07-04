@@ -16,13 +16,7 @@ from aiogram.types import InputFile, InputMediaVideo, InputMediaPhoto
 from aiogram.utils.exceptions import NetworkError, TelegramAPIError, RetryAfter, MigrateToChat
 
 from data import config
-from utils.db_api.companies import (
-    get_groups_for_event,
-    get_company_name,
-    get_speeding_min_severity,
-    get_samsara_credentials,
-    get_motive_webhook_secret,
-)
+from utils.db_api.groups import get_groups_for_event, migrate_group
 from utils.db_api.violations import save_violation
 from utils.db_api.admins import get_subscribed_admins
 
@@ -521,15 +515,14 @@ def _parse_samsara(body: dict) -> tuple[str, dict]:
     return "", {}
 
 
-async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
-                        samsara_api_key: str | None = None):
+async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = None):
     """Filter → format → send to Telegram (URLs sent directly, no download).
 
     For Samsara harsh events (those carrying `_samsara_vehicle_id`), first poll the
     harsh-event API to resolve the real type, location and video before continuing.
     Motive events skip that branch entirely and behave exactly as before."""
     try:
-        company_display = await get_company_name(company_slug) or company_slug.title()
+        company_display = config.COMPANY_NAME
 
         # Set once we persist the row at the first poll response, so the post-poll
         # save below is skipped (and records which type we already committed).
@@ -556,7 +549,6 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
                 first_loc = (data.get("location") or {}).get("address") or ""
                 first_event = {**event, "type": rtype, "location": first_loc, "camera_media": None}
                 await save_violation(
-                    company_slug=company_slug,
                     vehicle_number=_get_vehicle(first_event),
                     event_type=rtype,
                     event_id=_event_id_to_bigint(event.get("id")),
@@ -567,7 +559,7 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
                 logger.info(f"[samsara] Persisted {rtype} early (id={event.get('id')}) before media resolved")
                 if rtype == "crash":
                     # Crash alerts go to subscribed DMs only — never to groups.
-                    targets = await get_subscribed_admins("crash", company_slug)
+                    targets = await get_subscribed_admins("crash")
                     text = _format_crash_initial(first_event, company_display)
                     for cid in targets:
                         await _send_with_retry(bot, cid, text)
@@ -626,11 +618,11 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
         if event_type == "speeding":
             meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
             sev = meta_sev or (event.get("severity") or "").strip().lower()
-            min_sev = await get_speeding_min_severity(company_slug)
+            min_sev = config.SPEEDING_MIN_SEVERITY
             min_idx = SEVERITY_ORDER.index(min_sev) if min_sev in SEVERITY_ORDER else 2
             allowed_severities = set(SEVERITY_ORDER[min_idx:])
             if sev and sev not in allowed_severities:
-                logger.info(f"Ignored speeding event {event_id} severity='{sev}' (below threshold for {company_slug})")
+                logger.info(f"Ignored speeding event {event_id} severity='{sev}' (below threshold)")
                 return
 
         logger.info(f"Processing event {event_id} type={event_type}")
@@ -639,7 +631,6 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
         # helpers as the hook so the row is identical either way.
         if persisted_type is None:
             await save_violation(
-                company_slug=company_slug,
                 vehicle_number=_get_vehicle(event),
                 event_type=event_type,
                 event_id=_event_id_to_bigint(event.get("id")),
@@ -647,13 +638,13 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
                 severity=_event_severity(event),
             )
 
-        group_ids = await get_groups_for_event(company_slug, event_type)
-        dm_ids = await get_subscribed_admins(event_type, company_slug)
+        group_ids = await get_groups_for_event(event_type)
+        dm_ids = await get_subscribed_admins(event_type)
         if event_type == "crash":
             # Crash alerts go to subscribed DMs only — never to groups.
             group_ids = []
         if not group_ids and not dm_ids:
-            logger.info(f"No targets for company='{company_slug}' event='{event_type}' — skipping")
+            logger.info(f"No targets for event='{event_type}' — skipping")
             return
 
         video_urls, image_urls = _get_camera_media_info(event)
@@ -691,11 +682,7 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
 
 
 async def _migrate_group(old_id: int, new_id: int) -> None:
-    from utils.db_api import db
-    await db.execute(
-        "UPDATE company_groups SET telegram_group_id = $1 WHERE telegram_group_id = $2",
-        new_id, old_id,
-    )
+    await migrate_group(old_id, new_id)
     logger.info(f"DB updated: group {old_id} → {new_id}")
 
 
@@ -787,15 +774,15 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, media: list[bytes]
 
 
 async def samsara_webhook(request: web.Request) -> web.Response:
-    """Receive a Samsara webhook POST for a specific company, respond 200 immediately,
-    process async. The company comes from the URL (/webhook/samsara/{company}); its
-    Samsara API key + webhook secret are looked up per-company in the DB."""
+    """Receive a Samsara webhook POST, respond 200 immediately, process async. This
+    deployment serves a single company; its Samsara API key + webhook secret come from
+    the environment (config.SAMSARA_*)."""
     try:
-        company_slug = request.match_info.get("company", "")
         body_bytes = await request.read()
         bot: Bot = request.app["bot"]
 
-        api_key, secret = await get_samsara_credentials(company_slug)
+        api_key = config.SAMSARA_API_KEY or None
+        secret = config.SAMSARA_WEBHOOK_SECRET
 
         if secret:
             # Samsara v1 scheme: header "X-Samsara-Signature: v1=<hex>", signed message
@@ -805,10 +792,10 @@ async def samsara_webhook(request: web.Request) -> web.Response:
             timestamp = request.headers.get("X-Samsara-Timestamp", "")
             signed_payload = _samsara_signed_payload(timestamp, body_bytes)
             if not _verify_hmac(secret, signed_payload, provided):
-                logger.warning(f"[samsara] Invalid HMAC signature for company='{company_slug}' from {request.remote}")
+                logger.warning(f"[samsara] Invalid HMAC signature from {request.remote}")
                 return web.Response(text="Forbidden", status=403)
         else:
-            logger.warning(f"[samsara] No webhook secret for company='{company_slug}' — skipping signature check")
+            logger.warning("[samsara] No webhook secret configured — skipping signature check")
 
         body = json.loads(body_bytes)
         event_id = body.get("eventId") or ""
@@ -821,7 +808,7 @@ async def samsara_webhook(request: web.Request) -> web.Response:
             logger.info(f"[samsara] Ignored eventType='{body.get('eventType')}' resolved='{event_type}'")
             return web.Response(text="OK", status=200)
 
-        asyncio.create_task(_handle_event(bot, normalized, company_slug, api_key))
+        asyncio.create_task(_handle_event(bot, normalized, api_key))
         return web.Response(text="OK", status=200)
     except Exception as e:
         logger.error(f"[samsara] Webhook error: {e}", exc_info=True)
@@ -831,21 +818,20 @@ async def samsara_webhook(request: web.Request) -> web.Response:
 async def motive_webhook(request: web.Request) -> web.Response:
     """Receive Motive webhook POST, respond 200 immediately, process async."""
     try:
-        company_slug = request.match_info.get("company", "gurman")
         body_bytes = await request.read()
         bot: Bot = request.app["bot"]
 
-        secret = await get_motive_webhook_secret(company_slug)
+        secret = config.MOTIVE_WEBHOOK_SECRET
         if secret:
             # Motive (formerly KeepTruckin) signs with an HMAC-SHA1 hex digest of the
             # raw body, delivered in the X-KT-Webhook-Signature header. NOT SHA256, and
             # NOT an X-Motive-* header.
             sig = request.headers.get("X-KT-Webhook-Signature", "")
             if not _verify_hmac(secret, body_bytes, sig, hashlib.sha1):
-                logger.warning(f"[motive] Invalid HMAC signature for company='{company_slug}' from {request.remote}")
+                logger.warning(f"[motive] Invalid HMAC signature from {request.remote}")
                 return web.Response(text="Forbidden", status=403)
         else:
-            logger.warning(f"[motive] No webhook secret for company='{company_slug}' — skipping signature check")
+            logger.warning("[motive] No webhook secret configured — skipping signature check")
 
         body = json.loads(body_bytes)
 
@@ -869,7 +855,7 @@ async def motive_webhook(request: web.Request) -> web.Response:
             event_type = _get_event_type(event)
             if event_type not in ALLOWED_TYPES:
                 logger.debug(f"Unhandled event type='{event_type}' keys={list(event.keys())} payload={json.dumps(event, default=str)[:500]}")
-            asyncio.create_task(_handle_event(bot, event, company_slug))
+            asyncio.create_task(_handle_event(bot, event))
 
         return web.Response(text="OK", status=200)
     except Exception as e:
@@ -880,10 +866,10 @@ async def motive_webhook(request: web.Request) -> web.Response:
 async def start_webhook_server(bot: Bot, port: int = 8080):
     app = web.Application()
     app["bot"] = bot
-    # Samsara is a distinct 3-segment path (/webhook/samsara/{company}); the 2-segment
-    # Motive route below can't shadow it. Registered first for clarity.
-    app.router.add_post("/webhook/samsara/{company}", samsara_webhook)
-    app.router.add_post("/webhook/{company}", motive_webhook)
+    # Single-company build: fixed routes, no per-company path segment. Point this
+    # company's Motive and Samsara dashboards at these two URLs.
+    app.router.add_post("/webhook/samsara", samsara_webhook)
+    app.router.add_post("/webhook/motive", motive_webhook)
     app.router.add_get("/health", lambda r: web.Response(text="OK"))
     # Close the shared aiohttp session when the server shuts down.
     app.on_cleanup.append(_close_http_session)
