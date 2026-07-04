@@ -32,5 +32,6 @@ async def bot_help(message: types.Message):
             "\n\n🔑 <b>Super Admin Features:</b>",
             "Use <b>👥 Admins</b> from the main menu to add, activate, deactivate, and remove admins.",
             "To add someone: tap <b>➕ Add Admin</b>, then forward a message from them, share their contact, or send their numeric ID. If forwarding is blocked by their privacy/Premium settings, ask them to send /myid and paste the number.",
+            "You can't remove yourself. To step down, open your own entry and tap <b>🔁 Transfer super admin</b> to hand the role to another admin.",
         ]
     await message.answer("\n".join(text), parse_mode="HTML")

@@ -2,7 +2,7 @@ from aiogram import types
 from aiogram.dispatcher import FSMContext
 from aiogram.utils.exceptions import MessageCantBeEdited, MessageNotModified
 
-from loader import dp
+from loader import dp, bot
 from states.admin_mgmt import AdminAdd
 from utils.db_api.admins import (
     is_admin,
@@ -12,6 +12,7 @@ from utils.db_api.admins import (
     set_admin_active,
     delete_admin,
     add_admin,
+    transfer_super_admin,
 )
 from utils.db_api.users import ensure_user
 from keyboards.inline.admin_mgmt import (
@@ -19,7 +20,10 @@ from keyboards.inline.admin_mgmt import (
     admin_detail_keyboard,
     admin_remove_confirm_keyboard,
     add_admin_cancel_keyboard,
+    admin_transfer_choose_keyboard,
+    admin_transfer_confirm_keyboard,
 )
+from keyboards.default.main_menu import main_menu_keyboard
 
 LIST_TITLE = "👥 <b>Admins</b>\n\nSelect an admin to view."
 
@@ -71,7 +75,8 @@ async def _show_admin_detail(call: types.CallbackQuery, admin_id: int, is_super:
         await call.answer("Admin not found.", show_alert=True)
         await _show_admin_list(call, is_super)
         return
-    await _edit_or_send(call, _format_admin_detail(admin), admin_detail_keyboard(admin, is_super))
+    is_self = admin["telegram_id"] == call.from_user.id
+    await _edit_or_send(call, _format_admin_detail(admin), admin_detail_keyboard(admin, is_super, is_self))
 
 
 # ── Entry point (all admins; super admins additionally get controls) ────────────────
@@ -175,6 +180,85 @@ async def cb_adm_remove_confirm(call: types.CallbackQuery):
     await delete_admin(admin_id)
     await call.answer("Admin removed.")
     await _show_admin_list(call, is_super=True)
+
+
+# ── Transfer super admin (a super admin steps down to a chosen admin) ───────────────
+
+@dp.callback_query_handler(lambda c: c.data == "adm_transfer_start")
+async def cb_adm_transfer_start(call: types.CallbackQuery):
+    if not await is_super_admin(call.from_user.id):
+        await call.answer("⛔ Super admins only.", show_alert=True)
+        return
+    admins = await get_all_admins()
+    targets = [
+        a for a in admins
+        if a["is_active"] and not a["is_super"] and a["telegram_id"] != call.from_user.id
+    ]
+    if not targets:
+        await call.answer("No eligible admin to transfer to. Add an active admin first.", show_alert=True)
+        return
+    text = (
+        "🔁 <b>Transfer super admin</b>\n\n"
+        "Choose who becomes the super admin. You will step down to a regular admin and "
+        "lose management access."
+    )
+    await _edit_or_send(call, text, admin_transfer_choose_keyboard(targets))
+    await call.answer()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("adm_transfer_to:"))
+async def cb_adm_transfer_to(call: types.CallbackQuery):
+    if not await is_super_admin(call.from_user.id):
+        await call.answer("⛔ Super admins only.", show_alert=True)
+        return
+    admin_id = int(call.data.split(":")[1])
+    target = await get_admin_by_id(admin_id)
+    if not target or not target["is_active"] or target["is_super"]:
+        await call.answer("That admin can't receive the role.", show_alert=True)
+        await _show_admin_list(call, is_super=True)
+        return
+    uname = f" (@{target['username']})" if target["username"] else ""
+    text = (
+        f"⚠️ Transfer <b>super admin</b> to <b>{target['full_name']}</b>{uname}?\n\n"
+        "They gain full control. You become a regular admin and lose management access.\n"
+        "This cannot be undone by you afterward."
+    )
+    await _edit_or_send(call, text, admin_transfer_confirm_keyboard(admin_id))
+    await call.answer()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("adm_transfer_confirm:"))
+async def cb_adm_transfer_confirm(call: types.CallbackQuery):
+    if not await is_super_admin(call.from_user.id):
+        await call.answer("⛔ Super admins only.", show_alert=True)
+        return
+    admin_id = int(call.data.split(":")[1])
+    target = await get_admin_by_id(admin_id)
+    if not target or not target["is_active"] or target["is_super"]:
+        await call.answer("That admin can't receive the role.", show_alert=True)
+        await _show_admin_list(call, is_super=True)
+        return
+
+    await transfer_super_admin(call.from_user.id, admin_id)
+    await call.answer("✅ Super admin transferred.")
+
+    # Let the new super admin know and refresh their menu to the super layout.
+    try:
+        await bot.send_message(
+            target["telegram_id"],
+            "⭐ You are now the <b>super admin</b>. Open 👥 Admins to manage the team.",
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(is_super=True),
+        )
+    except Exception:
+        pass
+
+    # The actor is now a regular admin — show them the read-only list.
+    await _show_admin_list(call, is_super=False)
+    await call.message.answer(
+        "You are now a regular admin.",
+        reply_markup=main_menu_keyboard(is_super=False),
+    )
 
 
 # ── Add admin (super admins only) via FSM ───────────────────────────────────────────
