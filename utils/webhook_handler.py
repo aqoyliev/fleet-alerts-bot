@@ -13,8 +13,16 @@ from aiogram.types import InputFile, InputMediaVideo, InputMediaPhoto
 from data import config
 from utils.db_api.companies import get_groups_for_event
 from utils.db_api.violations import save_violation
+from utils.samsara.client import SamsaraClient
 
 logger = logging.getLogger(__name__)
+
+_samsara_token = getattr(config, "SAMSARA_API_TOKEN", "")
+_samsara = (
+    SamsaraClient(_samsara_token, getattr(config, "SAMSARA_API_URL", "https://api.samsara.com"))
+    if _samsara_token
+    else None
+)
 
 _download_timeout = aiohttp.ClientTimeout(total=300)
 
@@ -35,6 +43,11 @@ SEVERITY_EMOJI = {
     "medium": "🟡",
     "high": "🔴",
     "critical": "🆘",
+    # Samsara speeding severity levels
+    "light": "🟢",
+    "moderate": "🟡",
+    "heavy": "🔴",
+    "severe": "🆘",
 }
 
 # Exact Motive event type names → (emoji, display title)
@@ -95,13 +108,19 @@ def _get_vehicle(event: dict) -> str:
     )
 
 
-def _format_event(event: dict) -> str:
+def _format_event(event: dict, samsara: dict | None = None) -> str:
     event_type = _get_event_type(event)
     emoji, title = EVENT_TYPE_MAP.get(event_type, ("🚨", event_type.upper().replace("_", " ")))
 
+    samsara = samsara or {}
     vehicle = _get_vehicle(event)
     driver_info = event.get("driver") or {}
-    driver = driver_info.get("name") or driver_info.get("username") or "Unidentified"
+    driver = (
+        driver_info.get("name")
+        or driver_info.get("username")
+        or samsara.get("driver_name")
+        or "Unidentified"
+    )
 
     start_time = _to_et(event.get("start_time", ""))
     location = event.get("location", "")
@@ -110,7 +129,7 @@ def _format_event(event: dict) -> str:
 
     # Severity: prefer metadata.severity, then direct severity field; ignore coaching_status
     meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip()
-    sev_display = meta_sev or (event.get("severity") or "").strip()
+    sev_display = meta_sev or (event.get("severity") or "").strip() or (samsara.get("severity") or "").strip()
 
     lines = [f"{emoji} <b>{title}</b>\n"]
     lines.append(f"🚛 <b>Vehicle:</b> <code>{vehicle}</code>")
@@ -132,7 +151,18 @@ def _format_event(event: dict) -> str:
             lines.append(f"📈 <b>Max Over Posted:</b> {_kph_to_mph(over):.1f} mph")
         if duration:
             lines.append(f"⏱ <b>Duration:</b> {duration}s")
-        nominatim = event.get("nominatim_location", "")
+        # Samsara enrichment — fetched only when the webhook payload had no speed data
+        max_mph = samsara.get("max_speed_mph")
+        limit_mph = samsara.get("posted_limit_mph")
+        if max_mph:
+            lines.append(f"💨 <b>Max Speed:</b> {max_mph:.1f} mph")
+        if limit_mph:
+            lines.append(f"🚦 <b>Speed Limit:</b> {limit_mph:.1f} mph")
+        if max_mph and limit_mph:
+            lines.append(f"📈 <b>Over Posted:</b> {max_mph - limit_mph:.1f} mph")
+        if not duration and samsara.get("duration_seconds"):
+            lines.append(f"⏱ <b>Duration:</b> {samsara['duration_seconds']}s")
+        nominatim = event.get("nominatim_location", "") or samsara.get("location", "")
         if nominatim:
             lines.append(f"📍 <b>Location:</b> {nominatim}")
     else:
@@ -191,7 +221,20 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman"):
             logger.info(f"No groups configured for company='{company_slug}' event='{event_type}' — skipping")
             return
 
-        text = _format_event(event)
+        # Samsara alert webhooks carry no speed data — pull the matching
+        # speeding interval from the Samsara API before formatting.
+        samsara_details = None
+        if (
+            event_type == "speeding"
+            and _samsara
+            and not event.get("avg_vehicle_speed")
+            and not event.get("max_over_speed_in_kph")
+        ):
+            samsara_details = await _samsara.get_speeding_details(vehicle_number, occurred_at)
+            if samsara_details:
+                logger.info(f"Samsara enrichment for event {event_id}: {samsara_details}")
+
+        text = _format_event(event, samsara_details)
         video_urls, image_urls = _get_camera_media_info(event)
 
         if event.get("camera_media") is None and event_type != "speeding":
