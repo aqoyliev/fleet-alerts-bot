@@ -2,15 +2,30 @@ from utils.db_api import db
 
 
 async def save_violation(company_slug: str, vehicle_number: str, event_type: str,
-                         event_id: int | None, occurred_at) -> None:
+                         event_id: int | None, occurred_at, severity: str | None = None) -> None:
     await db.execute(
         """
-        INSERT INTO violations (company_slug, vehicle_number, event_type, event_id, occurred_at)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO violations (company_slug, vehicle_number, event_type, event_id, severity, occurred_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (event_id) DO NOTHING
         """,
-        company_slug, vehicle_number, event_type, event_id, occurred_at,
+        company_slug, vehicle_number, event_type, event_id, severity, occurred_at,
     )
+
+
+async def get_violations_by_type(company_slug: str, since, until) -> list[dict]:
+    """Returns (event_type, vehicle_number, count) for all violations in the window, ordered by type then count desc."""
+    rows = await db.fetch(
+        """
+        SELECT event_type, vehicle_number, COUNT(*) AS total
+        FROM violations
+        WHERE company_slug = $1 AND occurred_at >= $2 AND occurred_at < $3
+        GROUP BY event_type, vehicle_number
+        ORDER BY event_type, total DESC
+        """,
+        company_slug, since, until,
+    )
+    return [dict(r) for r in rows]
 
 
 async def get_top_violators(company_slug: str, since, until=None, event_type: str | None = None,
@@ -100,7 +115,7 @@ async def get_vehicle_events(company_slug: str, vehicle_number: str, since, unti
 
     rows = await db.fetch(
         f"""
-        SELECT event_type, occurred_at FROM violations
+        SELECT event_type, occurred_at, severity FROM violations
         WHERE company_slug = $1 AND vehicle_number = $2 AND occurred_at >= $3 AND occurred_at < $4
           {type_clause}
         ORDER BY occurred_at DESC

@@ -17,6 +17,22 @@ def _kph_to_mph(kph: float) -> float:
     return kph * 0.621371
 
 
+# One client per API key: each company is a separate Samsara org with its own
+# key (stored in the DB), and the vehicle name→id cache is per-org.
+_clients: dict[str, "SamsaraClient"] = {}
+
+
+async def fetch_speeding_details(api_key: str, vehicle_name: str, event_time: datetime,
+                                 vehicle_id: str = "") -> dict | None:
+    """Module-level entry point used by the webhook handler."""
+    if not api_key:
+        return None
+    client = _clients.get(api_key)
+    if client is None:
+        client = _clients[api_key] = SamsaraClient(api_key)
+    return await client.get_speeding_details(vehicle_name, event_time, vehicle_id=vehicle_id)
+
+
 def _parse_time(iso: str) -> datetime | None:
     try:
         return datetime.fromisoformat(iso.replace("Z", "+00:00"))
@@ -118,6 +134,7 @@ class SamsaraClient:
         self,
         vehicle_name: str,
         event_time: datetime,
+        vehicle_id: str = "",
         retries: int = 2,
         retry_delay: int = 20,
         match_window_minutes: int = 45,
@@ -127,10 +144,11 @@ class SamsaraClient:
         Speeding intervals carry the posted limit and severity but are only
         written at/after trip end, so for a live alert the GPS history
         (near-real-time ECU speed + reverse-geocoded location) is the usual
-        source. Returns dict(max_speed_mph, posted_limit_mph, severity,
-        duration_seconds, location, driver_name) or None.
+        source. `vehicle_id` (the Samsara asset id, when the webhook carried it)
+        skips the name→id lookup. Returns dict(max_speed_mph, posted_limit_mph,
+        severity, duration_seconds, location, driver_name) or None.
         """
-        vehicle_id = await self.get_vehicle_id(vehicle_name)
+        vehicle_id = vehicle_id or await self.get_vehicle_id(vehicle_name)
         if not vehicle_id:
             return None
 

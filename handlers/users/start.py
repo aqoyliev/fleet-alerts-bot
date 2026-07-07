@@ -3,7 +3,7 @@ from aiogram.dispatcher.filters.builtin import CommandStart
 
 from loader import dp
 from utils.db_api.users import upsert_user
-from utils.db_api.admins import is_admin
+from utils.db_api.admins import is_admin, is_super_admin
 from keyboards.default.main_menu import main_menu_keyboard
 
 
@@ -18,10 +18,12 @@ async def bot_start(message: types.Message):
     if not await is_admin(message.from_user.id):
         await message.answer("⛔ You don't have access to this bot.")
         return
+    is_super = await is_super_admin(message.from_user.id)
     await message.answer(
         f"Welcome, {message.from_user.full_name}!",
-        reply_markup=main_menu_keyboard()
+        reply_markup=main_menu_keyboard(is_super=is_super)
     )
+
 
 
 @dp.message_handler(text="📊 Violations Report")
@@ -32,6 +34,3 @@ async def btn_violations(message: types.Message):
     await show_violations_menu(message)
 
 
-@dp.message_handler(text="⚙️ Settings")
-async def btn_settings(message: types.Message):
-    await message.answer("Settings coming soon.")

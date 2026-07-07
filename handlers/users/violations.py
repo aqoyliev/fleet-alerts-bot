@@ -3,15 +3,16 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import types
+from aiogram.utils.exceptions import MessageCantBeEdited, MessageNotModified
 
 from loader import dp
-from utils.db_api.admins import is_admin
-from utils.db_api.companies import get_all_companies
-from utils.db_api.violations import get_top_violators, get_vehicle_breakdown, get_vehicle_events
+from utils.db_api.admins import is_admin, is_super_admin
+from utils.db_api.companies import get_accessible_companies
+from utils.db_api.violations import get_top_violators, get_vehicle_events
+from utils.db_api.companies import get_company_name as _get_company_name
 from utils.webhook_handler import EVENT_TYPE_MAP
 from keyboards.inline.violations import (
     companies_keyboard,
-    period_keyboard,
     event_type_keyboard,
     top10_keyboard,
     PERIOD_LABELS,
@@ -20,7 +21,6 @@ ET = ZoneInfo("America/New_York")
 
 
 def _period_range(period: str) -> tuple[datetime, datetime]:
-    """Returns (since, until) for the period."""
     now = datetime.now(tz=ET)
     if period == "today":
         since = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -36,13 +36,13 @@ def _period_range(period: str) -> tuple[datetime, datetime]:
     return since, until
 
 
-def _period_since(period: str) -> datetime:
-    return _period_range(period)[0]
-
-
 def _format_top10_text(rows: list[dict], period_label: str, company_name: str, event_type: str) -> str:
     if event_type == "speeding":
-        header = f"📊 <b>{company_name} — {period_label}</b>\n<i>🚨 Speeding only</i>\n"
+        header = (
+            f"📊 <b>{company_name} — {period_label}</b>\n"
+            f"<i>🚨 Speeding only</i>\n"
+            f"<i>ℹ️ Download report shows days with 3+ speeding events per unit</i>\n"
+        )
     elif event_type == "other":
         header = f"📊 <b>{company_name} — {period_label}</b>\n<i>⚠️ Other violations (excl. speeding)</i>\n"
     else:
@@ -53,10 +53,28 @@ def _format_top10_text(rows: list[dict], period_label: str, company_name: str, e
 
     lines = [header]
     for i, row in enumerate(rows, 1):
-        unit = row["vehicle_number"]
-        total = row["total"]
-        lines.append(f"{i}. 🚛 Unit {unit} — {total}")
+        lines.append(f"{i}. 🚛 Unit {row['vehicle_number']} — {row['total']}")
     return "\n".join(lines)
+
+
+async def _edit_or_send(call: types.CallbackQuery, text: str, reply_markup, parse_mode="HTML"):
+    """Try to edit the existing message; if too old, send a new one; if unchanged, do nothing."""
+    try:
+        await call.message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except MessageNotModified:
+        pass
+    except MessageCantBeEdited:
+        await call.message.answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
+
+
+async def _show_top10(call: types.CallbackQuery, company_slug: str, period: str, event_type: str):
+    company_name = await _get_company_name(company_slug) or company_slug
+    since, until = _period_range(period)
+    rows = await get_top_violators(company_slug, since, until=until, event_type=event_type, limit=10)
+    text = _format_top10_text(rows, PERIOD_LABELS[period], company_name, event_type)
+    kb = top10_keyboard(rows, company_slug, period, event_type)
+    await _edit_or_send(call, text, kb)
+    await call.answer()
 
 
 # Entry point — called from start menu
@@ -64,7 +82,7 @@ async def show_violations_menu(message: types.Message):
     if not await is_admin(message.from_user.id):
         await message.answer("⛔ Access denied.")
         return
-    companies = await get_all_companies()
+    companies = await get_accessible_companies(message.from_user.id)
     if not companies:
         await message.answer("No companies configured.")
         return
@@ -77,19 +95,8 @@ async def cb_back_companies(call: types.CallbackQuery):
     if not await is_admin(call.from_user.id):
         await call.answer("⛔ Access denied.", show_alert=True)
         return
-    companies = await get_all_companies()
-    await call.message.edit_text("Select a company:", reply_markup=companies_keyboard(companies))
-    await call.answer()
-
-
-# Back: to period selection
-@dp.callback_query_handler(lambda c: c.data.startswith("viol_bk_per:"))
-async def cb_back_period(call: types.CallbackQuery):
-    if not await is_admin(call.from_user.id):
-        await call.answer("⛔ Access denied.", show_alert=True)
-        return
-    company_slug = call.data.split(":")[1]
-    await call.message.edit_text("Select period:", reply_markup=period_keyboard(company_slug))
+    companies = await get_accessible_companies(call.from_user.id)
+    await _edit_or_send(call, "Select a company:", companies_keyboard(companies), parse_mode=None)
     await call.answer()
 
 
@@ -99,55 +106,44 @@ async def cb_back_event_type(call: types.CallbackQuery):
     if not await is_admin(call.from_user.id):
         await call.answer("⛔ Access denied.", show_alert=True)
         return
-    _, company_slug, period = call.data.split(":")
-    await call.message.edit_text("Select event type:", reply_markup=event_type_keyboard(company_slug, period))
+    company_slug = call.data.split(":")[1]
+    await _edit_or_send(call, "Select event type:", event_type_keyboard(company_slug), parse_mode=None)
     await call.answer()
 
 
-# Company selected
+# Company selected → event type
 @dp.callback_query_handler(lambda c: c.data.startswith("viol_company:"))
 async def cb_company(call: types.CallbackQuery):
     if not await is_admin(call.from_user.id):
         await call.answer("⛔ Access denied.", show_alert=True)
         return
     company_slug = call.data.split(":")[1]
-    await call.message.edit_text("Select period:", reply_markup=period_keyboard(company_slug))
-    await call.answer()
-
-
-# Period selected
-@dp.callback_query_handler(lambda c: c.data.startswith("viol_period:"))
-async def cb_period(call: types.CallbackQuery):
-    if not await is_admin(call.from_user.id):
+    companies = await get_accessible_companies(call.from_user.id)
+    if not any(c["slug"] == company_slug for c in companies):
         await call.answer("⛔ Access denied.", show_alert=True)
         return
-    _, company_slug, period = call.data.split(":")
-    await call.message.edit_text(
-        "Select event type:",
-        reply_markup=event_type_keyboard(company_slug, period)
-    )
+    await _edit_or_send(call, "Select event type:", event_type_keyboard(company_slug), parse_mode=None)
     await call.answer()
 
 
-# Event type selected → show top 10
+# Event type selected → show top10, default last_week
 @dp.callback_query_handler(lambda c: c.data.startswith("viol_etype:"))
 async def cb_event_type(call: types.CallbackQuery):
     if not await is_admin(call.from_user.id):
         await call.answer("⛔ Access denied.", show_alert=True)
         return
-    parts = call.data.split(":")
-    company_slug = parts[1]
-    period = parts[2]
-    event_type = parts[3]
+    _, company_slug, event_type = call.data.split(":")
+    await _show_top10(call, company_slug, "last_week", event_type)
 
-    companies = await get_all_companies()
-    company_name = next((c["name"] for c in companies if c["slug"] == company_slug), company_slug)
-    since, until = _period_range(period)
-    rows = await get_top_violators(company_slug, since, until=until, event_type=event_type, limit=10)
-    text = _format_top10_text(rows, PERIOD_LABELS[period], company_name, event_type)
-    kb = top10_keyboard(rows, company_slug, period, event_type)
-    await call.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    await call.answer()
+
+# Period toggle
+@dp.callback_query_handler(lambda c: c.data.startswith("viol_toggle:"))
+async def cb_period_toggle(call: types.CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        await call.answer("⛔ Access denied.", show_alert=True)
+        return
+    _, company_slug, event_type, period = call.data.split(":")
+    await _show_top10(call, company_slug, period, event_type)
 
 
 # Download full report
@@ -162,9 +158,9 @@ async def cb_download(call: types.CallbackQuery):
     event_type = parts[3]
 
     await call.answer("Generating report...")
+    super_admin = await is_super_admin(call.from_user.id)
 
-    companies = await get_all_companies()
-    company_name = next((c["name"] for c in companies if c["slug"] == company_slug), company_slug)
+    company_name = await _get_company_name(company_slug) or company_slug
     since, until = _period_range(period)
     rows = await get_top_violators(company_slug, since, until=until, event_type=event_type, limit=50)
 
@@ -177,6 +173,7 @@ async def cb_download(call: types.CallbackQuery):
     ]
     if event_type == "speeding":
         lines.append("Filter: Speeding only")
+        lines.append("Note: Only days with 3+ speeding events per unit are listed.")
         lines.append("")
     elif event_type == "other":
         lines.append("Filter: Other violations (excl. speeding)")
@@ -188,18 +185,20 @@ async def cb_download(call: types.CallbackQuery):
         events = await get_vehicle_events(company_slug, unit, since, until=until, event_type=event_type)
 
         if event_type == "speeding":
-            # Group by date, skip days with < 3 events
             by_date: dict[str, list[str]] = {}
             for e in events:
                 local = e["occurred_at"].astimezone(ET)
                 day = local.strftime("%b %d")
-                by_date.setdefault(day, []).append(local.strftime("%I:%M %p").lstrip("0"))
+                time_str = local.strftime("%I:%M %p").lstrip("0")
+                if super_admin and e.get("severity"):
+                    time_str += f" ({e['severity'].title()})"
+                by_date.setdefault(day, []).append(time_str)
             day_lines = []
             for day, times in by_date.items():
                 if len(times) >= 3:
                     day_lines.append(f"     • {day}, {', '.join(times)} — {len(times)} times")
             if not day_lines:
-                continue  # skip this unit entirely
+                continue
             total_shown = sum(len(by_date[d]) for d in by_date if len(by_date[d]) >= 3)
             lines.append(f"{rank}. Unit {unit} — {total_shown} speeding events")
             lines.extend(day_lines)
