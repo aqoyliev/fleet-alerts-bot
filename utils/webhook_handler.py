@@ -307,9 +307,10 @@ def _format_event(event: dict, company_name: str = "", samsara: dict | None = No
         if duration:
             lines.append(f"⏱ <b>Duration:</b> {duration}s")
 
-    # Tag the source only for Samsara so existing Motive alerts are unchanged.
-    if event.get("_source") == "samsara":
-        lines.append("\n<i>via Samsara</i>")
+    # Tag every alert with its source provider. Samsara events carry _source;
+    # Motive events don't set it, so they fall through to "Motive".
+    source = "Samsara" if event.get("_source") == "samsara" else "Motive"
+    lines.append(f"\n<i>via {source}</i>")
 
     return "\n".join(lines)
 
