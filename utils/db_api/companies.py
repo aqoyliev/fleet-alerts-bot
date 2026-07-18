@@ -48,11 +48,13 @@ async def get_company_slug_by_group(telegram_group_id: int) -> str | None:
     return row["slug"] if row else None
 
 
-async def get_groups_for_event(company_slug: str, event_type: str) -> list[int]:
+async def get_groups_for_event(company_slug: str, event_type: str, source: str = "motive") -> list[int]:
     """
     Returns telegram_group_ids that should receive this event type for the given company.
     - Company-specific groups: matched by slug, filtered by group_event_types if present.
     - Global groups (company_id IS NULL): matched for all companies, filtered by group_event_types if present.
+    - `source` is the alert provider ('motive' or 'samsara'); groups with a non-NULL
+      alert_source only receive alerts from that provider, NULL receives all.
     """
     rows = await db.fetch(
         """
@@ -60,6 +62,7 @@ async def get_groups_for_event(company_slug: str, event_type: str) -> list[int]:
         FROM company_groups cg
         LEFT JOIN companies c ON c.id = cg.company_id
         WHERE (c.slug = $1 OR cg.company_id IS NULL)
+          AND (cg.alert_source IS NULL OR cg.alert_source = $3)
           AND (
               NOT EXISTS (
                   SELECT 1 FROM group_event_types WHERE group_id = cg.id
@@ -70,7 +73,7 @@ async def get_groups_for_event(company_slug: str, event_type: str) -> list[int]:
               )
           )
         """,
-        company_slug, event_type,
+        company_slug, event_type, source,
     )
     return [r["telegram_group_id"] for r in rows]
 

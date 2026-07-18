@@ -671,7 +671,10 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
                 severity=_event_severity(event),
             )
 
-        group_ids = await get_groups_for_event(company_slug, event_type)
+        # Route by provider: Samsara alerts go only to the company's Samsara group(s),
+        # Motive alerts to the original group(s). Groups with alert_source NULL get both.
+        alert_source = "samsara" if event.get("_source") == "samsara" else "motive"
+        group_ids = await get_groups_for_event(company_slug, event_type, alert_source)
         dm_ids = await get_subscribed_admins(event_type, company_slug)
         if event_type == "crash":
             # Crash alerts go to subscribed DMs only — never to groups.

@@ -16,12 +16,16 @@ ET = ZoneInfo("America/New_York")
 
 
 async def _get_company_groups(company_slug: str) -> list[int]:
+    # Samsara-only groups are excluded: they exist to receive nothing but Samsara
+    # alerts, and the daily report aggregates violations from both providers. The
+    # report keeps going to the original (motive / unrestricted) groups as before.
     rows = await fetch(
         """
         SELECT cg.telegram_group_id
         FROM company_groups cg
         JOIN companies c ON c.id = cg.company_id
         WHERE c.slug = $1
+          AND (cg.alert_source IS NULL OR cg.alert_source <> 'samsara')
         """,
         company_slug,
     )

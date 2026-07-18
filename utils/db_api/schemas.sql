@@ -28,8 +28,14 @@ CREATE TABLE IF NOT EXISTS company_groups (
     company_id        INT         REFERENCES companies(id) ON DELETE CASCADE,  -- NULL = all companies
     telegram_group_id BIGINT      NOT NULL,
     label             VARCHAR(100),
+    -- Which alert provider this group receives: 'motive', 'samsara', or NULL = all.
+    -- Companies with a Samsara fleet get two groups: the original one restricted to
+    -- 'motive' and a new one restricted to 'samsara'.
+    alert_source      VARCHAR(20),
     created_at        TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE company_groups ADD COLUMN IF NOT EXISTS alert_source VARCHAR(20);
 
 CREATE TABLE IF NOT EXISTS group_event_types (
     group_id   INT         NOT NULL REFERENCES company_groups(id) ON DELETE CASCADE,
