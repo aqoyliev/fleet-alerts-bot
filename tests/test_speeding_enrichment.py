@@ -44,7 +44,7 @@ def test_enriched_interval():
     assert "Duration:</b> 82s" in out
     assert "I 10, Eminence" in out
     assert "🆘 Critical" in out  # payload severity wins over interval severity
-    assert "via Samsara" in out
+    assert "via Samsara" not in out  # provider tag is crash-only
 
 
 def test_enriched_gps_only():
@@ -60,7 +60,7 @@ def test_no_enrichment_unchanged():
     out = _format_event(SAMSARA_SPEEDING, "Gurman", None)
     assert "Max Speed" not in out
     assert "Location" not in out
-    assert "via Samsara" in out
+    assert "via Samsara" not in out  # provider tag is crash-only
 
 
 def test_severity_fallback_from_interval():

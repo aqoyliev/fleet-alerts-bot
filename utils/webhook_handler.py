@@ -307,10 +307,12 @@ def _format_event(event: dict, company_name: str = "", samsara: dict | None = No
         if duration:
             lines.append(f"⏱ <b>Duration:</b> {duration}s")
 
-    # Tag every alert with its source provider. Samsara events carry _source;
-    # Motive events don't set it, so they fall through to "Motive".
-    source = "Samsara" if event.get("_source") == "samsara" else "Motive"
-    lines.append(f"\n<i>via {source}</i>")
+    # Only crash alerts carry the provider tag: they're the one type still mixed in
+    # a single place (admin DMs), so the source matters there. Everything else is
+    # already routed to per-provider groups, making the tag redundant noise.
+    if event_type == "crash":
+        source = "Samsara" if event.get("_source") == "samsara" else "Motive"
+        lines.append(f"\n<i>via {source}</i>")
 
     return "\n".join(lines)
 

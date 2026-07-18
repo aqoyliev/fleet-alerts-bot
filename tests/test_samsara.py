@@ -77,16 +77,27 @@ def test_parse_unknown_event_type_ignored():
 
 # ── formatting ──────────────────────────────────────────────────────────────────
 
-def test_samsara_alerts_tagged_motive_not():
+def test_provider_tag_crash_only():
     crash = {"type": "crash", "_source": "samsara", "vehicle": {"number": "Unit 42"},
              "start_time": "2026-05-22T15:00:00Z", "location": "I-95 N"}
     initial = wh._format_crash_initial(crash, "DM World")
     assert "Video pending" in initial and "via Samsara" in initial
     assert "CRASH" in wh._format_crash_video_caption(crash)
 
+    motive_crash = {"type": "hard_brake", "metadata": {"severity": "critical"},
+                    "vehicle": {"number": "Unit 2"},
+                    "start_time": "2026-05-22T15:00:00Z", "location": "I-80 W"}
+    assert "via Motive" in wh._format_event(motive_crash)
+
+    # Non-crash events carry no provider tag, whatever the source
+    samsara_harsh = {"type": "hard_brake", "_source": "samsara",
+                     "vehicle": {"number": "Unit 3"},
+                     "start_time": "2026-05-22T15:00:00Z", "location": "Main St"}
+    assert "via" not in wh._format_event(samsara_harsh)
+
     motive = {"type": "hard_brake", "vehicle": {"number": "Unit 1"},
               "start_time": "2026-05-22T15:00:00Z", "location": "Main St"}
-    assert "via Samsara" not in wh._format_event(motive)
+    assert "via" not in wh._format_event(motive)
 
 
 # ── _fetch_samsara_harsh_event poll loop (faked HTTP) ───────────────────────────
