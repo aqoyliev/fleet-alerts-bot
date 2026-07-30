@@ -301,6 +301,25 @@ def test_motive_dedup_key_splits_on_media_and_company():
     assert wh._motive_dedup_key({"type": "hard_brake"}, "gurman") == ""  # no id → never dedup
 
 
+def test_crash_card_shows_measurements_and_pending_review():
+    event = {"type": "crash", "id": 9, "current_vehicle": {"number": "3003"},
+             "start_time": "2026-07-30T04:17:56Z", "location": "Norwalk, CA",
+             "start_speed": 90.0324, "end_speed": 71.7228,
+             "event_intensity": {"name": "Collision Intensity", "value": 6.7,
+                                 "unit_type": "acceleration"},
+             "secondary_behaviors": ["in_progress"]}
+    out = wh._format_event(event)
+    assert "56 → 45 mph" in out                  # kph converted, so the drop is readable
+    assert "Collision intensity:</b> 6.7 m/s²" in out
+    assert "review still in progress" in out
+    assert wh._crash_review_pending(event) is True
+
+    # A resolved crash drops 'in_progress' and carries no pending note.
+    resolved = {**event, "secondary_behaviors": []}
+    assert wh._crash_review_pending(resolved) is False
+    assert "review still in progress" not in wh._format_event(resolved)
+
+
 def test_media_followup_caption_and_crash_telemetry():
     event = {"type": "hard_brake", "id": 7, "vehicle": {"number": "4001"}}
     followup = wh._format_media_followup(event)

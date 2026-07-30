@@ -237,6 +237,14 @@ def _get_event_type(event: dict) -> str:
     return (event.get("type") or "").lower()
 
 
+def _crash_review_pending(event: dict) -> bool:
+    """True while Motive's crash classification is provisional. A freshly detected crash
+    arrives with 'in_progress' in secondary_behaviors and no camera media yet — the
+    detector tripped, but nothing has confirmed a collision."""
+    behaviors = [str(b).lower() for b in (event.get("secondary_behaviors") or [])]
+    return "in_progress" in behaviors
+
+
 def _get_vehicle(event: dict) -> str:
     """Extract vehicle number from any event payload structure."""
     # current_vehicle present in both speeding (capital keys) and driver_performance (lowercase)
@@ -323,6 +331,20 @@ def _format_event(event: dict, company_name: str = "", samsara: dict | None = No
             lines.append(f"💥 <b>Intensity:</b> {intensity}")
         if duration:
             lines.append(f"⏱ <b>Duration:</b> {duration}s")
+
+    if event_type == "crash":
+        # What the detector actually measured. Motive fires its crash type on hard
+        # decelerations that turn out to be ordinary braking, so put the numbers in the
+        # alert: a real collision loses most of its speed, a panic stop doesn't.
+        start_kph, end_kph = event.get("start_speed"), event.get("end_speed")
+        if isinstance(start_kph, (int, float)) and isinstance(end_kph, (int, float)):
+            lines.append(f"📉 <b>Speed:</b> {_kph_to_mph(start_kph):.0f} → "
+                         f"{_kph_to_mph(end_kph):.0f} mph")
+        intensity_value = (event.get("event_intensity") or {}).get("value")
+        if isinstance(intensity_value, (int, float)):
+            lines.append(f"💢 <b>Collision intensity:</b> {intensity_value} m/s²")
+        if _crash_review_pending(event):
+            lines.append("\n⏳ <i>Motive review still in progress — not confirmed as a collision</i>")
 
     # Only crash alerts carry the provider tag: they're the one type still mixed in
     # a single place (admin DMs), so the source matters there. Everything else is
@@ -967,6 +989,17 @@ async def motive_webhook(request: web.Request) -> web.Response:
             event_type = _get_event_type(event)
             if event_type not in ALLOWED_TYPES:
                 logger.debug(f"Unhandled event type='{event_type}' keys={list(event.keys())} payload={json.dumps(event, default=str)[:500]}")
+            # Logged before the dedup check so redeliveries are visible too: the open
+            # question is whether Motive later resolves a provisional crash (dropping
+            # 'in_progress') or leaves it that way, which decides whether these can be
+            # held back from the crash channel until confirmed.
+            if event_type == "crash":
+                logger.info(f"[motive] Crash delivery id={event.get('id')} company='{company_slug}' "
+                            f"action='{event.get('action')}' primary={event.get('primary_behavior')} "
+                            f"secondary={event.get('secondary_behaviors')} "
+                            f"intensity={(event.get('event_intensity') or {}).get('value')} "
+                            f"media={(event.get('camera_media') or {}).get('available')}")
+
             key = _motive_dedup_key(event, company_slug)
             if _is_duplicate(key):
                 logger.info(f"[motive] Duplicate delivery id={event.get('id')} type='{event_type}' "
