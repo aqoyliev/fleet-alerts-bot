@@ -238,15 +238,16 @@ def _get_event_type(event: dict) -> str:
 
     # Motive also fires that crash type on plain hard decelerations. The only safe way
     # to tell those apart is Motive's own review verdict: a detection it closes out
-    # carries 'no_tag_applies'. Nothing else downgrades — provisional, resolved-clean or
-    # unrecognised all stay a crash.
+    # carries 'no_tag_applies', either on this delivery or on the redelivery a minute
+    # later (recorded as _verdict by the wait in _handle_event). Nothing else downgrades —
+    # provisional, resolved-clean or unrecognised all stay a crash.
     #
     # Measured deceleration must NOT be used for this. It was, briefly, and it cost a
     # real one: jrd unit 2460's crash on 2026-07-30 reported 11.32, 11.32, 10.18 and
     # 0.00 m/s² across four events in 14 seconds, while dismissed non-events have run as
     # high as 7.79 and as low as 0.00. The ranges overlap, and a crash reporting 0.0 is
     # proof the field can't carry this decision.
-    if event_type == "crash" and _crash_dismissed(event):
+    if event_type == "crash" and (_crash_dismissed(event) or event.get("_verdict") == "dismissed"):
         return "hard_brake"
     return event_type
 
@@ -268,6 +269,73 @@ def _crash_dismissed(event: dict) -> bool:
     """True once Motive's review has closed the detection out as no event."""
     behaviors = [str(b).lower() for b in (event.get("secondary_behaviors") or [])]
     return _CRASH_DISMISSED_TAG in behaviors
+
+
+# How long a crash alert is held while Motive's review runs. Its verdict has landed
+# ~60-85s after the first delivery in every case observed; 90 leaves a margin.
+_CRASH_VERDICT_WAIT = 90  # seconds
+
+# event_id -> {"verdict": None | 'dismissed' | 'stands', "signal": asyncio.Event}. Filled
+# by the webhook route for every crash delivery (redeliveries included, since the verdict
+# usually rides one the dedup drops) and awaited by the handler holding the alert.
+_crash_verdicts: "OrderedDict[str, dict]" = OrderedDict()
+_CRASH_VERDICT_MAX = 500
+
+
+def _crash_verdict_slot(event_id: str) -> dict:
+    """The verdict record for an event, created on first mention. Either side can get
+    here first: the resolution can arrive before the handler starts waiting."""
+    slot = _crash_verdicts.get(event_id)
+    if slot is None:
+        slot = {"verdict": None, "signal": asyncio.Event()}
+        _crash_verdicts[event_id] = slot
+        while len(_crash_verdicts) > _CRASH_VERDICT_MAX:
+            _crash_verdicts.popitem(last=False)
+    return slot
+
+
+def _record_crash_verdict(event: dict) -> str | None:
+    """Note Motive's verdict from a crash delivery, waking anything holding an alert for
+    it. A delivery still marked 'in_progress' carries no verdict; any other state is the
+    review having resolved. Returns the verdict recorded, if any."""
+    event_id = str(event.get("id") or "")
+    if not event_id or _crash_review_pending(event):
+        return None
+    verdict = "dismissed" if _crash_dismissed(event) else "stands"
+    slot = _crash_verdict_slot(event_id)
+    slot["verdict"] = verdict
+    slot["signal"].set()
+    return verdict
+
+
+async def _await_crash_verdict(event: dict) -> str:
+    """Hold a Motive crash detection until its review lands.
+
+    Motive fires the webhook the instant its detector trips, about a minute before it
+    decides whether a crash actually happened, and a panic stop is indistinguishable from
+    a collision at that point — both arrive as type 'crash', 'in_progress'. Waiting for
+    the verdict is the only thing that keeps dismissed detections off the crash channel.
+
+    Returns 'dismissed', 'stands', or 'unresolved' when the window closes with nothing.
+    Only 'dismissed' takes an event off the crash channel: a late alert is recoverable,
+    a missing one is not."""
+    event_id = str(event.get("id") or "")
+    if not event_id:
+        return "unresolved"
+    if not _crash_review_pending(event):
+        return "dismissed" if _crash_dismissed(event) else "stands"
+
+    slot = _crash_verdict_slot(event_id)
+    if slot["verdict"] is None:
+        logger.info(f"[motive] Holding crash alert id={event_id} for up to "
+                    f"{_CRASH_VERDICT_WAIT}s while Motive's review runs")
+        try:
+            await asyncio.wait_for(slot["signal"].wait(), timeout=_CRASH_VERDICT_WAIT)
+        except asyncio.TimeoutError:
+            logger.warning(f"[motive] No verdict for crash id={event_id} after "
+                           f"{_CRASH_VERDICT_WAIT}s — alerting as a crash")
+            return "unresolved"
+    return slot["verdict"] or "unresolved"
 
 
 def _crash_review_pending(event: dict) -> bool:
@@ -382,8 +450,10 @@ def _format_event(event: dict, company_name: str = "", samsara: dict | None = No
         if event_type != "crash":
             lines.append("\n⚠️ <i>Motive's crash detector fired on this and its review "
                          "then closed it out as no event, so it's reported as a hard brake.</i>")
-        elif _crash_review_pending(event):
-            lines.append("\n⏳ <i>Motive review still in progress</i>")
+        elif event.get("_verdict") == "unresolved" or (
+                event.get("_verdict") is None and _crash_review_pending(event)):
+            lines.append("\n⏳ <i>Motive's review has not returned a verdict — "
+                         "sending this as a crash</i>")
 
     # Only crash alerts carry the provider tag: they're the one type still mixed in
     # a single place (admin DMs), so the source matters there. Everything else is
@@ -748,6 +818,15 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
         event_type = _get_event_type(event)
         event_id = event.get("id", "?")
 
+        # A Motive crash arrives before its review has decided anything, so hold the
+        # alert until the verdict lands (or the window closes) and classify on that.
+        if event_type == "crash" and event.get("_source") != "samsara":
+            verdict = await _await_crash_verdict(event)
+            event = {**event, "_verdict": verdict}
+            event_type = _get_event_type(event)
+            logger.info(f"[motive] Crash verdict for id={event_id}: {verdict} "
+                        f"— alerting as {event_type}")
+
         if event_type not in ALLOWED_TYPES:
             logger.info(f"Ignored event type='{event_type}' id={event_id}")
             return
@@ -1033,8 +1112,11 @@ async def motive_webhook(request: web.Request) -> web.Response:
             # 'in_progress') or leaves it that way, which decides whether these can be
             # held back from the crash channel until confirmed.
             if (event.get("type") or "").lower() == "crash":
+                # Record before the dedup check: the verdict usually rides a redelivery
+                # that dedup drops, and an alert may be held waiting for it right now.
+                verdict = _record_crash_verdict(event)
                 logger.info(f"[motive] Crash delivery id={event.get('id')} company='{company_slug}' "
-                            f"resolved_as='{event_type}' "
+                            f"resolved_as='{event_type}' verdict={verdict} "
                             f"action='{event.get('action')}' primary={event.get('primary_behavior')} "
                             f"secondary={event.get('secondary_behaviors')} "
                             f"intensity={(event.get('event_intensity') or {}).get('value')} "

@@ -350,6 +350,48 @@ def test_real_crash_reaches_the_crash_channel_at_any_intensity():
     assert wh._get_event_type({"type": "crash", "_source": "samsara"}) == "crash"
 
 
+async def test_crash_alert_waits_for_motive_verdict(monkeypatch):
+    """The first delivery can't tell a collision from a panic stop — both arrive as
+    'in_progress'. The alert holds until Motive's review resolves it."""
+    monkeypatch.setattr(wh, "_CRASH_VERDICT_WAIT", 0.5)
+
+    async def verdict_for(resolution: dict | None) -> str:
+        wh._crash_verdicts.clear()
+        held = asyncio.ensure_future(_motive_crash_verdict())
+        await asyncio.sleep(0)                       # let the waiter reach the wait
+        if resolution is not None:
+            wh._record_crash_verdict(resolution)     # the redelivery lands
+        return await held
+
+    async def _motive_crash_verdict():
+        return await wh._await_crash_verdict(_motive_crash(id=555))
+
+    # Review closes it out -> dismissed, and that is what downgrades the event.
+    assert await verdict_for(_motive_crash(id=555, secondary_behaviors=["no_tag_applies"])) == "dismissed"
+    assert wh._get_event_type(_motive_crash(_verdict="dismissed")) == "hard_brake"
+
+    # Review resolves with nothing to dismiss it -> the crash stands.
+    assert await verdict_for(_motive_crash(id=555, secondary_behaviors=[])) == "stands"
+    assert wh._get_event_type(_motive_crash(_verdict="stands")) == "crash"
+
+    # Nothing arrives before the window closes -> still a crash, and the card says so.
+    assert await verdict_for(None) == "unresolved"
+    unresolved = _motive_crash(_verdict="unresolved")
+    assert wh._get_event_type(unresolved) == "crash"
+    assert "has not returned a verdict" in wh._format_event(unresolved)
+
+
+async def test_crash_verdict_already_on_the_delivery_is_not_waited_for(monkeypatch):
+    """A delivery that already carries the verdict must decide immediately — the hold is
+    only for provisional ones."""
+    monkeypatch.setattr(wh, "_CRASH_VERDICT_WAIT", 30)
+    wh._crash_verdicts.clear()
+    dismissed = _motive_crash(secondary_behaviors=["no_tag_applies"])
+    stands = _motive_crash(secondary_behaviors=[])
+    assert await asyncio.wait_for(wh._await_crash_verdict(dismissed), timeout=1) == "dismissed"
+    assert await asyncio.wait_for(wh._await_crash_verdict(stands), timeout=1) == "stands"
+
+
 def test_media_followup_caption_and_crash_telemetry():
     event = {"type": "hard_brake", "id": 7, "vehicle": {"number": "4001"}}
     followup = wh._format_media_followup(event)
