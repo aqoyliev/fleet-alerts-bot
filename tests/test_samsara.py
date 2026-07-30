@@ -75,6 +75,16 @@ def test_parse_unknown_event_type_ignored():
     assert wh._parse_samsara({"eventType": "GeoFenceEntry", "eventId": "g1"}) == ("", {})
 
 
+def test_critical_hard_brake_is_not_a_crash():
+    """Motive grades hard brakes up to 'critical' — a hard stop, not a collision. Only
+    an explicit provider crash type may open the crash channel."""
+    for sev_field in ({"metadata": {"severity": "critical"}}, {"severity": "critical"}):
+        event = {"type": "hard_brake", "id": 1, **sev_field}
+        assert wh._get_event_type(event) == "hard_brake"
+
+    assert wh._get_event_type({"type": "crash", "id": 2}) == "crash"
+
+
 # ── formatting ──────────────────────────────────────────────────────────────────
 
 def test_provider_tag_crash_only():
@@ -84,8 +94,7 @@ def test_provider_tag_crash_only():
     assert "Video pending" in initial and "via Samsara" in initial
     assert "CRASH" in wh._format_crash_video_caption(crash)
 
-    motive_crash = {"type": "hard_brake", "metadata": {"severity": "critical"},
-                    "vehicle": {"number": "Unit 2"},
+    motive_crash = {"type": "crash", "vehicle": {"number": "Unit 2"},
                     "start_time": "2026-05-22T15:00:00Z", "location": "I-80 W"}
     assert "via Motive" in wh._format_event(motive_crash)
 
@@ -270,6 +279,26 @@ def test_is_duplicate_suppresses_repeat_then_evicts_after_ttl(monkeypatch):
     clock["now"] += wh._DEDUP_TTL + 1
     assert wh._is_duplicate("evt-A") is False
     assert len(wh._seen_event_ids) == 1         # only the fresh A remains; B-less, no leak
+
+
+def test_motive_dedup_key_splits_on_media_and_company():
+    no_media = {"id": 9001, "type": "hard_brake"}
+    pending = {"id": 9001, "type": "hard_brake",
+               "camera_media": {"available": True,
+                                "downloadable_videos": {"front_facing_plain_url": None}}}
+    with_media = {"id": 9001, "type": "hard_brake",
+                  "camera_media": {"available": True,
+                                   "downloadable_videos": {"front_facing_plain_url": "v1"}}}
+
+    # A redelivery whose clip is still transcoding keys the same as the first one, so
+    # it's suppressed; the delivery that finally carries the video is let through.
+    assert wh._motive_dedup_key(no_media, "gurman") == wh._motive_dedup_key(pending, "gurman")
+    assert wh._motive_dedup_key(with_media, "gurman") != wh._motive_dedup_key(no_media, "gurman")
+
+    # Same id under a different company is a different event.
+    assert wh._motive_dedup_key(with_media, "gurman") != wh._motive_dedup_key(with_media, "dmw")
+
+    assert wh._motive_dedup_key({"type": "hard_brake"}, "gurman") == ""  # no id → never dedup
 
 
 async def test_download_media_downloads_each_url_once(monkeypatch):

@@ -84,6 +84,23 @@ def _is_duplicate(event_id: str) -> bool:
     return False
 
 
+def _motive_dedup_key(event: dict, company_slug: str) -> str:
+    """Dedup key for one Motive delivery: company + event id + whether this delivery
+    carries media.
+
+    Motive redelivers the same event several times, ~40s apart, and the repeats are
+    byte-identical — so the id alone would do, except an event can first arrive before
+    its clip has finished transcoding (camera_media.available true, URLs still null)
+    and only carry the video on a later delivery. Keying on media presence suppresses
+    the identical repeats while still letting the delivery that finally brings the clip
+    through."""
+    event_id = str(event.get("id") or "")
+    if not event_id:
+        return ""
+    videos, images = _get_camera_media_info(event)
+    return f"motive:{company_slug}:{event_id}:{'media' if (videos or images) else 'nomedia'}"
+
+
 def _event_id_to_bigint(raw) -> int | None:
     """Map a provider event id onto the violations.event_id BIGINT UNIQUE column.
 
@@ -210,14 +227,12 @@ def _get_event_type(event: dict) -> str:
     action = (event.get("action") or "").lower()
     if action in SPEEDING_ACTIONS:
         return "speeding"
-    event_type = (event.get("type") or "").lower()
-    # Motive sends collisions as hard_brake with critical severity
-    if event_type == "hard_brake":
-        meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
-        sev = meta_sev or (event.get("severity") or "").strip().lower()
-        if sev == "critical":
-            return "crash"
-    return event_type
+    # A hard brake is never promoted to a crash. Motive grades every hard_brake
+    # low/medium/high/critical, and 'critical' means a hard stop — a panic brake, a
+    # tailgating close call — not a collision. Motive reports real collisions under its
+    # own 'crash' type, so that (and Samsara's 'Crash' harshEventType) is the only
+    # thing that opens the crash channel.
+    return (event.get("type") or "").lower()
 
 
 def _get_vehicle(event: dict) -> str:
@@ -661,6 +676,13 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
 
         logger.info(f"Processing event {event_id} type={event_type}")
 
+        # Crashes are rare and go straight to admin DMs, so log the payload that claimed
+        # to be one — it's the only way to tell a genuine provider crash from a
+        # misclassification after the fact.
+        if event_type == "crash":
+            logger.info(f"Crash payload id={event_id} company={company_slug}: "
+                        f"{json.dumps(event, default=str)[:1000]}")
+
         # Persist the violation, unless the first-poll hook already saved it. Same
         # helpers as the hook so the row is identical either way.
         if persisted_type is None:
@@ -910,6 +932,10 @@ async def motive_webhook(request: web.Request) -> web.Response:
             event_type = _get_event_type(event)
             if event_type not in ALLOWED_TYPES:
                 logger.debug(f"Unhandled event type='{event_type}' keys={list(event.keys())} payload={json.dumps(event, default=str)[:500]}")
+            if _is_duplicate(_motive_dedup_key(event, company_slug)):
+                logger.info(f"[motive] Duplicate delivery id={event.get('id')} type='{event_type}' "
+                            f"company='{company_slug}' — skipping")
+                continue
             asyncio.create_task(_handle_event(bot, event, company_slug))
 
         return web.Response(text="OK", status=200)
