@@ -301,23 +301,49 @@ def test_motive_dedup_key_splits_on_media_and_company():
     assert wh._motive_dedup_key({"type": "hard_brake"}, "gurman") == ""  # no id → never dedup
 
 
-def test_crash_card_shows_measurements_and_pending_review():
-    event = {"type": "crash", "id": 9, "current_vehicle": {"number": "3003"},
-             "start_time": "2026-07-30T04:17:56Z", "location": "Norwalk, CA",
-             "start_speed": 90.0324, "end_speed": 71.7228,
-             "event_intensity": {"name": "Collision Intensity", "value": 6.7,
-                                 "unit_type": "acceleration"},
-             "secondary_behaviors": ["in_progress"]}
-    out = wh._format_event(event)
-    assert "56 → 45 mph" in out                  # kph converted, so the drop is readable
-    assert "Collision intensity:</b> 6.7 m/s²" in out
-    assert "review still in progress" in out
-    assert wh._crash_review_pending(event) is True
+def _motive_crash(**over) -> dict:
+    """The real cross/3003 payload from 2026-07-30, trimmed to the fields that matter."""
+    return {"type": "crash", "id": 9, "current_vehicle": {"number": "3003"},
+            "start_time": "2026-07-30T04:17:56Z", "location": "Norwalk, CA",
+            "start_speed": 90.0324, "end_speed": 71.7228,
+            "event_intensity": {"name": "Collision Intensity", "value": 6.7,
+                                "unit_type": "acceleration"},
+            "secondary_behaviors": ["in_progress"], **over}
 
-    # A resolved crash drops 'in_progress' and carries no pending note.
-    resolved = {**event, "secondary_behaviors": []}
-    assert wh._crash_review_pending(resolved) is False
+
+def test_provisional_low_intensity_crash_downgraded_to_hard_brake():
+    """6.7 m/s² is panic-stop force, and Motive hadn't confirmed it — so it must not
+    reach the crash DMs."""
+    event = _motive_crash()
+    assert wh._crash_review_pending(event) is True
+    assert wh._crash_intensity(event) == 6.7
+    assert wh._get_event_type(event) == "hard_brake"
+
+    out = wh._format_event(event)
+    assert "HARD BRAKE" in out and "CRASH" not in out
+    assert "56 → 45 mph" in out                  # kph converted, so the drop is readable
+    assert "Deceleration:</b> 6.7 m/s²" in out   # the measurement travels with the alert
+    assert "crash detector fired on this, unconfirmed" in out
+
+
+def test_crash_stays_a_crash_when_confirmed_or_hard_enough():
+    # Motive dropped 'in_progress' — its own verdict, so trust it.
+    resolved = _motive_crash(secondary_behaviors=[])
+    assert wh._get_event_type(resolved) == "crash"
     assert "review still in progress" not in wh._format_event(resolved)
+
+    # Still provisional, but an impact-level deceleration — alert as a crash.
+    violent = _motive_crash(event_intensity={"value": 42.0, "unit_type": "acceleration"})
+    assert wh._get_event_type(violent) == "crash"
+    assert "review still in progress" in wh._format_event(violent)
+
+    # No intensity to judge by means no evidence, so it stays a crash.
+    for blind in (_motive_crash(event_intensity=None), _motive_crash(event_intensity={})):
+        assert wh._crash_intensity(blind) is None
+        assert wh._get_event_type(blind) == "crash"
+
+    # Samsara crashes carry no secondary_behaviors and are untouched by the floor.
+    assert wh._get_event_type({"type": "crash", "_source": "samsara"}) == "crash"
 
 
 def test_media_followup_caption_and_crash_telemetry():

@@ -234,7 +234,34 @@ def _get_event_type(event: dict) -> str:
     # tailgating close call — not a collision. Motive reports real collisions under its
     # own 'crash' type, so that (and Samsara's 'Crash' harshEventType) is the only
     # thing that opens the crash channel.
-    return (event.get("type") or "").lower()
+    event_type = (event.get("type") or "").lower()
+
+    # Motive also fires that crash type on plain hard decelerations, with the
+    # classification still provisional, and those were going out as CRASH DETECTED.
+    # Below the impact floor a provisional detection is treated as what it physically
+    # is — a hard brake — so it routes to the group instead of the crash DMs. Above
+    # the floor, or with no intensity to judge by, it stays a crash: silencing a real
+    # one is the failure that matters.
+    if event_type == "crash" and _crash_review_pending(event):
+        intensity = _crash_intensity(event)
+        if intensity is not None and intensity < _CRASH_INTENSITY_FLOOR:
+            return "hard_brake"
+    return event_type
+
+
+# Deceleration below which a provisional Motive crash detection is not a collision,
+# in m/s² (event_intensity.value, unit_type 'acceleration'). Measured false positives sit
+# at 6.2–6.7 — around 0.65 g, ordinary panic-stop force, and confirmed against the
+# payload's own speed trace (90.03 → 71.72 kph inside a 1-second window ≈ 7.0 m/s²). A
+# real collision is several g, so this floor sits ~2x above the noise and far below any
+# impact.
+_CRASH_INTENSITY_FLOOR = 15.0
+
+
+def _crash_intensity(event: dict) -> float | None:
+    """Motive's measured deceleration for the event, in m/s², or None if absent."""
+    value = (event.get("event_intensity") or {}).get("value")
+    return float(value) if isinstance(value, (int, float)) else None
 
 
 def _crash_review_pending(event: dict) -> bool:
@@ -332,18 +359,22 @@ def _format_event(event: dict, company_name: str = "", samsara: dict | None = No
         if duration:
             lines.append(f"⏱ <b>Duration:</b> {duration}s")
 
-    if event_type == "crash":
-        # What the detector actually measured. Motive fires its crash type on hard
-        # decelerations that turn out to be ordinary braking, so put the numbers in the
-        # alert: a real collision loses most of its speed, a panic stop doesn't.
+    # Show the measurements whenever the provider called it a crash — including the ones
+    # downgraded to hard_brake, so the reader can see the call and check it.
+    crash_payload = (event.get("type") or "").lower() == "crash"
+    if crash_payload:
         start_kph, end_kph = event.get("start_speed"), event.get("end_speed")
         if isinstance(start_kph, (int, float)) and isinstance(end_kph, (int, float)):
             lines.append(f"📉 <b>Speed:</b> {_kph_to_mph(start_kph):.0f} → "
                          f"{_kph_to_mph(end_kph):.0f} mph")
-        intensity_value = (event.get("event_intensity") or {}).get("value")
-        if isinstance(intensity_value, (int, float)):
-            lines.append(f"💢 <b>Collision intensity:</b> {intensity_value} m/s²")
-        if _crash_review_pending(event):
+        intensity = _crash_intensity(event)
+        if intensity is not None:
+            lines.append(f"💢 <b>Deceleration:</b> {intensity} m/s²")
+
+        if event_type != "crash":
+            lines.append("\n⚠️ <i>Motive's crash detector fired on this, unconfirmed. "
+                         "Too gentle for an impact, so it's reported as a hard brake.</i>")
+        elif _crash_review_pending(event):
             lines.append("\n⏳ <i>Motive review still in progress — not confirmed as a collision</i>")
 
     # Only crash alerts carry the provider tag: they're the one type still mixed in
@@ -993,8 +1024,9 @@ async def motive_webhook(request: web.Request) -> web.Response:
             # question is whether Motive later resolves a provisional crash (dropping
             # 'in_progress') or leaves it that way, which decides whether these can be
             # held back from the crash channel until confirmed.
-            if event_type == "crash":
+            if (event.get("type") or "").lower() == "crash":
                 logger.info(f"[motive] Crash delivery id={event.get('id')} company='{company_slug}' "
+                            f"resolved_as='{event_type}' "
                             f"action='{event.get('action')}' primary={event.get('primary_behavior')} "
                             f"secondary={event.get('secondary_behaviors')} "
                             f"intensity={(event.get('event_intensity') or {}).get('value')} "
@@ -1008,7 +1040,8 @@ async def motive_webhook(request: web.Request) -> web.Response:
             # Already alerted on this event before its clip was ready? Then this
             # delivery is the video arriving, not a second event — caption it as such
             # instead of repeating the full card.
-            if key.endswith(":media") and f"{key[:-len('media')]}nomedia" in _seen_event_ids:
+            if (event_type in ALLOWED_TYPES and key.endswith(":media")
+                    and f"{key[:-len('media')]}nomedia" in _seen_event_ids):
                 event["_media_followup"] = True
                 logger.info(f"[motive] Clip arrived for already-alerted id={event.get('id')} "
                             f"type='{event_type}' — sending as video follow-up")
