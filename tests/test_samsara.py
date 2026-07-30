@@ -311,39 +311,35 @@ def _motive_crash(**over) -> dict:
             "secondary_behaviors": ["in_progress"], **over}
 
 
-def test_provisional_low_intensity_crash_downgraded_to_hard_brake():
-    """6.7 m/s² is panic-stop force, and Motive hadn't confirmed it — so it must not
-    reach the crash DMs."""
-    event = _motive_crash()
-    assert wh._crash_review_pending(event) is True
-    assert wh._crash_intensity(event) == 6.7
-    assert wh._get_event_type(event) == "hard_brake"
+def test_only_a_dismissed_detection_is_downgraded():
+    """Motive closing a detection out ('no_tag_applies') is the one thing that takes it
+    off the crash channel."""
+    dismissed = _motive_crash(secondary_behaviors=["no_tag_applies"])
+    assert wh._crash_dismissed(dismissed) is True
+    assert wh._get_event_type(dismissed) == "hard_brake"
 
-    out = wh._format_event(event)
+    out = wh._format_event(dismissed)
     assert "HARD BRAKE" in out and "CRASH" not in out
     assert "56 → 45 mph" in out                  # kph converted, so the drop is readable
-    assert "Deceleration:</b> 6.7 m/s²" in out   # the measurement travels with the alert
-    assert "crash detector fired on this, unconfirmed" in out
+    assert "Deceleration:</b> 6.7 m/s²" in out   # measurement travels with the alert
+    assert "closed it out as no event" in out
 
 
-def test_gentle_crash_stays_downgraded_whatever_the_review_state():
-    """jrd/1588295949 arrived as ['in_progress'] and was redelivered a minute later as
-    ['no_tag_applies'] with the same 6.23 m/s². Whichever delivery lands first, a
-    non-event must not become a CRASH."""
-    for state in (["in_progress"], ["no_tag_applies"], [], None):
-        event = _motive_crash(secondary_behaviors=state,
-                              event_intensity={"value": 6.23, "unit_type": "acceleration"})
-        assert wh._get_event_type(event) == "hard_brake", state
+def test_real_crash_reaches_the_crash_channel_at_any_intensity():
+    """jrd unit 2460, 2026-07-30: four events in 14 seconds reporting 11.32, 11.32,
+    10.18 and 0.00 m/s², resolving with an empty secondary_behaviors. An intensity floor
+    suppressed all four, so intensity must never gate this again."""
+    for intensity in (11.32, 10.18, 0.0, 7.79):
+        for state in (["in_progress"], [], None, ["some_unknown_tag"]):
+            event = _motive_crash(secondary_behaviors=state,
+                                  event_intensity={"value": intensity})
+            assert wh._get_event_type(event) == "crash", (intensity, state)
 
-
-def test_crash_stays_a_crash_when_hard_enough_or_unmeasured():
-    # An impact-level deceleration is a crash whatever the review says.
-    for state in (["in_progress"], ["no_tag_applies"], []):
-        violent = _motive_crash(secondary_behaviors=state,
-                                event_intensity={"value": 42.0, "unit_type": "acceleration"})
-        assert wh._get_event_type(violent) == "crash", state
-    assert "review still in progress" in wh._format_event(_motive_crash(
-        event_intensity={"value": 42.0}))
+    # No intensity field at all is still a crash.
+    for blind in (_motive_crash(event_intensity=None, secondary_behaviors=[]),
+                  _motive_crash(event_intensity={}, secondary_behaviors=[])):
+        assert wh._crash_intensity(blind) is None
+        assert wh._get_event_type(blind) == "crash"
 
     # No intensity to judge by means no evidence, so it stays a crash.
     for blind in (_motive_crash(event_intensity=None), _motive_crash(event_intensity={})):

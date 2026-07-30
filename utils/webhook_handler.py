@@ -236,35 +236,38 @@ def _get_event_type(event: dict) -> str:
     # thing that opens the crash channel.
     event_type = (event.get("type") or "").lower()
 
-    # Motive also fires that crash type on plain hard decelerations, and those were
-    # going out as CRASH DETECTED. The test is the measured force, not Motive's review
-    # state: below the impact floor it's treated as what it physically is, a hard brake,
-    # and routes to the group instead of the crash DMs. Deliberately independent of
-    # secondary_behaviors — an event seen at 05:07 as ['in_progress'] came back a minute
-    # later as ['no_tag_applies'] with the same 6.23 m/s², so keying on the review state
-    # would classify the same non-event either way depending on which delivery arrived
-    # first. With no intensity to judge by it stays a crash: silencing a real one is the
-    # failure that matters.
-    if event_type == "crash":
-        intensity = _crash_intensity(event)
-        if intensity is not None and intensity < _CRASH_INTENSITY_FLOOR:
-            return "hard_brake"
+    # Motive also fires that crash type on plain hard decelerations. The only safe way
+    # to tell those apart is Motive's own review verdict: a detection it closes out
+    # carries 'no_tag_applies'. Nothing else downgrades — provisional, resolved-clean or
+    # unrecognised all stay a crash.
+    #
+    # Measured deceleration must NOT be used for this. It was, briefly, and it cost a
+    # real one: jrd unit 2460's crash on 2026-07-30 reported 11.32, 11.32, 10.18 and
+    # 0.00 m/s² across four events in 14 seconds, while dismissed non-events have run as
+    # high as 7.79 and as low as 0.00. The ranges overlap, and a crash reporting 0.0 is
+    # proof the field can't carry this decision.
+    if event_type == "crash" and _crash_dismissed(event):
+        return "hard_brake"
     return event_type
 
 
-# Deceleration below which a provisional Motive crash detection is not a collision,
-# in m/s² (event_intensity.value, unit_type 'acceleration'). Measured false positives sit
-# at 6.2–6.7 — around 0.65 g, ordinary panic-stop force, and confirmed against the
-# payload's own speed trace (90.03 → 71.72 kph inside a 1-second window ≈ 7.0 m/s²). A
-# real collision is several g, so this floor sits ~2x above the noise and far below any
-# impact.
-_CRASH_INTENSITY_FLOOR = 15.0
+# The tag Motive puts in secondary_behaviors when its review closes a crash detection
+# out as nothing. A confirmed crash resolves with an EMPTY secondary_behaviors instead,
+# so an absent tag is not a dismissal — only this exact tag is.
+_CRASH_DISMISSED_TAG = "no_tag_applies"
 
 
 def _crash_intensity(event: dict) -> float | None:
-    """Motive's measured deceleration for the event, in m/s², or None if absent."""
+    """Motive's measured deceleration for the event, in m/s², or None if absent. Shown
+    in the alert for context only — it is not fit to classify on (see _get_event_type)."""
     value = (event.get("event_intensity") or {}).get("value")
     return float(value) if isinstance(value, (int, float)) else None
+
+
+def _crash_dismissed(event: dict) -> bool:
+    """True once Motive's review has closed the detection out as no event."""
+    behaviors = [str(b).lower() for b in (event.get("secondary_behaviors") or [])]
+    return _CRASH_DISMISSED_TAG in behaviors
 
 
 def _crash_review_pending(event: dict) -> bool:
@@ -377,10 +380,10 @@ def _format_event(event: dict, company_name: str = "", samsara: dict | None = No
             lines.append(f"💢 <b>Deceleration:</b> {intensity} m/s²")
 
         if event_type != "crash":
-            lines.append("\n⚠️ <i>Motive's crash detector fired on this, unconfirmed. "
-                         "Too gentle for an impact, so it's reported as a hard brake.</i>")
+            lines.append("\n⚠️ <i>Motive's crash detector fired on this and its review "
+                         "then closed it out as no event, so it's reported as a hard brake.</i>")
         elif _crash_review_pending(event):
-            lines.append("\n⏳ <i>Motive review still in progress — not confirmed as a collision</i>")
+            lines.append("\n⏳ <i>Motive review still in progress</i>")
 
     # Only crash alerts carry the provider tag: they're the one type still mixed in
     # a single place (admin DMs), so the source matters there. Everything else is
