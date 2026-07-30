@@ -236,13 +236,16 @@ def _get_event_type(event: dict) -> str:
     # thing that opens the crash channel.
     event_type = (event.get("type") or "").lower()
 
-    # Motive also fires that crash type on plain hard decelerations, with the
-    # classification still provisional, and those were going out as CRASH DETECTED.
-    # Below the impact floor a provisional detection is treated as what it physically
-    # is — a hard brake — so it routes to the group instead of the crash DMs. Above
-    # the floor, or with no intensity to judge by, it stays a crash: silencing a real
-    # one is the failure that matters.
-    if event_type == "crash" and _crash_review_pending(event):
+    # Motive also fires that crash type on plain hard decelerations, and those were
+    # going out as CRASH DETECTED. The test is the measured force, not Motive's review
+    # state: below the impact floor it's treated as what it physically is, a hard brake,
+    # and routes to the group instead of the crash DMs. Deliberately independent of
+    # secondary_behaviors — an event seen at 05:07 as ['in_progress'] came back a minute
+    # later as ['no_tag_applies'] with the same 6.23 m/s², so keying on the review state
+    # would classify the same non-event either way depending on which delivery arrived
+    # first. With no intensity to judge by it stays a crash: silencing a real one is the
+    # failure that matters.
+    if event_type == "crash":
         intensity = _crash_intensity(event)
         if intensity is not None and intensity < _CRASH_INTENSITY_FLOOR:
             return "hard_brake"
@@ -265,9 +268,11 @@ def _crash_intensity(event: dict) -> float | None:
 
 
 def _crash_review_pending(event: dict) -> bool:
-    """True while Motive's crash classification is provisional. A freshly detected crash
-    arrives with 'in_progress' in secondary_behaviors and no camera media yet — the
-    detector tripped, but nothing has confirmed a collision."""
+    """True while Motive's crash classification is provisional: a freshly detected crash
+    arrives with 'in_progress' in secondary_behaviors, and about a minute later the same
+    event is redelivered resolved ('no_tag_applies' on the ones observed so far). Used
+    only to word the alert — the crash/hard-brake decision is made on measured force,
+    since either state can be the first delivery we see."""
     behaviors = [str(b).lower() for b in (event.get("secondary_behaviors") or [])]
     return "in_progress" in behaviors
 

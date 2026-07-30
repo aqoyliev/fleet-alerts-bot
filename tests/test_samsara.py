@@ -326,16 +326,24 @@ def test_provisional_low_intensity_crash_downgraded_to_hard_brake():
     assert "crash detector fired on this, unconfirmed" in out
 
 
-def test_crash_stays_a_crash_when_confirmed_or_hard_enough():
-    # Motive dropped 'in_progress' — its own verdict, so trust it.
-    resolved = _motive_crash(secondary_behaviors=[])
-    assert wh._get_event_type(resolved) == "crash"
-    assert "review still in progress" not in wh._format_event(resolved)
+def test_gentle_crash_stays_downgraded_whatever_the_review_state():
+    """jrd/1588295949 arrived as ['in_progress'] and was redelivered a minute later as
+    ['no_tag_applies'] with the same 6.23 m/s². Whichever delivery lands first, a
+    non-event must not become a CRASH."""
+    for state in (["in_progress"], ["no_tag_applies"], [], None):
+        event = _motive_crash(secondary_behaviors=state,
+                              event_intensity={"value": 6.23, "unit_type": "acceleration"})
+        assert wh._get_event_type(event) == "hard_brake", state
 
-    # Still provisional, but an impact-level deceleration — alert as a crash.
-    violent = _motive_crash(event_intensity={"value": 42.0, "unit_type": "acceleration"})
-    assert wh._get_event_type(violent) == "crash"
-    assert "review still in progress" in wh._format_event(violent)
+
+def test_crash_stays_a_crash_when_hard_enough_or_unmeasured():
+    # An impact-level deceleration is a crash whatever the review says.
+    for state in (["in_progress"], ["no_tag_applies"], []):
+        violent = _motive_crash(secondary_behaviors=state,
+                                event_intensity={"value": 42.0, "unit_type": "acceleration"})
+        assert wh._get_event_type(violent) == "crash", state
+    assert "review still in progress" in wh._format_event(_motive_crash(
+        event_intensity={"value": 42.0}))
 
     # No intensity to judge by means no evidence, so it stays a crash.
     for blind in (_motive_crash(event_intensity=None), _motive_crash(event_intensity={})):
