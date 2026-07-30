@@ -62,7 +62,9 @@ async def _close_http_session(*_a) -> None:
 # keeps entries in first-seen order, so expired ones cluster at the oldest end and a
 # single front-eviction pass is amortized O(1) per webhook (vs. scanning every key).
 _seen_event_ids: "OrderedDict[str, float]" = OrderedDict()
-_DEDUP_TTL = 300  # seconds
+# Wide enough to cover a slow redelivery: Motive re-sends an event once its clip has
+# transcoded, and a crash clip has shown up a full 5 minutes after the first delivery.
+_DEDUP_TTL = 900  # seconds
 
 
 def _is_duplicate(event_id: str) -> bool:
@@ -365,6 +367,31 @@ def _format_crash_initial(event: dict, company_name: str = "") -> str:
     before the video uploads. Everyone (groups and DMs) gets this, so the complete
     record is delivered even when no video ever resolves."""
     return _format_event(event, company_name) + "\n\n📹 <i>Video pending…</i>"
+
+
+def _crash_telemetry(event: dict) -> str:
+    """One-line impact summary from a Motive crash payload, for the log. The speed trace
+    and reported acceleration are what separate a collision from the routine slowdown
+    Motive's crash detector also flags."""
+    spd = [v for v in (event.get("m_veh_spd") or []) if isinstance(v, (int, float))]
+    parts = []
+    if spd:
+        parts.append(f"spd_trace n={len(spd)} start={spd[0]:.1f} max={max(spd):.1f} "
+                     f"min={min(spd):.1f} last={spd[-1]:.1f}")
+    for field in ("start_speed", "end_speed", "acceleration"):
+        value = event.get(field)
+        if isinstance(value, (int, float)):
+            parts.append(f"{field}={value:.4f}")
+    return "  ".join(parts) or "no telemetry"
+
+
+def _format_media_followup(event: dict) -> str:
+    """Caption for a clip that arrives after the alert already went out. Motive
+    redelivers an event once its video has transcoded; the details were already sent, so
+    the follow-up just labels the footage instead of repeating the whole card."""
+    event_type = _get_event_type(event)
+    emoji, title = EVENT_TYPE_MAP.get(event_type, ("🚨", event_type.upper().replace("_", " ")))
+    return f"🎥 {emoji} <b>{title}</b> — <code>{_get_vehicle(event)}</code> — video"
 
 
 def _format_crash_video_caption(event: dict) -> str:
@@ -680,8 +707,13 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
         # to be one — it's the only way to tell a genuine provider crash from a
         # misclassification after the fact.
         if event_type == "crash":
+            logger.info(f"Crash telemetry id={event_id} company={company_slug}: "
+                        f"{_crash_telemetry(event)}")
+            # The payload is alphabetically ordered and front-loaded with GPS/speed
+            # arrays, so 'type', 'severity' and 'metadata' sit at the very end — the
+            # limit has to be generous or the fields that matter get cut.
             logger.info(f"Crash payload id={event_id} company={company_slug}: "
-                        f"{json.dumps(event, default=str)[:1000]}")
+                        f"{json.dumps(event, default=str)[:6000]}")
 
         # Persist the violation, unless the first-poll hook already saved it. Same
         # helpers as the hook so the row is identical either way.
@@ -739,9 +771,12 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
                 )
                 if samsara_details:
                     logger.info(f"[samsara] Speeding enrichment id={event_id}: {samsara_details}")
-            text = _format_event(event, company_display, samsara_details)
-            if not video_urls and not image_urls and event.get("camera_media") is None and event_type != "speeding":
-                text += "\n\n📷 <i>No camera media available</i>"
+            if event.get("_media_followup"):
+                text = _format_media_followup(event)
+            else:
+                text = _format_event(event, company_display, samsara_details)
+                if not video_urls and not image_urls and event.get("camera_media") is None and event_type != "speeding":
+                    text += "\n\n📷 <i>No camera media available</i>"
 
         # Download the media ONCE up front and reuse the bytes for every recipient,
         # rather than re-downloading (potentially large crash clips) per chat.
@@ -932,10 +967,18 @@ async def motive_webhook(request: web.Request) -> web.Response:
             event_type = _get_event_type(event)
             if event_type not in ALLOWED_TYPES:
                 logger.debug(f"Unhandled event type='{event_type}' keys={list(event.keys())} payload={json.dumps(event, default=str)[:500]}")
-            if _is_duplicate(_motive_dedup_key(event, company_slug)):
+            key = _motive_dedup_key(event, company_slug)
+            if _is_duplicate(key):
                 logger.info(f"[motive] Duplicate delivery id={event.get('id')} type='{event_type}' "
                             f"company='{company_slug}' — skipping")
                 continue
+            # Already alerted on this event before its clip was ready? Then this
+            # delivery is the video arriving, not a second event — caption it as such
+            # instead of repeating the full card.
+            if key.endswith(":media") and f"{key[:-len('media')]}nomedia" in _seen_event_ids:
+                event["_media_followup"] = True
+                logger.info(f"[motive] Clip arrived for already-alerted id={event.get('id')} "
+                            f"type='{event_type}' — sending as video follow-up")
             asyncio.create_task(_handle_event(bot, event, company_slug))
 
         return web.Response(text="OK", status=200)

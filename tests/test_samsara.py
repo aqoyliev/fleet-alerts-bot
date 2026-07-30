@@ -301,6 +301,20 @@ def test_motive_dedup_key_splits_on_media_and_company():
     assert wh._motive_dedup_key({"type": "hard_brake"}, "gurman") == ""  # no id → never dedup
 
 
+def test_media_followup_caption_and_crash_telemetry():
+    event = {"type": "hard_brake", "id": 7, "vehicle": {"number": "4001"}}
+    followup = wh._format_media_followup(event)
+    assert "HARD BRAKE" in followup and "4001" in followup
+    assert "Driver" not in followup            # the full card already went out
+
+    crash = {"type": "crash", "id": 8, "m_veh_spd": [98.0, 99.0, 79.1],
+             "end_speed": 79.1167, "acceleration": 0.1151}
+    line = wh._crash_telemetry(crash)
+    assert "start=98.0" in line and "max=99.0" in line and "last=79.1" in line
+    assert "end_speed=79.1167" in line and "acceleration=0.1151" in line
+    assert wh._crash_telemetry({"type": "crash"}) == "no telemetry"
+
+
 async def test_download_media_downloads_each_url_once(monkeypatch):
     calls = []
 
