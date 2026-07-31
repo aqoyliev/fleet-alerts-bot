@@ -890,6 +890,15 @@ async def motive_webhook(request: web.Request) -> web.Response:
 
         body = json.loads(body_bytes)
 
+        # Log the raw bytes of any delivery mentioning a crash, before anything parses or
+        # reclassifies them — this is the only record of what Motive actually sent, and
+        # crash deliveries are the ones whose contents are in question. Matched on the
+        # raw text so a crash is still captured when it arrives under another type.
+        # Observability only: nothing downstream reads this.
+        _raw = body_bytes.decode("utf-8", "replace")
+        if '"crash"' in _raw:
+            logger.info(f"[motive] RAW crash delivery company='{company_slug}': {_raw[:8000]}")
+
         # Verification ping — list of event type strings
         if isinstance(body, list) and all(isinstance(i, str) for i in body):
             logger.info(f"Webhook verification ping: {body}")
