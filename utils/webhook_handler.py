@@ -101,6 +101,21 @@ def _event_id_to_bigint(raw) -> int | None:
     return int.from_bytes(digest, "big", signed=True)
 
 
+def _clip(text: str, limit: int) -> str:
+    """Trim a logged payload to `limit` chars by removing the MIDDLE, not the tail.
+
+    A Motive driver_performance_event is front-loaded with m_gps_lat/lon/heading and
+    m_veh_spd arrays running to several thousand characters, which pushes the fields
+    worth reading — type, secondary_behaviors, event_intensity, metadata, current_vehicle
+    — to the very end. Clipping the tail (as a plain slice does) drops exactly those and
+    keeps only GPS noise, so both ends are kept and the middle is elided instead."""
+    if len(text) <= limit:
+        return text
+    head = limit // 2
+    tail = limit - head
+    return f"{text[:head]} …[{len(text) - limit} chars elided]… {text[-tail:]}"
+
+
 async def _download(url: str) -> bytes | None:
     try:
         session = _get_http_session()
@@ -856,7 +871,7 @@ async def samsara_webhook(request: web.Request) -> web.Response:
         # As on the Motive route: the raw bytes as sent, before parsing. Logged ahead of
         # the dedup check so suppressed redeliveries are visible too.
         logger.info(f"[samsara] RAW delivery company='{company_slug}': "
-                    f"{body_bytes.decode('utf-8', 'replace')[:4000]}")
+                    f"{_clip(body_bytes.decode('utf-8', 'replace'), 4000)}")
 
         event_id = body.get("eventId") or ""
         if _is_duplicate(event_id):
@@ -898,15 +913,13 @@ async def motive_webhook(request: web.Request) -> web.Response:
 
         # Log the raw bytes of every delivery, before anything parses or reclassifies it —
         # the record of what Motive actually sent rather than what we made of it.
-        # Crash deliveries are tagged (matched on the raw text, so one still counts when it
-        # arrives under another type) and get a wider cap: their payload is front-loaded
-        # with GPS/speed arrays, which pushes secondary_behaviors, event_intensity and
-        # metadata — the fields actually in question — to the very end.
+        # Crash deliveries are tagged (matched on the raw text, so one still counts when
+        # it arrives under another type) and keep more of the body.
         # Observability only: nothing downstream reads this.
         _raw = body_bytes.decode("utf-8", "replace")
         _is_crash = '"crash"' in _raw
         logger.info(f"[motive] RAW {'crash ' if _is_crash else ''}delivery "
-                    f"company='{company_slug}': {_raw[:8000 if _is_crash else 4000]}")
+                    f"company='{company_slug}': {_clip(_raw, 8000 if _is_crash else 4000)}")
 
         # Verification ping — list of event type strings
         if isinstance(body, list) and all(isinstance(i, str) for i in body):
