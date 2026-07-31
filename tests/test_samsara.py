@@ -75,16 +75,6 @@ def test_parse_unknown_event_type_ignored():
     assert wh._parse_samsara({"eventType": "GeoFenceEntry", "eventId": "g1"}) == ("", {})
 
 
-def test_critical_hard_brake_is_not_a_crash():
-    """Motive grades hard brakes up to 'critical' — a hard stop, not a collision. Only
-    an explicit provider crash type may open the crash channel."""
-    for sev_field in ({"metadata": {"severity": "critical"}}, {"severity": "critical"}):
-        event = {"type": "hard_brake", "id": 1, **sev_field}
-        assert wh._get_event_type(event) == "hard_brake"
-
-    assert wh._get_event_type({"type": "crash", "id": 2}) == "crash"
-
-
 # ── formatting ──────────────────────────────────────────────────────────────────
 
 def test_provider_tag_crash_only():
@@ -94,7 +84,8 @@ def test_provider_tag_crash_only():
     assert "Video pending" in initial and "via Samsara" in initial
     assert "CRASH" in wh._format_crash_video_caption(crash)
 
-    motive_crash = {"type": "crash", "vehicle": {"number": "Unit 2"},
+    motive_crash = {"type": "hard_brake", "metadata": {"severity": "critical"},
+                    "vehicle": {"number": "Unit 2"},
                     "start_time": "2026-05-22T15:00:00Z", "location": "I-80 W"}
     assert "via Motive" in wh._format_event(motive_crash)
 
@@ -279,131 +270,6 @@ def test_is_duplicate_suppresses_repeat_then_evicts_after_ttl(monkeypatch):
     clock["now"] += wh._DEDUP_TTL + 1
     assert wh._is_duplicate("evt-A") is False
     assert len(wh._seen_event_ids) == 1         # only the fresh A remains; B-less, no leak
-
-
-def test_motive_dedup_key_splits_on_media_and_company():
-    no_media = {"id": 9001, "type": "hard_brake"}
-    pending = {"id": 9001, "type": "hard_brake",
-               "camera_media": {"available": True,
-                                "downloadable_videos": {"front_facing_plain_url": None}}}
-    with_media = {"id": 9001, "type": "hard_brake",
-                  "camera_media": {"available": True,
-                                   "downloadable_videos": {"front_facing_plain_url": "v1"}}}
-
-    # A redelivery whose clip is still transcoding keys the same as the first one, so
-    # it's suppressed; the delivery that finally carries the video is let through.
-    assert wh._motive_dedup_key(no_media, "gurman") == wh._motive_dedup_key(pending, "gurman")
-    assert wh._motive_dedup_key(with_media, "gurman") != wh._motive_dedup_key(no_media, "gurman")
-
-    # Same id under a different company is a different event.
-    assert wh._motive_dedup_key(with_media, "gurman") != wh._motive_dedup_key(with_media, "dmw")
-
-    assert wh._motive_dedup_key({"type": "hard_brake"}, "gurman") == ""  # no id → never dedup
-
-
-def _motive_crash(**over) -> dict:
-    """The real cross/3003 payload from 2026-07-30, trimmed to the fields that matter."""
-    return {"type": "crash", "id": 9, "current_vehicle": {"number": "3003"},
-            "start_time": "2026-07-30T04:17:56Z", "location": "Norwalk, CA",
-            "start_speed": 90.0324, "end_speed": 71.7228,
-            "event_intensity": {"name": "Collision Intensity", "value": 6.7,
-                                "unit_type": "acceleration"},
-            "secondary_behaviors": ["in_progress"], **over}
-
-
-def test_only_a_dismissed_detection_is_downgraded():
-    """Motive closing a detection out ('no_tag_applies') is the one thing that takes it
-    off the crash channel."""
-    dismissed = _motive_crash(secondary_behaviors=["no_tag_applies"])
-    assert wh._crash_dismissed(dismissed) is True
-    assert wh._get_event_type(dismissed) == "hard_brake"
-
-    out = wh._format_event(dismissed)
-    assert "HARD BRAKE" in out and "CRASH" not in out
-    assert "56 → 45 mph" in out                  # kph converted, so the drop is readable
-    assert "Deceleration:</b> 6.7 m/s²" in out   # measurement travels with the alert
-    assert "closed it out as no event" in out
-
-
-def test_real_crash_reaches_the_crash_channel_at_any_intensity():
-    """jrd unit 2460, 2026-07-30: four events in 14 seconds reporting 11.32, 11.32,
-    10.18 and 0.00 m/s², resolving with an empty secondary_behaviors. An intensity floor
-    suppressed all four, so intensity must never gate this again."""
-    for intensity in (11.32, 10.18, 0.0, 7.79):
-        for state in (["in_progress"], [], None, ["some_unknown_tag"]):
-            event = _motive_crash(secondary_behaviors=state,
-                                  event_intensity={"value": intensity})
-            assert wh._get_event_type(event) == "crash", (intensity, state)
-
-    # No intensity field at all is still a crash.
-    for blind in (_motive_crash(event_intensity=None, secondary_behaviors=[]),
-                  _motive_crash(event_intensity={}, secondary_behaviors=[])):
-        assert wh._crash_intensity(blind) is None
-        assert wh._get_event_type(blind) == "crash"
-
-    # No intensity to judge by means no evidence, so it stays a crash.
-    for blind in (_motive_crash(event_intensity=None), _motive_crash(event_intensity={})):
-        assert wh._crash_intensity(blind) is None
-        assert wh._get_event_type(blind) == "crash"
-
-    # Samsara crashes carry no secondary_behaviors and are untouched by the floor.
-    assert wh._get_event_type({"type": "crash", "_source": "samsara"}) == "crash"
-
-
-async def test_crash_alert_waits_for_motive_verdict(monkeypatch):
-    """The first delivery can't tell a collision from a panic stop — both arrive as
-    'in_progress'. The alert holds until Motive's review resolves it."""
-    monkeypatch.setattr(wh, "_CRASH_VERDICT_WAIT", 0.5)
-
-    async def verdict_for(resolution: dict | None) -> str:
-        wh._crash_verdicts.clear()
-        held = asyncio.ensure_future(_motive_crash_verdict())
-        await asyncio.sleep(0)                       # let the waiter reach the wait
-        if resolution is not None:
-            wh._record_crash_verdict(resolution)     # the redelivery lands
-        return await held
-
-    async def _motive_crash_verdict():
-        return await wh._await_crash_verdict(_motive_crash(id=555))
-
-    # Review closes it out -> dismissed, and that is what downgrades the event.
-    assert await verdict_for(_motive_crash(id=555, secondary_behaviors=["no_tag_applies"])) == "dismissed"
-    assert wh._get_event_type(_motive_crash(_verdict="dismissed")) == "hard_brake"
-
-    # Review resolves with nothing to dismiss it -> the crash stands.
-    assert await verdict_for(_motive_crash(id=555, secondary_behaviors=[])) == "stands"
-    assert wh._get_event_type(_motive_crash(_verdict="stands")) == "crash"
-
-    # Nothing arrives before the window closes -> still a crash, and the card says so.
-    assert await verdict_for(None) == "unresolved"
-    unresolved = _motive_crash(_verdict="unresolved")
-    assert wh._get_event_type(unresolved) == "crash"
-    assert "has not returned a verdict" in wh._format_event(unresolved)
-
-
-async def test_crash_verdict_already_on_the_delivery_is_not_waited_for(monkeypatch):
-    """A delivery that already carries the verdict must decide immediately — the hold is
-    only for provisional ones."""
-    monkeypatch.setattr(wh, "_CRASH_VERDICT_WAIT", 30)
-    wh._crash_verdicts.clear()
-    dismissed = _motive_crash(secondary_behaviors=["no_tag_applies"])
-    stands = _motive_crash(secondary_behaviors=[])
-    assert await asyncio.wait_for(wh._await_crash_verdict(dismissed), timeout=1) == "dismissed"
-    assert await asyncio.wait_for(wh._await_crash_verdict(stands), timeout=1) == "stands"
-
-
-def test_media_followup_caption_and_crash_telemetry():
-    event = {"type": "hard_brake", "id": 7, "vehicle": {"number": "4001"}}
-    followup = wh._format_media_followup(event)
-    assert "HARD BRAKE" in followup and "4001" in followup
-    assert "Driver" not in followup            # the full card already went out
-
-    crash = {"type": "crash", "id": 8, "m_veh_spd": [98.0, 99.0, 79.1],
-             "end_speed": 79.1167, "acceleration": 0.1151}
-    line = wh._crash_telemetry(crash)
-    assert "start=98.0" in line and "max=99.0" in line and "last=79.1" in line
-    assert "end_speed=79.1167" in line and "acceleration=0.1151" in line
-    assert wh._crash_telemetry({"type": "crash"}) == "no telemetry"
 
 
 async def test_download_media_downloads_each_url_once(monkeypatch):

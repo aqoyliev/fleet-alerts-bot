@@ -62,9 +62,7 @@ async def _close_http_session(*_a) -> None:
 # keeps entries in first-seen order, so expired ones cluster at the oldest end and a
 # single front-eviction pass is amortized O(1) per webhook (vs. scanning every key).
 _seen_event_ids: "OrderedDict[str, float]" = OrderedDict()
-# Wide enough to cover a slow redelivery: Motive re-sends an event once its clip has
-# transcoded, and a crash clip has shown up a full 5 minutes after the first delivery.
-_DEDUP_TTL = 900  # seconds
+_DEDUP_TTL = 300  # seconds
 
 
 def _is_duplicate(event_id: str) -> bool:
@@ -84,23 +82,6 @@ def _is_duplicate(event_id: str) -> bool:
         return True
     _seen_event_ids[event_id] = now
     return False
-
-
-def _motive_dedup_key(event: dict, company_slug: str) -> str:
-    """Dedup key for one Motive delivery: company + event id + whether this delivery
-    carries media.
-
-    Motive redelivers the same event several times, ~40s apart, and the repeats are
-    byte-identical — so the id alone would do, except an event can first arrive before
-    its clip has finished transcoding (camera_media.available true, URLs still null)
-    and only carry the video on a later delivery. Keying on media presence suppresses
-    the identical repeats while still letting the delivery that finally brings the clip
-    through."""
-    event_id = str(event.get("id") or "")
-    if not event_id:
-        return ""
-    videos, images = _get_camera_media_info(event)
-    return f"motive:{company_slug}:{event_id}:{'media' if (videos or images) else 'nomedia'}"
 
 
 def _event_id_to_bigint(raw) -> int | None:
@@ -229,123 +210,14 @@ def _get_event_type(event: dict) -> str:
     action = (event.get("action") or "").lower()
     if action in SPEEDING_ACTIONS:
         return "speeding"
-    # A hard brake is never promoted to a crash. Motive grades every hard_brake
-    # low/medium/high/critical, and 'critical' means a hard stop — a panic brake, a
-    # tailgating close call — not a collision. Motive reports real collisions under its
-    # own 'crash' type, so that (and Samsara's 'Crash' harshEventType) is the only
-    # thing that opens the crash channel.
     event_type = (event.get("type") or "").lower()
-
-    # Motive also fires that crash type on plain hard decelerations. The only safe way
-    # to tell those apart is Motive's own review verdict: a detection it closes out
-    # carries 'no_tag_applies', either on this delivery or on the redelivery a minute
-    # later (recorded as _verdict by the wait in _handle_event). Nothing else downgrades —
-    # provisional, resolved-clean or unrecognised all stay a crash.
-    #
-    # Measured deceleration must NOT be used for this. It was, briefly, and it cost a
-    # real one: jrd unit 2460's crash on 2026-07-30 reported 11.32, 11.32, 10.18 and
-    # 0.00 m/s² across four events in 14 seconds, while dismissed non-events have run as
-    # high as 7.79 and as low as 0.00. The ranges overlap, and a crash reporting 0.0 is
-    # proof the field can't carry this decision.
-    if event_type == "crash" and (_crash_dismissed(event) or event.get("_verdict") == "dismissed"):
-        return "hard_brake"
+    # Motive sends collisions as hard_brake with critical severity
+    if event_type == "hard_brake":
+        meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
+        sev = meta_sev or (event.get("severity") or "").strip().lower()
+        if sev == "critical":
+            return "crash"
     return event_type
-
-
-# The tag Motive puts in secondary_behaviors when its review closes a crash detection
-# out as nothing. A confirmed crash resolves with an EMPTY secondary_behaviors instead,
-# so an absent tag is not a dismissal — only this exact tag is.
-_CRASH_DISMISSED_TAG = "no_tag_applies"
-
-
-def _crash_intensity(event: dict) -> float | None:
-    """Motive's measured deceleration for the event, in m/s², or None if absent. Shown
-    in the alert for context only — it is not fit to classify on (see _get_event_type)."""
-    value = (event.get("event_intensity") or {}).get("value")
-    return float(value) if isinstance(value, (int, float)) else None
-
-
-def _crash_dismissed(event: dict) -> bool:
-    """True once Motive's review has closed the detection out as no event."""
-    behaviors = [str(b).lower() for b in (event.get("secondary_behaviors") or [])]
-    return _CRASH_DISMISSED_TAG in behaviors
-
-
-# How long a crash alert is held while Motive's review runs. Its verdict has landed
-# ~60-85s after the first delivery in every case observed; 90 leaves a margin.
-_CRASH_VERDICT_WAIT = 90  # seconds
-
-# event_id -> {"verdict": None | 'dismissed' | 'stands', "signal": asyncio.Event}. Filled
-# by the webhook route for every crash delivery (redeliveries included, since the verdict
-# usually rides one the dedup drops) and awaited by the handler holding the alert.
-_crash_verdicts: "OrderedDict[str, dict]" = OrderedDict()
-_CRASH_VERDICT_MAX = 500
-
-
-def _crash_verdict_slot(event_id: str) -> dict:
-    """The verdict record for an event, created on first mention. Either side can get
-    here first: the resolution can arrive before the handler starts waiting."""
-    slot = _crash_verdicts.get(event_id)
-    if slot is None:
-        slot = {"verdict": None, "signal": asyncio.Event()}
-        _crash_verdicts[event_id] = slot
-        while len(_crash_verdicts) > _CRASH_VERDICT_MAX:
-            _crash_verdicts.popitem(last=False)
-    return slot
-
-
-def _record_crash_verdict(event: dict) -> str | None:
-    """Note Motive's verdict from a crash delivery, waking anything holding an alert for
-    it. A delivery still marked 'in_progress' carries no verdict; any other state is the
-    review having resolved. Returns the verdict recorded, if any."""
-    event_id = str(event.get("id") or "")
-    if not event_id or _crash_review_pending(event):
-        return None
-    verdict = "dismissed" if _crash_dismissed(event) else "stands"
-    slot = _crash_verdict_slot(event_id)
-    slot["verdict"] = verdict
-    slot["signal"].set()
-    return verdict
-
-
-async def _await_crash_verdict(event: dict) -> str:
-    """Hold a Motive crash detection until its review lands.
-
-    Motive fires the webhook the instant its detector trips, about a minute before it
-    decides whether a crash actually happened, and a panic stop is indistinguishable from
-    a collision at that point — both arrive as type 'crash', 'in_progress'. Waiting for
-    the verdict is the only thing that keeps dismissed detections off the crash channel.
-
-    Returns 'dismissed', 'stands', or 'unresolved' when the window closes with nothing.
-    Only 'dismissed' takes an event off the crash channel: a late alert is recoverable,
-    a missing one is not."""
-    event_id = str(event.get("id") or "")
-    if not event_id:
-        return "unresolved"
-    if not _crash_review_pending(event):
-        return "dismissed" if _crash_dismissed(event) else "stands"
-
-    slot = _crash_verdict_slot(event_id)
-    if slot["verdict"] is None:
-        logger.info(f"[motive] Holding crash alert id={event_id} for up to "
-                    f"{_CRASH_VERDICT_WAIT}s while Motive's review runs")
-        try:
-            await asyncio.wait_for(slot["signal"].wait(), timeout=_CRASH_VERDICT_WAIT)
-        except asyncio.TimeoutError:
-            logger.warning(f"[motive] No verdict for crash id={event_id} after "
-                           f"{_CRASH_VERDICT_WAIT}s — alerting as a crash")
-            return "unresolved"
-    return slot["verdict"] or "unresolved"
-
-
-def _crash_review_pending(event: dict) -> bool:
-    """True while Motive's crash classification is provisional: a freshly detected crash
-    arrives with 'in_progress' in secondary_behaviors, and about a minute later the same
-    event is redelivered resolved ('no_tag_applies' on the ones observed so far). Used
-    only to word the alert — the crash/hard-brake decision is made on measured force,
-    since either state can be the first delivery we see."""
-    behaviors = [str(b).lower() for b in (event.get("secondary_behaviors") or [])]
-    return "in_progress" in behaviors
 
 
 def _get_vehicle(event: dict) -> str:
@@ -435,26 +307,6 @@ def _format_event(event: dict, company_name: str = "", samsara: dict | None = No
         if duration:
             lines.append(f"⏱ <b>Duration:</b> {duration}s")
 
-    # Show the measurements whenever the provider called it a crash — including the ones
-    # downgraded to hard_brake, so the reader can see the call and check it.
-    crash_payload = (event.get("type") or "").lower() == "crash"
-    if crash_payload:
-        start_kph, end_kph = event.get("start_speed"), event.get("end_speed")
-        if isinstance(start_kph, (int, float)) and isinstance(end_kph, (int, float)):
-            lines.append(f"📉 <b>Speed:</b> {_kph_to_mph(start_kph):.0f} → "
-                         f"{_kph_to_mph(end_kph):.0f} mph")
-        intensity = _crash_intensity(event)
-        if intensity is not None:
-            lines.append(f"💢 <b>Deceleration:</b> {intensity} m/s²")
-
-        if event_type != "crash":
-            lines.append("\n⚠️ <i>Motive's crash detector fired on this and its review "
-                         "then closed it out as no event, so it's reported as a hard brake.</i>")
-        elif event.get("_verdict") == "unresolved" or (
-                event.get("_verdict") is None and _crash_review_pending(event)):
-            lines.append("\n⏳ <i>Motive's review has not returned a verdict — "
-                         "sending this as a crash</i>")
-
     # Only crash alerts carry the provider tag: they're the one type still mixed in
     # a single place (admin DMs), so the source matters there. Everything else is
     # already routed to per-provider groups, making the tag redundant noise.
@@ -498,31 +350,6 @@ def _format_crash_initial(event: dict, company_name: str = "") -> str:
     before the video uploads. Everyone (groups and DMs) gets this, so the complete
     record is delivered even when no video ever resolves."""
     return _format_event(event, company_name) + "\n\n📹 <i>Video pending…</i>"
-
-
-def _crash_telemetry(event: dict) -> str:
-    """One-line impact summary from a Motive crash payload, for the log. The speed trace
-    and reported acceleration are what separate a collision from the routine slowdown
-    Motive's crash detector also flags."""
-    spd = [v for v in (event.get("m_veh_spd") or []) if isinstance(v, (int, float))]
-    parts = []
-    if spd:
-        parts.append(f"spd_trace n={len(spd)} start={spd[0]:.1f} max={max(spd):.1f} "
-                     f"min={min(spd):.1f} last={spd[-1]:.1f}")
-    for field in ("start_speed", "end_speed", "acceleration"):
-        value = event.get(field)
-        if isinstance(value, (int, float)):
-            parts.append(f"{field}={value:.4f}")
-    return "  ".join(parts) or "no telemetry"
-
-
-def _format_media_followup(event: dict) -> str:
-    """Caption for a clip that arrives after the alert already went out. Motive
-    redelivers an event once its video has transcoded; the details were already sent, so
-    the follow-up just labels the footage instead of repeating the whole card."""
-    event_type = _get_event_type(event)
-    emoji, title = EVENT_TYPE_MAP.get(event_type, ("🚨", event_type.upper().replace("_", " ")))
-    return f"🎥 {emoji} <b>{title}</b> — <code>{_get_vehicle(event)}</code> — video"
 
 
 def _format_crash_video_caption(event: dict) -> str:
@@ -818,15 +645,6 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
         event_type = _get_event_type(event)
         event_id = event.get("id", "?")
 
-        # A Motive crash arrives before its review has decided anything, so hold the
-        # alert until the verdict lands (or the window closes) and classify on that.
-        if event_type == "crash" and event.get("_source") != "samsara":
-            verdict = await _await_crash_verdict(event)
-            event = {**event, "_verdict": verdict}
-            event_type = _get_event_type(event)
-            logger.info(f"[motive] Crash verdict for id={event_id}: {verdict} "
-                        f"— alerting as {event_type}")
-
         if event_type not in ALLOWED_TYPES:
             logger.info(f"Ignored event type='{event_type}' id={event_id}")
             return
@@ -842,18 +660,6 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
                 return
 
         logger.info(f"Processing event {event_id} type={event_type}")
-
-        # Crashes are rare and go straight to admin DMs, so log the payload that claimed
-        # to be one — it's the only way to tell a genuine provider crash from a
-        # misclassification after the fact.
-        if event_type == "crash":
-            logger.info(f"Crash telemetry id={event_id} company={company_slug}: "
-                        f"{_crash_telemetry(event)}")
-            # The payload is alphabetically ordered and front-loaded with GPS/speed
-            # arrays, so 'type', 'severity' and 'metadata' sit at the very end — the
-            # limit has to be generous or the fields that matter get cut.
-            logger.info(f"Crash payload id={event_id} company={company_slug}: "
-                        f"{json.dumps(event, default=str)[:6000]}")
 
         # Persist the violation, unless the first-poll hook already saved it. Same
         # helpers as the hook so the row is identical either way.
@@ -911,12 +717,9 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
                 )
                 if samsara_details:
                     logger.info(f"[samsara] Speeding enrichment id={event_id}: {samsara_details}")
-            if event.get("_media_followup"):
-                text = _format_media_followup(event)
-            else:
-                text = _format_event(event, company_display, samsara_details)
-                if not video_urls and not image_urls and event.get("camera_media") is None and event_type != "speeding":
-                    text += "\n\n📷 <i>No camera media available</i>"
+            text = _format_event(event, company_display, samsara_details)
+            if not video_urls and not image_urls and event.get("camera_media") is None and event_type != "speeding":
+                text += "\n\n📷 <i>No camera media available</i>"
 
         # Download the media ONCE up front and reuse the bytes for every recipient,
         # rather than re-downloading (potentially large crash clips) per chat.
@@ -1107,34 +910,6 @@ async def motive_webhook(request: web.Request) -> web.Response:
             event_type = _get_event_type(event)
             if event_type not in ALLOWED_TYPES:
                 logger.debug(f"Unhandled event type='{event_type}' keys={list(event.keys())} payload={json.dumps(event, default=str)[:500]}")
-            # Logged before the dedup check so redeliveries are visible too: the open
-            # question is whether Motive later resolves a provisional crash (dropping
-            # 'in_progress') or leaves it that way, which decides whether these can be
-            # held back from the crash channel until confirmed.
-            if (event.get("type") or "").lower() == "crash":
-                # Record before the dedup check: the verdict usually rides a redelivery
-                # that dedup drops, and an alert may be held waiting for it right now.
-                verdict = _record_crash_verdict(event)
-                logger.info(f"[motive] Crash delivery id={event.get('id')} company='{company_slug}' "
-                            f"resolved_as='{event_type}' verdict={verdict} "
-                            f"action='{event.get('action')}' primary={event.get('primary_behavior')} "
-                            f"secondary={event.get('secondary_behaviors')} "
-                            f"intensity={(event.get('event_intensity') or {}).get('value')} "
-                            f"media={(event.get('camera_media') or {}).get('available')}")
-
-            key = _motive_dedup_key(event, company_slug)
-            if _is_duplicate(key):
-                logger.info(f"[motive] Duplicate delivery id={event.get('id')} type='{event_type}' "
-                            f"company='{company_slug}' — skipping")
-                continue
-            # Already alerted on this event before its clip was ready? Then this
-            # delivery is the video arriving, not a second event — caption it as such
-            # instead of repeating the full card.
-            if (event_type in ALLOWED_TYPES and key.endswith(":media")
-                    and f"{key[:-len('media')]}nomedia" in _seen_event_ids):
-                event["_media_followup"] = True
-                logger.info(f"[motive] Clip arrived for already-alerted id={event.get('id')} "
-                            f"type='{event_type}' — sending as video follow-up")
             asyncio.create_task(_handle_event(bot, event, company_slug))
 
         return web.Response(text="OK", status=200)
