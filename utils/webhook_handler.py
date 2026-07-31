@@ -852,6 +852,12 @@ async def samsara_webhook(request: web.Request) -> web.Response:
             logger.warning(f"[samsara] No webhook secret for company='{company_slug}' — skipping signature check")
 
         body = json.loads(body_bytes)
+
+        # As on the Motive route: the raw bytes as sent, before parsing. Logged ahead of
+        # the dedup check so suppressed redeliveries are visible too.
+        logger.info(f"[samsara] RAW delivery company='{company_slug}': "
+                    f"{body_bytes.decode('utf-8', 'replace')[:4000]}")
+
         event_id = body.get("eventId") or ""
         if _is_duplicate(event_id):
             logger.info(f"[samsara] Duplicate eventId={event_id} — skipping")
@@ -890,14 +896,17 @@ async def motive_webhook(request: web.Request) -> web.Response:
 
         body = json.loads(body_bytes)
 
-        # Log the raw bytes of any delivery mentioning a crash, before anything parses or
-        # reclassifies them — this is the only record of what Motive actually sent, and
-        # crash deliveries are the ones whose contents are in question. Matched on the
-        # raw text so a crash is still captured when it arrives under another type.
+        # Log the raw bytes of every delivery, before anything parses or reclassifies it —
+        # the record of what Motive actually sent rather than what we made of it.
+        # Crash deliveries are tagged (matched on the raw text, so one still counts when it
+        # arrives under another type) and get a wider cap: their payload is front-loaded
+        # with GPS/speed arrays, which pushes secondary_behaviors, event_intensity and
+        # metadata — the fields actually in question — to the very end.
         # Observability only: nothing downstream reads this.
         _raw = body_bytes.decode("utf-8", "replace")
-        if '"crash"' in _raw:
-            logger.info(f"[motive] RAW crash delivery company='{company_slug}': {_raw[:8000]}")
+        _is_crash = '"crash"' in _raw
+        logger.info(f"[motive] RAW {'crash ' if _is_crash else ''}delivery "
+                    f"company='{company_slug}': {_raw[:8000 if _is_crash else 4000]}")
 
         # Verification ping — list of event type strings
         if isinstance(body, list) and all(isinstance(i, str) for i in body):
