@@ -867,12 +867,6 @@ async def samsara_webhook(request: web.Request) -> web.Response:
             logger.warning(f"[samsara] No webhook secret for company='{company_slug}' — skipping signature check")
 
         body = json.loads(body_bytes)
-
-        # As on the Motive route: the raw bytes as sent, before parsing. Logged ahead of
-        # the dedup check so suppressed redeliveries are visible too.
-        logger.info(f"[samsara] RAW delivery company='{company_slug}': "
-                    f"{_clip(body_bytes.decode('utf-8', 'replace'), 4000)}")
-
         event_id = body.get("eventId") or ""
         if _is_duplicate(event_id):
             logger.info(f"[samsara] Duplicate eventId={event_id} — skipping")
@@ -911,15 +905,15 @@ async def motive_webhook(request: web.Request) -> web.Response:
 
         body = json.loads(body_bytes)
 
-        # Log the raw bytes of every delivery, before anything parses or reclassifies it —
-        # the record of what Motive actually sent rather than what we made of it.
-        # Crash deliveries are tagged (matched on the raw text, so one still counts when
-        # it arrives under another type) and keep more of the body.
+        # Log the raw bytes of crash deliveries only, before anything parses or
+        # reclassifies them. Matched on the raw text so a crash is still captured when it
+        # arrives under another type. Deliberately NOT every delivery: at ~110/hour that
+        # buries the log in payloads nobody is reading.
         # Observability only: nothing downstream reads this.
         _raw = body_bytes.decode("utf-8", "replace")
-        _is_crash = '"crash"' in _raw
-        logger.info(f"[motive] RAW {'crash ' if _is_crash else ''}delivery "
-                    f"company='{company_slug}': {_clip(_raw, 8000 if _is_crash else 4000)}")
+        if '"crash"' in _raw:
+            logger.info(f"[motive] RAW crash delivery company='{company_slug}': "
+                        f"{_clip(_raw, 8000)}")
 
         # Verification ping — list of event type strings
         if isinstance(body, list) and all(isinstance(i, str) for i in body):
