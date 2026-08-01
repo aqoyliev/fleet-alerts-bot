@@ -105,6 +105,18 @@ async def get_motive_webhook_secret(slug: str) -> str | None:
     return row["motive_webhook_secret"] if row else None
 
 
+async def get_motive_api_key(slug: str) -> str | None:
+    """Returns the company's Motive API key, or None if it has none.
+
+    Used to confirm crash detections against the v2 events API. Each company is a
+    separate Motive org, so — like the Samsara token — this is per-row rather than a
+    single global key."""
+    row = await db.fetchrow(
+        "SELECT motive_api_key FROM companies WHERE slug = $1", slug
+    )
+    return row["motive_api_key"] if row else None
+
+
 async def get_speeding_min_severity(slug: str) -> str:
     """Returns the minimum severity level for speeding alerts (e.g., 'high', 'medium', 'critical')."""
     row = await db.fetchrow("SELECT speeding_min_severity FROM companies WHERE slug = $1", slug)

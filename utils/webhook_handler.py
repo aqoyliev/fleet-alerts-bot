@@ -22,9 +22,11 @@ from utils.db_api.companies import (
     get_speeding_min_severity,
     get_samsara_credentials,
     get_motive_webhook_secret,
+    get_motive_api_key,
 )
 from utils.db_api.violations import save_violation
 from utils.db_api.admins import get_subscribed_admins
+from utils.motive import crash_still_listed
 from utils.samsara.client import fetch_speeding_details
 
 logger = logging.getLogger(__name__)
@@ -62,7 +64,9 @@ async def _close_http_session(*_a) -> None:
 # keeps entries in first-seen order, so expired ones cluster at the oldest end and a
 # single front-eviction pass is amortized O(1) per webhook (vs. scanning every key).
 _seen_event_ids: "OrderedDict[str, float]" = OrderedDict()
-_DEDUP_TTL = 300  # seconds
+# Wide enough to cover a slow redelivery: Motive re-sends an event once its clip has
+# transcoded, and a crash clip has shown up a full 5 minutes after the first delivery.
+_DEDUP_TTL = 900  # seconds
 
 
 def _is_duplicate(event_id: str) -> bool:
@@ -82,6 +86,23 @@ def _is_duplicate(event_id: str) -> bool:
         return True
     _seen_event_ids[event_id] = now
     return False
+
+
+def _motive_dedup_key(event: dict, company_slug: str) -> str:
+    """Dedup key for one Motive delivery: company + event id + whether this delivery
+    carries media.
+
+    Motive redelivers the same event several times, ~40s apart, and the repeats are
+    byte-identical — so the id alone would do, except an event can first arrive before
+    its clip has finished transcoding (camera_media.available true, URLs still null)
+    and only carry the video on a later delivery. Keying on media presence suppresses
+    the identical repeats while still letting the delivery that finally brings the clip
+    through."""
+    event_id = str(event.get("id") or "")
+    if not event_id:
+        return ""
+    videos, images = _get_camera_media_info(event)
+    return f"motive:{company_slug}:{event_id}:{'media' if (videos or images) else 'nomedia'}"
 
 
 def _event_id_to_bigint(raw) -> int | None:
@@ -222,6 +243,13 @@ def _to_et(utc_iso: str) -> str:
 
 def _get_event_type(event: dict) -> str:
     """Determine canonical event type from action or type field."""
+    # Set when Motive's API says a crash detection was withdrawn (see
+    # _motive_crash_is_real). Checked first so the downgrade sticks everywhere the type
+    # is re-derived — _format_event does that internally — and so the critical-severity
+    # rule below can't promote the event straight back to a crash.
+    override = event.get("_type_override")
+    if override:
+        return override
     action = (event.get("action") or "").lower()
     if action in SPEEDING_ACTIONS:
         return "speeding"
@@ -327,6 +355,10 @@ def _format_event(event: dict, company_name: str = "", samsara: dict | None = No
     # already routed to per-provider groups, making the tag redundant noise.
     if event_type == "crash":
         source = "Samsara" if event.get("_source") == "samsara" else "Motive"
+        # Say so when the alert went out without Motive's confirmation, so an
+        # unverified crash is never mistaken for a verified one.
+        if event.get("_crash_unconfirmed"):
+            lines.append("\n⚠️ <i>Unconfirmed — Motive's review could not be reached.</i>")
         lines.append(f"\n<i>via {source}</i>")
 
     return "\n".join(lines)
@@ -561,6 +593,43 @@ def _parse_samsara(body: dict) -> tuple[str, dict]:
     return "", {}
 
 
+# How long Motive's review is given before we decide. Its verdict landed 60-85s after
+# the first delivery in every case observed, so 180s leaves real margin. The cost is
+# that a genuine crash alert arrives ~3 minutes late; that beats another false CRASH.
+_CRASH_CONFIRM_DELAY = 180
+# Extra look-ups taken on the way there. Logged only, never acted on — they record how
+# long withdrawal actually takes so the delay above can be tuned from traffic rather
+# than guessed at again.
+_CRASH_CONFIRM_PROBES = (60, 120)
+
+
+async def _motive_crash_is_real(event: dict, company_slug: str) -> bool | None:
+    """Wait for Motive's review, then ask its API whether this crash still stands.
+
+    Returns True (confirmed), False (withdrawn) or None (couldn't tell — no API key
+    for the company, or the lookup failed). None must fail open: no evidence is not
+    evidence of no crash."""
+    api_key = await get_motive_api_key(company_slug)
+    event_id = event.get("id")
+    if not api_key:
+        logger.warning(f"[motive] No API key for company='{company_slug}' — "
+                       f"sending crash {event_id} unconfirmed")
+        return None
+
+    occurred = _parse_occurred(event)
+    elapsed = 0
+    for mark in (*_CRASH_CONFIRM_PROBES, _CRASH_CONFIRM_DELAY):
+        await asyncio.sleep(mark - elapsed)
+        elapsed = mark
+        listed = await crash_still_listed(api_key, event_id, occurred)
+        if mark != _CRASH_CONFIRM_DELAY:
+            logger.info(f"[motive] crash {event_id} at +{mark}s: listed={listed} (observation)")
+            continue
+        logger.info(f"[motive] crash {event_id} verdict at +{mark}s: listed={listed}")
+        return listed
+    return None
+
+
 async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
                         samsara_api_key: str | None = None):
     """Filter → format → send to Telegram (URLs sent directly, no download).
@@ -663,6 +732,21 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
         if event_type not in ALLOWED_TYPES:
             logger.info(f"Ignored event type='{event_type}' id={event_id}")
             return
+
+        # Motive's crash webhook fires on detection, before its review runs, and a
+        # rejected detection is then withdrawn from its API. Confirm against the API
+        # before opening the crash channel. Covers both routes into 'crash': Motive's
+        # own type and the critical-hard_brake promotion in _get_event_type. Samsara
+        # crashes are resolved by their own poll and never come through here.
+        if event_type == "crash" and event.get("_source") != "samsara":
+            listed = await _motive_crash_is_real(event, company_slug)
+            if listed is False:
+                event["_type_override"] = "hard_brake"
+                event_type = "hard_brake"
+                logger.info(f"[motive] Crash {event_id} withdrawn by Motive — "
+                            f"routing as hard_brake instead of alerting")
+            elif listed is None:
+                event["_crash_unconfirmed"] = True
 
         if event_type == "speeding":
             meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
@@ -935,6 +1019,12 @@ async def motive_webhook(request: web.Request) -> web.Response:
             event_type = _get_event_type(event)
             if event_type not in ALLOWED_TYPES:
                 logger.debug(f"Unhandled event type='{event_type}' keys={list(event.keys())} payload={json.dumps(event, default=str)[:500]}")
+            # Motive redelivers each event ~3x at 40s intervals; without this every
+            # repeat re-downloads the same media and re-sends the same alert.
+            if _is_duplicate(_motive_dedup_key(event, company_slug)):
+                logger.info(f"[motive] Duplicate delivery id={event.get('id')} "
+                            f"company='{company_slug}' — skipping")
+                continue
             asyncio.create_task(_handle_event(bot, event, company_slug))
 
         return web.Response(text="OK", status=200)

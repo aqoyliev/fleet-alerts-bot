@@ -14,6 +14,10 @@ CREATE TABLE IF NOT EXISTS companies (
     -- verification. Motive signs with HMAC-SHA1 over the raw body in
     -- X-KT-Webhook-Signature (NOT SHA256, and NOT an X-Motive-* header).
     motive_webhook_secret   VARCHAR(255),
+    -- Per-company Motive API key (x-api-key), used to confirm crash detections
+    -- against /v2/driver_performance_events. Each company is a separate Motive org,
+    -- so this cannot be a single global key. NULL = crashes are sent unconfirmed.
+    motive_api_key          VARCHAR(255),
     created_at              TIMESTAMPTZ  DEFAULT NOW()
 );
 
@@ -22,6 +26,7 @@ CREATE TABLE IF NOT EXISTS companies (
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS samsara_api_key        VARCHAR(255);
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS samsara_webhook_secret VARCHAR(255);
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS motive_webhook_secret  VARCHAR(255);
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS motive_api_key         VARCHAR(255);
 
 CREATE TABLE IF NOT EXISTS company_groups (
     id                SERIAL PRIMARY KEY,
