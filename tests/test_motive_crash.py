@@ -6,6 +6,9 @@ withdraws the detection from its API when review rejects it. Measured 2026-07-29
 downgrade that follows from that, driven through a faked lookup so nothing sleeps or
 touches the network.
 """
+import asyncio
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 import utils.webhook_handler as wh
@@ -69,9 +72,14 @@ def test_motive_dedup_key_separates_media_from_nomedia():
 
 @pytest.fixture
 def no_sleep(monkeypatch):
-    async def _instant(_seconds):
-        return None
+    """Records what would have been slept, so the resume tests can assert on it."""
+    slept = []
+
+    async def _instant(seconds):
+        slept.append(seconds)
+
     monkeypatch.setattr(wh.asyncio, "sleep", _instant)
+    return slept
 
 
 @pytest.fixture
@@ -128,3 +136,145 @@ async def test_missing_api_key_fails_open_without_calling_the_api(monkeypatch, n
     calls = _lookup_returning(monkeypatch, True)
     assert await wh._motive_crash_is_real({"id": 1}, "nokey") is None
     assert calls == []
+
+
+async def test_fresh_confirmation_waits_through_every_mark(monkeypatch, no_sleep, api_key):
+    _lookup_returning(monkeypatch, True)
+    await wh._motive_crash_is_real({"id": 1}, "jrd")
+    assert no_sleep == [60, 60, 60]  # 0 → 60 → 120 → 180
+
+
+# ── resume after a restart ─────────────────────────────────────────────────────
+
+async def test_resume_only_waits_out_the_time_still_owed(monkeypatch, no_sleep, api_key):
+    """A crash held 100s before the restart has 80s of the 180s left, not another 180."""
+    calls = _lookup_returning(monkeypatch, True)
+    assert await wh._motive_crash_is_real({"id": 1}, "jrd", 100.0) is True
+    assert no_sleep == [20, 60]  # 100 → 120 (observation), 120 → 180 (verdict)
+    assert len(calls) == 2
+
+
+async def test_resume_past_the_delay_decides_immediately(monkeypatch, no_sleep, api_key):
+    """Down longer than the whole wait: Motive's review is long since in, so ask now."""
+    calls = _lookup_returning(monkeypatch, False)
+    assert await wh._motive_crash_is_real({"id": 1}, "jrd", 900.0) is False
+    assert no_sleep == []          # nothing left to wait for
+    assert len(calls) == 1         # and no pointless observation look-ups
+
+
+def test_verdict_names_cover_every_outcome():
+    assert wh._verdict_name(True) == wh.VERDICT_CONFIRMED
+    assert wh._verdict_name(False) == wh.VERDICT_WITHDRAWN
+    assert wh._verdict_name(None) == wh.VERDICT_UNKNOWN
+
+
+async def test_bookkeeping_failure_never_reaches_the_alert_path():
+    """schemas.sql is applied by hand, so the table can be missing on a fresh deploy.
+    _handle_event catches everything — an unguarded raise here would take the crash
+    alert down with it."""
+    async def _fails():
+        raise RuntimeError("relation motive_crash_confirmations does not exist")
+
+    await wh._note_crash(_fails(), 1588349106)  # must not raise
+
+
+@pytest.fixture
+def captured_resumes(monkeypatch):
+    """Stands in for _handle_event + record_verdict so resume can run without a DB."""
+    resumed, verdicts = [], []
+
+    async def _handle(bot, event, company_slug, crash_resume_elapsed=None):
+        resumed.append((event, company_slug, crash_resume_elapsed))
+
+    async def _verdict(event_id, verdict):
+        verdicts.append((event_id, verdict))
+
+    async def _counts(_since):
+        return {}
+
+    monkeypatch.setattr(wh, "_handle_event", _handle)
+    monkeypatch.setattr(wh, "record_verdict", _verdict)
+    monkeypatch.setattr(wh, "get_verdict_counts", _counts)
+    return resumed, verdicts
+
+
+def _pending(monkeypatch, *rows):
+    async def _fake():
+        return list(rows)
+    monkeypatch.setattr(wh, "get_pending_confirmations", _fake)
+
+
+def _row(event_id, age_seconds, payload):
+    return {
+        "event_id": event_id,
+        "company_slug": "jrd",
+        "payload": payload,
+        "detected_at": datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
+    }
+
+
+async def test_interrupted_confirmation_is_resumed_with_its_elapsed_time(
+        monkeypatch, captured_resumes):
+    resumed, verdicts = captured_resumes
+    _pending(monkeypatch, _row(1588349106, 90, {"id": 1588349106, "type": "crash"}))
+
+    await wh.resume_pending_crash_confirmations(bot=None)
+    await asyncio.sleep(0)  # let the created task run
+
+    assert len(resumed) == 1
+    event, slug, elapsed = resumed[0]
+    assert event["id"] == 1588349106
+    assert slug == "jrd"
+    assert 90 <= elapsed < 120       # carried across, not restarted from zero
+    assert verdicts == []            # still undecided — the resumed run decides it
+
+
+async def test_resumed_payload_is_decoded_when_asyncpg_hands_back_text(
+        monkeypatch, captured_resumes):
+    """JSONB comes out as a str without a codec registered, and _handle_event needs a dict."""
+    resumed, _ = captured_resumes
+    _pending(monkeypatch, _row(1, 10, '{"id": 1, "type": "crash"}'))
+
+    await wh.resume_pending_crash_confirmations(bot=None)
+    await asyncio.sleep(0)
+
+    assert resumed[0][0] == {"id": 1, "type": "crash"}
+
+
+async def test_stale_pending_crash_is_expired_not_alerted(monkeypatch, captured_resumes):
+    """Past _CRASH_RESUME_MAX_AGE the bot was down, and a crash DM that late is noise."""
+    resumed, verdicts = captured_resumes
+    old = wh._CRASH_RESUME_MAX_AGE + 60
+    _pending(monkeypatch, _row(42, old, {"id": 42, "type": "crash"}))
+
+    await wh.resume_pending_crash_confirmations(bot=None)
+    await asyncio.sleep(0)
+
+    assert resumed == []
+    assert verdicts == [(42, wh.VERDICT_EXPIRED)]
+
+
+async def test_resume_survives_an_unreachable_database(monkeypatch, captured_resumes):
+    """A DB hiccup at startup must not take the bot down with it."""
+    resumed, _ = captured_resumes
+
+    async def _boom():
+        raise RuntimeError("pool not ready")
+
+    monkeypatch.setattr(wh, "get_pending_confirmations", _boom)
+    await wh.resume_pending_crash_confirmations(bot=None)
+    assert resumed == []
+
+
+async def test_one_unreadable_row_does_not_cost_the_others(monkeypatch, captured_resumes):
+    """This runs inside on_startup, so a single bad payload must not stop the boot —
+    nor the crash sitting behind it in the queue."""
+    resumed, _ = captured_resumes
+    _pending(monkeypatch,
+             _row(1, 30, "{not json at all"),
+             _row(2, 30, {"id": 2, "type": "crash"}))
+
+    await wh.resume_pending_crash_confirmations(bot=None)
+    await asyncio.sleep(0)
+
+    assert [e["id"] for e, _s, _a in resumed] == [2]
