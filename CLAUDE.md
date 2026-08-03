@@ -66,6 +66,20 @@ Motive sends complete event data in the webhook payload. Samsara webhooks are th
 
 Because the harsh-event *type* (crash vs. hard brake, etc.) only arrives in the first poll response, the violation row is saved then via the `on_first` hook — not after the full poll — so a mid-poll restart can't lose the event. On crash detection the hook also sends the **full details immediately as text** (`_format_crash_initial`, the complete card minus the clip) to every crash target — groups and DMs alike — so the full record is delivered even if no video ever resolves. When the video URLs resolve, the main path sends a follow-up: just the clip with a short caption (`_format_crash_video_caption`). No video → the follow-up is instead a short text closure note (`📹 No video available for this crash.`) to the same crash targets, since the first alert showed "Video pending…" and recipients would otherwise be left waiting. (Edge case: if the location wasn't ready for the first alert but resolved by the time the video did, the follow-up upgrades to the full caption so the location still reaches recipients.) Non-crash harsh events are unchanged (a single card after the poll).
 
+### Motive crash confirmation (false-positive gate)
+
+Motive fires its crash webhook the instant the detector trips, **before** its own review runs, then **withdraws** a rejected detection from `/v2/driver_performance_events` — it disappears entirely rather than being reclassified. Measured on the multi-company bot 2026-07-29..08-01, 59 of 62 crash webhooks alerted on were gone from the API afterwards. Presence in that API is therefore the only reliable classifier; no payload field is (`coaching_status`, `primary_behavior`, `secondary_behaviors`, `event_intensity` were identical between the real crash and the false ones).
+
+A Motive event resolving to `crash` therefore waits `_CRASH_CONFIRM_DELAY` (180s — the review landed 60-85s in every observed case) and then asks `crash_still_listed()` whether it stands:
+
+- **still listed** → alert as a crash, normally
+- **withdrawn** → `_type_override='hard_brake'`, honoured first by `_get_event_type()` so the downgrade survives `_format_event` re-deriving the type; routed to the hard-brake channel instead
+- **lookup failed / no `MOTIVE_API_KEY`** → **fails open**: the crash is sent anyway, with `⚠️ Unconfirmed` on the card. No evidence is not evidence of no crash.
+
+Samsara crashes are excluded (`_source == "samsara"`) — they resolve through their own poll and have already sent their first card.
+
+Because the wait lives in a fire-and-forget task, a row is written to `motive_crash_confirmations` **before** it and the verdict filled in after. That gives an audit trail (a quiet crash channel alone can't distinguish a working gate from a Motive detector that stopped tripping) and recoverability: `resume_pending_crash_confirmations()` runs at startup, picks up anything still undecided, and carries the elapsed time across so a detection held 90s waits 90 more rather than a fresh 180. Past `_CRASH_RESUME_MAX_AGE` (1h) the bot was down rather than restarted, and the row is marked `expired` instead of alerting. All bookkeeping writes go through `_note_crash`, which swallows failures — losing the audit row is acceptable, losing the alert is not.
+
 ## Database
 
 Schema is in `utils/db_api/schemas.sql`. No migrations framework — changes require manual SQL.
@@ -74,6 +88,7 @@ Key tables:
 - `violations` — all processed events; `event_id` is the unique idempotency key
 - `companies` / `company_groups` / `group_event_types` — routing config
 - `admins` / `admin_companies` / `admin_subscriptions` — admin access + DM preferences
+- `motive_crash_confirmations` — one row per Motive crash detection held for confirmation (see below); `verdict IS NULL` means the wait was cut short by a restart and is resumed at startup
 
 All queries use asyncpg `$1, $2` placeholders (never f-strings). Times stored as UTC `timestamptz`, displayed in ET.
 
@@ -97,6 +112,7 @@ WHERE vehicle_number ~* '^unit[\s:#-]+';
 | `COMPANY_SLUG` | Default company slug |
 | `GROUP_CHAT_ID` | Default fallback Telegram group ID |
 | `SAMSARA_API_KEY` | Samsara REST API key (optional) |
+| `MOTIVE_API_KEY` | Motive REST API key — confirms crash detections before alerting. **Unset = every crash goes out marked "Unconfirmed"** (the gate fails open) |
 | `MOTIVE_WEBHOOK_SECRET` | HMAC secret for Motive (empty = skip verification) |
 | `SAMSARA_WEBHOOK_SECRET` | HMAC secret for Samsara (empty = skip verification) |
 | `REDIS_URL` | Redis for FSM storage (optional; falls back to in-memory) |

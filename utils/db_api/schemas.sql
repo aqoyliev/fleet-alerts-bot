@@ -64,3 +64,28 @@ CREATE TABLE IF NOT EXISTS violations (
 
 CREATE INDEX IF NOT EXISTS violations_company_occurred ON violations (company_slug, occurred_at);
 CREATE INDEX IF NOT EXISTS violations_vehicle ON violations (vehicle_number);
+
+-- Motive crash detections put through the confirmation wait in _motive_crash_is_real.
+-- The row is written BEFORE the wait and the verdict filled in after, which buys two
+-- things the in-memory task cannot:
+--   * an audit trail. A quiet crash channel on its own cannot distinguish a gate that
+--     is catching withdrawals from a Motive detector that stopped tripping; the
+--     verdict tally can.
+--   * recoverability. The wait runs in a fire-and-forget task, so a deploy inside it
+--     used to drop the alert silently. A row still verdict IS NULL at startup is
+--     exactly that case, and gets resumed.
+-- payload is the event as received, so the resume can re-run the normal alert path.
+CREATE TABLE IF NOT EXISTS motive_crash_confirmations (
+    event_id     BIGINT       PRIMARY KEY,
+    company_slug VARCHAR(50)  NOT NULL,
+    payload      JSONB        NOT NULL,
+    -- NULL = still waiting. Otherwise confirmed / withdrawn / unknown / expired.
+    verdict      VARCHAR(20),
+    detected_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    decided_at   TIMESTAMPTZ
+);
+
+-- Startup reads only the undecided rows, which are near-always zero; a partial index
+-- keeps that lookup off the full table.
+CREATE INDEX IF NOT EXISTS motive_crash_confirmations_pending
+    ON motive_crash_confirmations (detected_at) WHERE verdict IS NULL;

@@ -6,6 +6,7 @@ import unittest.mock as mock
 _data_pkg = types.ModuleType("data")
 _config_mod = types.ModuleType("data.config")
 _config_mod.MOTIVE_API_KEY = "test"
+_config_mod.COMPANY_SLUG = "mz-cargo"
 _config_mod.GROUP_CHAT_ID = 0
 _config_mod.ADMINS = []
 _config_mod.BOT_TOKEN = "test"
@@ -34,6 +35,7 @@ _stubs = [
     "utils.db_api.violations",
     "utils.db_api.companies",
     "utils.db_api.admins",
+    "utils.db_api.crash_confirmations",
     "utils.db_api.users",
     "utils.motive",
     "utils.notify_admins",
