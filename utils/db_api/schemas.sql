@@ -67,3 +67,25 @@ CREATE TABLE IF NOT EXISTS violations (
 
 CREATE INDEX IF NOT EXISTS violations_occurred ON violations (occurred_at);
 CREATE INDEX IF NOT EXISTS violations_vehicle ON violations (vehicle_number);
+
+-- Audit trail for the Motive crash confirmation wait (see utils/db_api/crash_confirmations.py).
+--
+-- A crash detection is held ~3 minutes before Motive's API is asked whether it still
+-- stands. That wait is a fire-and-forget task, so a row is written before it starts and
+-- the verdict filled in after: a row still NULL at startup is a wait a restart cut
+-- short, and gets resumed. The verdict tally is also the only evidence that the gate is
+-- catching false detections rather than sitting idle.
+-- payload is the event as received, so the resume can re-run the normal alert path.
+CREATE TABLE IF NOT EXISTS motive_crash_confirmations (
+    event_id     BIGINT       PRIMARY KEY,
+    payload      JSONB        NOT NULL,
+    -- NULL = still waiting. Otherwise confirmed / withdrawn / unknown / expired.
+    verdict      VARCHAR(20),
+    detected_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    decided_at   TIMESTAMPTZ
+);
+
+-- Startup reads only the undecided rows, which are near-always zero; a partial index
+-- keeps that lookup off the full table.
+CREATE INDEX IF NOT EXISTS motive_crash_confirmations_pending
+    ON motive_crash_confirmations (detected_at) WHERE verdict IS NULL;

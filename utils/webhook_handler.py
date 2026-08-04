@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -19,6 +19,17 @@ from data import config
 from utils.db_api.groups import get_groups_for_event, migrate_group
 from utils.db_api.violations import save_violation
 from utils.db_api.admins import get_subscribed_admins
+from utils.db_api.crash_confirmations import (
+    get_pending_confirmations,
+    get_verdict_counts,
+    record_pending,
+    record_verdict,
+    VERDICT_CONFIRMED,
+    VERDICT_EXPIRED,
+    VERDICT_UNKNOWN,
+    VERDICT_WITHDRAWN,
+)
+from utils.motive import crash_still_listed
 from utils.samsara.client import fetch_speeding_details
 
 logger = logging.getLogger(__name__)
@@ -201,6 +212,13 @@ def _to_et(utc_iso: str) -> str:
 
 def _get_event_type(event: dict) -> str:
     """Determine canonical event type from action or type field."""
+    # Set when Motive's API says a crash detection was withdrawn (see
+    # _motive_crash_is_real). Checked first so the downgrade sticks everywhere the type
+    # is re-derived — _format_event does that internally — and so the critical-severity
+    # rule below can't promote the event straight back to a crash.
+    override = event.get("_type_override")
+    if override:
+        return override
     action = (event.get("action") or "").lower()
     if action in SPEEDING_ACTIONS:
         return "speeding"
@@ -300,6 +318,11 @@ def _format_event(event: dict, company_name: str = "", samsara: dict | None = No
             lines.append(f"💥 <b>Intensity:</b> {intensity}")
         if duration:
             lines.append(f"⏱ <b>Duration:</b> {duration}s")
+
+    # Say so when a crash alert went out without Motive's confirmation, so an
+    # unverified crash is never mistaken for a verified one.
+    if event_type == "crash" and event.get("_crash_unconfirmed"):
+        lines.append("\n⚠️ <i>Unconfirmed — Motive's review could not be reached.</i>")
 
     # Tag the source only for Samsara so existing Motive alerts are unchanged.
     if event.get("_source") == "samsara":
@@ -537,12 +560,83 @@ def _parse_samsara(body: dict) -> tuple[str, dict]:
     return "", {}
 
 
-async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = None):
+# How long Motive's review is given before we decide. Its verdict landed 60-85s after
+# the first delivery in every case observed, so 180s leaves real margin. The cost is
+# that a genuine crash alert arrives ~3 minutes late; that beats another false CRASH.
+_CRASH_CONFIRM_DELAY = 180
+# Extra look-ups taken on the way there. Logged only, never acted on — they record how
+# long withdrawal actually takes so the delay above can be tuned from traffic rather
+# than guessed at again.
+_CRASH_CONFIRM_PROBES = (60, 120)
+
+
+async def _motive_crash_is_real(event: dict, elapsed_before: float = 0.0) -> bool | None:
+    """Wait for Motive's review, then ask its API whether this crash still stands.
+
+    Returns True (confirmed), False (withdrawn) or None (couldn't tell — no API key
+    configured, or the lookup failed). None must fail open: no evidence is not evidence
+    of no crash.
+
+    `elapsed_before` is how long the detection has already been waiting — non-zero only
+    when resuming one that a restart interrupted. Marks already behind us are not slept
+    through again; the observations among them are simply missed, and the verdict is
+    taken straight away if even the final mark has passed."""
+    api_key = config.MOTIVE_API_KEY
+    event_id = event.get("id")
+    if not api_key:
+        logger.warning(f"[motive] No MOTIVE_API_KEY configured — "
+                       f"sending crash {event_id} unconfirmed")
+        return None
+
+    occurred = _parse_occurred(event)
+    elapsed = elapsed_before
+    for mark in (*_CRASH_CONFIRM_PROBES, _CRASH_CONFIRM_DELAY):
+        final = mark == _CRASH_CONFIRM_DELAY
+        if mark > elapsed:
+            await asyncio.sleep(mark - elapsed)
+            elapsed = mark
+        elif not final:
+            # Resumed past this observation point — nothing left to observe.
+            continue
+        listed = await crash_still_listed(api_key, event_id, occurred)
+        if not final:
+            logger.info(f"[motive] crash {event_id} at +{mark}s: listed={listed} (observation)")
+            continue
+        logger.info(f"[motive] crash {event_id} verdict at +{int(elapsed)}s: listed={listed}")
+        return listed
+    return None
+
+
+def _verdict_name(listed: bool | None) -> str:
+    if listed is True:
+        return VERDICT_CONFIRMED
+    return VERDICT_WITHDRAWN if listed is False else VERDICT_UNKNOWN
+
+
+async def _note_crash(coro, event_id) -> None:
+    """Run a confirmation bookkeeping write, swallowing anything it raises.
+
+    These writes are an audit trail, not part of deciding. _handle_event catches
+    everything, so an unguarded failure here — a database that missed the migration
+    being the obvious one — would abandon the whole event and silently drop a crash
+    alert. Losing the row is the acceptable failure; losing the alert is not."""
+    try:
+        await coro
+    except Exception as e:
+        logger.error(f"[motive] Could not record crash confirmation {event_id}: {e}")
+
+
+async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = None,
+                        crash_resume_elapsed: float | None = None):
     """Filter → format → send to Telegram (URLs sent directly, no download).
 
     For Samsara harsh events (those carrying `_samsara_vehicle_id`), first poll the
     harsh-event API to resolve the real type, location and video before continuing.
-    Motive events skip that branch entirely and behave exactly as before."""
+    Motive events skip that branch entirely and behave exactly as before.
+
+    `crash_resume_elapsed` is set only by resume_pending_crash_confirmations, for a
+    crash whose confirmation wait a restart cut short: it says how long the detection
+    has already been held, and marks the event as already recorded as pending."""
     try:
         company_display = config.COMPANY_NAME
 
@@ -638,6 +732,26 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
             logger.info(f"Ignored event type='{event_type}' id={event_id}")
             return
 
+        # Motive fires the crash webhook before its own review runs, and withdraws the
+        # detections that review rejects. Hold the alert until the API can be asked.
+        # Only Motive deliveries: Samsara crashes are resolved by their own poll and
+        # never come through here.
+        if event_type == "crash" and event.get("_source") != "samsara":
+            # Written before the wait, not after, so a restart inside it leaves
+            # evidence to resume from rather than losing the alert.
+            crash_key = _event_id_to_bigint(event.get("id"))
+            if crash_resume_elapsed is None:
+                await _note_crash(record_pending(crash_key, event), crash_key)
+            listed = await _motive_crash_is_real(event, crash_resume_elapsed or 0.0)
+            await _note_crash(record_verdict(crash_key, _verdict_name(listed)), crash_key)
+            if listed is False:
+                event["_type_override"] = "hard_brake"
+                event_type = "hard_brake"
+                logger.info(f"[motive] Crash {event_id} withdrawn by Motive — "
+                            f"routing as hard_brake instead of alerting")
+            elif listed is None:
+                event["_crash_unconfirmed"] = True
+
         if event_type == "speeding":
             meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
             sev = meta_sev or (event.get("severity") or "").strip().lower()
@@ -715,6 +829,53 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
 
     except Exception as e:
         logger.error(f"Event handling error: {e}", exc_info=True)
+
+
+# How stale a held-back crash may be and still be worth alerting on. A restart costs
+# a minute or two, so anything past this means the bot was down — and a crash DM
+# arriving an hour after the fact is noise, not a warning.
+_CRASH_RESUME_MAX_AGE = 3600
+
+
+async def resume_pending_crash_confirmations(bot: Bot) -> None:
+    """Finish crash confirmations a restart interrupted, and log the recent tally.
+
+    The confirmation wait runs in a fire-and-forget task, so a deploy landing inside it
+    used to drop the crash alert with nothing to show for it. Any row still undecided
+    is exactly that, and goes back through the normal path with the time it already
+    spent waiting carried across."""
+    try:
+        pending = await get_pending_confirmations()
+        counts = await get_verdict_counts(datetime.now(timezone.utc) - timedelta(days=7))
+    except Exception as e:
+        logger.error(f"[motive] Could not read crash confirmations: {e}")
+        return
+
+    logger.info(f"[motive] Crash confirmations over the last 7d: "
+                f"{counts or 'none'} ({len(pending)} interrupted)")
+
+    now = datetime.now(timezone.utc)
+    for row in pending:
+        event_id = row["event_id"]
+        # Per row, because this runs inside on_startup: one unreadable payload must not
+        # cost the other resumes, let alone stop the bot from booting.
+        try:
+            age = (now - row["detected_at"]).total_seconds()
+            if age > _CRASH_RESUME_MAX_AGE:
+                logger.warning(f"[motive] Dropping crash {event_id} — held {int(age)}s, "
+                               f"too stale to alert on")
+                await _note_crash(record_verdict(event_id, VERDICT_EXPIRED), event_id)
+                continue
+            payload = row["payload"]
+            # asyncpg hands back JSONB as text unless a codec is registered for it.
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            logger.info(f"[motive] Resuming crash confirmation {event_id} ({int(age)}s held)")
+            asyncio.create_task(
+                _handle_event(bot, payload, crash_resume_elapsed=age)
+            )
+        except Exception as e:
+            logger.error(f"[motive] Could not resume crash {event_id}: {e}")
 
 
 async def _migrate_group(old_id: int, new_id: int) -> None:

@@ -43,3 +43,8 @@ SAMSARA_WEBHOOK_SECRET = env.str("SAMSARA_WEBHOOK_SECRET", "")
 # ── Motive / KeepTruckin (optional — leave blank to skip signature verification) ─
 # Motive signs each webhook with HMAC-SHA1 over the raw body in X-KT-Webhook-Signature.
 MOTIVE_WEBHOOK_SECRET = env.str("MOTIVE_WEBHOOK_SECRET", "")
+# Read-only API token for this company's Motive org. Used to confirm a crash detection
+# against /v2/driver_performance_events before alerting: Motive withdraws detections its
+# review rejects, so absence there is what tells a false crash from a real one. Leave
+# blank and crashes still alert, but flagged unconfirmed (see _motive_crash_is_real).
+MOTIVE_API_KEY = env.str("MOTIVE_API_KEY", "")
