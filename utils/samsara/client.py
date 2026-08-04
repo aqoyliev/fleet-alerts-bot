@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -9,8 +10,27 @@ logger = logging.getLogger(__name__)
 _timeout = aiohttp.ClientTimeout(total=30)
 
 
+class SamsaraUnavailable(Exception):
+    """The vehicle roster could not be fetched, so presence could not be determined.
+
+    Distinct from "no such unit": a caller validating user input must not tell a
+    dispatcher their unit doesn't exist because Samsara happened to be down.
+    """
+
+
 def _normalize(name: str) -> str:
     return " ".join(name.split()).lower()
+
+
+# A leading "UNIT"/"TRUCK" label, with any :#- separator. Fleets spell the same truck as
+# "unit571" in Samsara and "UNIT: 571" on the Telegram group, so the label is dropped
+# before comparing. CPT's roster is literally unit001/unit571/unit2007.
+_UNIT_LABEL_RE = re.compile(r"^(?:unit|truck)\s*[:#\-]*\s*", re.IGNORECASE)
+
+
+def _core(name: str) -> str:
+    """Comparison key for a unit: normalized, with a leading UNIT/TRUCK label removed."""
+    return _UNIT_LABEL_RE.sub("", _normalize(name)).strip()
 
 
 def _kph_to_mph(kph: float) -> float:
@@ -31,6 +51,31 @@ async def fetch_speeding_details(api_key: str, vehicle_name: str, event_time: da
     if client is None:
         client = _clients[api_key] = SamsaraClient(api_key)
     return await client.get_speeding_details(vehicle_name, event_time, vehicle_id=vehicle_id)
+
+
+async def lookup_unit(api_key: str, unit: str) -> str | None:
+    """Is `unit` a real vehicle in this org? Returns its name exactly as Samsara spells
+    it (so the caller can store the canonical form), or None if no such vehicle exists.
+
+    Raises SamsaraUnavailable if the roster could not be read at all."""
+    if not api_key:
+        raise SamsaraUnavailable("no Samsara API key configured")
+    return await _client_for(api_key).find_vehicle_name(unit)
+
+
+async def suggest_units(api_key: str, unit: str) -> list[str]:
+    """'Did you mean' candidates for a rejected unit. Never raises."""
+    try:
+        return await _client_for(api_key).nearby_units(unit)
+    except Exception:
+        return []
+
+
+def _client_for(api_key: str) -> "SamsaraClient":
+    client = _clients.get(api_key)
+    if client is None:
+        client = _clients[api_key] = SamsaraClient(api_key)
+    return client
 
 
 def _parse_time(iso: str) -> datetime | None:
@@ -71,6 +116,7 @@ class SamsaraClient:
         self._headers = {"Authorization": f"Bearer {api_token}", "Accept": "application/json"}
         self._base = base_url.rstrip("/")
         self._vehicles: dict[str, str] = {}  # normalized name -> asset id
+        self._vehicle_names: dict[str, str] = {}  # normalized name -> name as Samsara spells it
         self._vehicles_at: datetime | None = None
 
     async def _get(self, path: str, params: dict | None = None) -> dict | None:
@@ -86,9 +132,13 @@ class SamsaraClient:
             logger.error(f"Samsara GET {path} error: {e}")
             return None
 
-    async def _refresh_vehicles(self):
+    async def _refresh_vehicles(self) -> bool:
+        """Reload the vehicle roster. Returns True if the API actually answered, so a
+        caller can tell an empty fleet apart from a failed lookup."""
         vehicles: dict[str, str] = {}
+        names: dict[str, str] = {}
         after = None
+        answered = False
         while True:
             params = {"limit": 512}
             if after:
@@ -96,17 +146,22 @@ class SamsaraClient:
             data = await self._get("/fleet/vehicles", params)
             if not data:
                 break
+            answered = True
             for v in data.get("data", []):
-                name = _normalize(v.get("name") or "")
+                raw = (v.get("name") or "").strip()
+                name = _normalize(raw)
                 if name and v.get("id") is not None:
                     vehicles[name] = str(v["id"])
+                    names[name] = raw
             page = data.get("pagination") or {}
             after = page.get("endCursor")
             if not page.get("hasNextPage") or not after:
                 break
         if vehicles:
             self._vehicles = vehicles
+            self._vehicle_names = names
             self._vehicles_at = datetime.now(timezone.utc)
+        return answered
 
     async def get_vehicle_id(self, vehicle_name: str) -> str | None:
         key = _normalize(vehicle_name)
@@ -125,6 +180,61 @@ class SamsaraClient:
                 return vid
         logger.warning(f"Samsara vehicle not found for name '{vehicle_name}'")
         return None
+
+    async def find_vehicle_name(self, unit: str) -> str | None:
+        """Return the vehicle's name exactly as Samsara spells it, or None if no vehicle
+        in the org carries that name.
+
+        Two matching passes, both case- and whitespace-insensitive:
+          1. the name exactly as given;
+          2. the name with a leading UNIT/TRUCK label dropped from BOTH sides, so a
+             dispatcher typing 571 finds Samsara's "unit571" and vice versa.
+
+        The second pass only resolves when exactly ONE vehicle matches — an ambiguous
+        input is treated as not found rather than guessed at. Whichever pass hits, the
+        return value is the roster's own spelling, because alert routing compares the
+        stored unit against the vehicle name by strict SQL equality. Returning what the
+        user typed would register a group that then silently never receives anything —
+        the worst outcome, since it looks configured.
+
+        Raises SamsaraUnavailable when the roster can't be read and nothing is cached,
+        so a caller can tell "no such unit" apart from "couldn't check".
+        """
+        key = _normalize(unit)
+        if not key:
+            return None
+        stale = (
+            self._vehicles_at is None
+            or datetime.now(timezone.utc) - self._vehicles_at > timedelta(minutes=30)
+        )
+        if stale or key not in self._vehicle_names:
+            answered = await self._refresh_vehicles()
+            # A failed refresh is only fatal with no roster to fall back on; a stale one
+            # still answers "does this unit exist" correctly almost always.
+            if not answered and self._vehicles_at is None:
+                raise SamsaraUnavailable("could not fetch the vehicle roster")
+
+        if key in self._vehicle_names:
+            return self._vehicle_names[key]
+
+        wanted = _core(unit)
+        if not wanted:
+            return None
+        hits = {n for k, n in self._vehicle_names.items() if _core(k) == wanted}
+        if len(hits) == 1:
+            return hits.pop()
+        if hits:
+            logger.warning(f"Samsara unit '{unit}' is ambiguous: {sorted(hits)}")
+        return None
+
+    async def nearby_units(self, unit: str, limit: int = 5) -> list[str]:
+        """Roster names that look like `unit`, for a 'did you mean' hint. Best-effort:
+        never refreshes and never raises, since it only decorates an error message."""
+        wanted = _core(unit)
+        if not wanted:
+            return []
+        hits = [n for k, n in self._vehicle_names.items() if wanted in k or _core(k) in wanted]
+        return sorted(hits)[:limit]
 
     async def get_driver_name(self, driver_id: str) -> str | None:
         data = await self._get(f"/fleet/drivers/{driver_id}")

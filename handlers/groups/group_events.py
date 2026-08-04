@@ -16,6 +16,7 @@ from utils.db_api.groups import (
 from utils.db_api.admins import get_all_admins, is_admin
 from utils.db_api.violations import get_violations_by_type, get_top_violators
 from utils.group_parser import extract_vehicle_number
+from utils.samsara.client import lookup_unit, suggest_units, SamsaraUnavailable
 from utils.webhook_handler import EVENT_TYPE_MAP
 from keyboards.inline.group_settings import group_events_keyboard
 
@@ -171,6 +172,53 @@ async def _notify_admins_parse_failure(chat: types.Chat, title: str, description
             logger.error(f"Failed to notify admin {admin_id} of parse failure: {e}")
 
 
+async def _resolve_unit(unit: str) -> tuple[str, str]:
+    """Check a unit against Samsara's vehicle roster and canonicalize it.
+
+    Returns (status, value):
+      ("ok", <name as Samsara spells it>)  — exists; store this, not what was typed
+      ("missing", unit)                    — no such vehicle in the org
+      ("unchecked", unit)                  — no API key, or Samsara couldn't be reached
+
+    Storing Samsara's own spelling is the point. Alert routing matches the stored unit
+    against the vehicle name by strict equality, and this fleet names trucks "unit571"
+    while its Telegram groups say "UNIT: 571" — so the two only ever meet if the
+    roster's version is what goes in the database.
+    """
+    if not config.SAMSARA_API_KEY:
+        return "unchecked", unit
+    try:
+        canonical = await lookup_unit(config.SAMSARA_API_KEY, unit)
+    except SamsaraUnavailable as e:
+        logger.warning(f"Samsara unit check unavailable for '{unit}': {e}")
+        return "unchecked", unit
+    if canonical is None:
+        return "missing", unit
+    if canonical != unit:
+        logger.info(f"Unit '{unit}' resolved to Samsara's '{canonical}'")
+    return "ok", canonical
+
+
+async def _notify_admins_unknown_unit(chat: types.Chat, title: str, unit: str):
+    """DM the admins that a group named a unit Samsara has never heard of — usually a
+    typo in the group title, or a truck not yet added to the Samsara org."""
+    suggestions = await suggest_units(config.SAMSARA_API_KEY, unit)
+    hint = ("\n\nClosest units in Samsara: "
+            + ", ".join(f"<code>{s}</code>" for s in suggestions)) if suggestions else ""
+    text = (
+        "⚠️ <b>Couldn't register a group</b>\n\n"
+        f"I was added to <b>{title or 'a group'}</b> (id <code>{chat.id}</code>) and read "
+        f"unit <code>{unit}</code> from its name, but no such vehicle exists in Samsara."
+        f"{hint}\n\n"
+        "Fix the group name, or set it directly with <code>/setunit &lt;unit&gt;</code>."
+    )
+    for admin_id in await _admin_ids():
+        try:
+            await bot.send_message(admin_id, text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to notify admin {admin_id} of unknown unit: {e}")
+
+
 @dp.my_chat_member_handler()
 async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
     old = update.old_chat_member.status
@@ -203,11 +251,24 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
 
         # Main group registers with a NULL vehicle (receives all units); driver groups
         # register with their parsed unit number.
-        await register_group(chat.id, title, None if is_main else vehicle)
         if is_main:
+            await register_group(chat.id, title, None)
             logger.info(f"Registered MAIN group (id={chat.id})")
-        else:
-            logger.info(f"Registered group id={chat.id} → unit {vehicle}")
+            return
+
+        # The title gives bare digits ("UNIT: 571" → "571") but Samsara may name the
+        # same truck "unit571". Register the roster's spelling or the group receives
+        # nothing, silently.
+        status, resolved = await _resolve_unit(vehicle)
+        if status == "missing":
+            logger.warning(f"Group '{title}' (id={chat.id}) parsed unit {vehicle}, "
+                           f"which is not in Samsara — not registering")
+            await _notify_admins_unknown_unit(chat, title, vehicle)
+            return
+
+        await register_group(chat.id, title, resolved)
+        logger.info(f"Registered group id={chat.id} → unit {resolved}"
+                    + (" (unverified)" if status == "unchecked" else ""))
 
     elif removed:
         logger.info(f"Bot removed from {chat.type} '{chat.title}' (id={chat.id})")
@@ -240,9 +301,32 @@ async def cmd_setunit(message: types.Message):
         await message.reply("Usage: <code>/setunit 1234</code>", parse_mode="HTML")
         return
 
+    # Verify the unit exists before registering. A typo registers a group that looks
+    # configured and then silently never receives anything — much harder to notice
+    # later than being told "no such unit" right now.
+    typed = unit
+    status, unit = await _resolve_unit(unit)
+
+    if status == "missing":
+        suggestions = await suggest_units(config.SAMSARA_API_KEY, typed)
+        hint = ("\n\nDid you mean: "
+                + ", ".join(f"<code>{s}</code>" for s in suggestions)) if suggestions else ""
+        await message.reply(
+            f"❌ No unit <code>{typed}</code> found in Samsara.{hint}",
+            parse_mode="HTML",
+        )
+        logger.info(f"Rejected /setunit {typed} in group {message.chat.id} — not in Samsara")
+        return
+
+    # Fail open on an outage: Samsara being down must not block setting up a group.
+    note = ("\n\n⚠️ <i>Couldn't reach Samsara to verify this unit — double-check it.</i>"
+            if status == "unchecked" else "")
+    if status == "ok" and unit != typed:
+        note = f"\n\n<i>Matched Samsara's <code>{unit}</code>.</i>"
+
     await register_group(message.chat.id, message.chat.title or "", unit)
     await message.reply(
-        f"✅ Unit set to <code>{unit}</code>. This group will now receive unit {unit}'s alerts.",
+        f"✅ Unit set to <code>{unit}</code>. This group will now receive its alerts." + note,
         parse_mode="HTML",
     )
     logger.info(f"Unit for group {message.chat.id} set to {unit} by {message.from_user.id}")

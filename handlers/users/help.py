@@ -6,8 +6,10 @@ from data import config
 from utils.db_api.admins import is_super_admin
 
 
-@dp.message_handler(CommandHelp())
+@dp.message_handler(CommandHelp(), chat_type=types.ChatType.PRIVATE)
 async def bot_help(message: types.Message):
+    """DM only. The text below is a wall of admin-oriented instructions, and typed in a
+    driver group it dumped all of it into the chat for everyone."""
     text = [
         f"📋 <b>{config.COMPANY_NAME} — Fleet Alerts Bot</b>\n",
         "This bot monitors your fleet and reports safety violations from Motive and Samsara.\n",
