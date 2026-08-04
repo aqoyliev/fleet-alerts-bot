@@ -27,7 +27,9 @@ _PRIVATE_COMMANDS = [
 _GROUP_COMMANDS = [
     types.BotCommand("start", "Open main menu"),
     types.BotCommand("setunit", "Set this group's unit number (e.g. /setunit 1234)"),
-    types.BotCommand("disable", "Admin: mute this group's alerts"),
+    # /enable is intentionally absent to keep this list to three: whoever mutes a group
+    # is told to use it in the confirmation reply, and it works when typed.
+    types.BotCommand("disable", "Mute this group's alerts"),
 ]
 
 

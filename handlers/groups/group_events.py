@@ -288,6 +288,16 @@ async def _require_admin_group(message: types.Message) -> bool:
     return True
 
 
+async def _require_registered_group(message: types.Message) -> bool:
+    """Guard for the group commands anyone may use — the group only has to be
+    registered. Drivers run their own group's mute switch, so the alerts they are being
+    sent are theirs to silence; the admins are told about it either way."""
+    if not await group_exists(message.chat.id):
+        await message.reply("This group isn't configured. Set its unit with /setunit first.")
+        return False
+    return True
+
+
 @dp.message_handler(commands=["setunit"], chat_type=GROUP_TYPES)
 async def cmd_setunit(message: types.Message):
     """Manually set (or correct) this group's unit number — open to anyone in the group,
@@ -334,11 +344,18 @@ async def cmd_setunit(message: types.Message):
 
 @dp.message_handler(commands=["disable", "mute"], chat_type=GROUP_TYPES)
 async def cmd_disable(message: types.Message):
-    """Mute this group's alerts (admin only). Notifies all admins once."""
-    if not await _require_admin_group(message):
+    """Mute this group's alerts. Open to anyone in the group — it only silences that
+    group's own unit — and every admin is DMed who did it."""
+    if not await _require_registered_group(message):
         return
     await set_group_enabled(message.chat.id, False)
-    await message.reply("🔕 Alerts <b>disabled</b> for this group. Use /enable to turn them back on.", parse_mode="HTML")
+    # This reply is the ONLY place /enable is advertised — it is deliberately kept out
+    # of the command menu, so the way back has to be stated here.
+    await message.reply(
+        "🔕 Alerts <b>disabled</b> for this group.\n\n"
+        "Send <b>/enable</b> here to turn them back on.",
+        parse_mode="HTML",
+    )
 
     grp = await get_group(message.chat.id)
     unit = (grp or {}).get("vehicle_number")
@@ -358,8 +375,9 @@ async def cmd_disable(message: types.Message):
 
 @dp.message_handler(commands=["enable", "unmute"], chat_type=GROUP_TYPES)
 async def cmd_enable(message: types.Message):
-    """Unmute this group's alerts (admin only)."""
-    if not await _require_admin_group(message):
+    """Unmute this group's alerts. Open to anyone, necessarily: whoever can mute a group
+    must be able to undo it, or a driver can silence their own alerts for good."""
+    if not await _require_registered_group(message):
         return
     await set_group_enabled(message.chat.id, True)
     await message.reply("🔔 Alerts <b>enabled</b> for this group.", parse_mode="HTML")
