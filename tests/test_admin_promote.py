@@ -87,6 +87,27 @@ async def test_promote_only_touches_the_target(monkeypatch):
     assert "FALSE" not in sql.upper()
 
 
+# ── transfer is no longer offered to a maintainer ──────────────────────────────
+
+def test_a_maintainer_is_not_offered_the_transfer_that_demotes_them():
+    """Transfer is what cost the CPT maintainer their access. For a maintainer it is now
+    a lie either way: their super status comes from config, so stepping down does nothing
+    except make the row disagree. Promotion replaces it."""
+    me = {"id": 1, "telegram_id": MAINTAINER, "full_name": "Rick", "username": None,
+          "is_super": True, "is_active": True}
+    labels = _labels(admin_detail_keyboard(me, is_super=True, is_self=True,
+                                           can_step_down=False))
+    assert "🔁 Transfer super admin" not in labels
+    assert labels == ["◀ Back to List"]
+
+
+def test_an_ordinary_super_admin_can_still_step_down():
+    me = {"id": 2, "telegram_id": SUPER, "full_name": "CPT Super", "username": None,
+          "is_super": True, "is_active": True}
+    labels = _labels(admin_detail_keyboard(me, is_super=True, is_self=True))
+    assert "🔁 Transfer super admin" in labels
+
+
 # ── the hidden maintainer stays unreachable ────────────────────────────────────
 
 def test_the_hidden_account_is_still_concealed_from_promotion(monkeypatch):

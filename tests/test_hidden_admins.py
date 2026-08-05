@@ -71,16 +71,63 @@ def test_hiding_does_not_touch_the_admin_queries(hidden_dev):
     assert any(a["telegram_id"] == DEV for a in _rows())
 
 
-def test_is_hidden_admin_is_only_about_the_configured_ids(hidden_dev):
-    assert adm.is_hidden_admin(DEV) is True
-    assert adm.is_hidden_admin(SUPER) is False
+def test_is_maintainer_is_only_about_the_configured_ids(hidden_dev):
+    assert adm.is_maintainer(DEV) is True
+    assert adm.is_maintainer(SUPER) is False
 
 
-def test_is_hidden_admin_tolerates_junk(hidden_dev):
+def test_is_maintainer_tolerates_junk(hidden_dev):
     """Called with whatever a callback or DB row carries; it must not raise."""
-    assert adm.is_hidden_admin(None) is False
-    assert adm.is_hidden_admin("not-a-number") is False
-    assert adm.is_hidden_admin(str(DEV)) is True
+    assert adm.is_maintainer(None) is False
+    assert adm.is_maintainer("not-a-number") is False
+    assert adm.is_maintainer(str(DEV)) is True
+
+
+# ── a maintainer cannot be locked out ──────────────────────────────────────────
+
+async def test_a_maintainer_is_super_even_when_the_row_says_otherwise(hidden_dev, monkeypatch):
+    """The bug this fixes, seen live on CPT: transfer_super_admin promotes the target and
+    demotes whoever used it, so handing the role to the customer stripped the maintainer's
+    own management access — and a restart didn't restore it.
+    """
+    async def _demoted_row(sql, *args):
+        return {"is_super": False, "is_active": True}
+
+    monkeypatch.setattr(adm.db, "fetchrow", _demoted_row)
+    assert await adm.is_super_admin(DEV) is True
+    # ...and the override is only ever about the configured ids.
+    assert await adm.is_super_admin(SUPER) is False
+
+
+async def test_a_maintainer_is_an_admin_even_with_no_row_at_all(hidden_dev, monkeypatch):
+    async def _no_row(sql, *args):
+        return None
+
+    monkeypatch.setattr(adm.db, "fetchrow", _no_row)
+    assert await adm.is_admin(DEV) is True
+    assert await adm.is_admin(SUPER) is False
+
+
+async def test_startup_puts_the_maintainer_row_back(monkeypatch):
+    """Seeding used to be ON CONFLICT DO NOTHING, which is why the demotion survived a
+    restart. It now re-asserts what config says."""
+    executed = []
+
+    async def _execute(sql, *args):
+        executed.append((" ".join(sql.split()), args))
+
+    async def _ensure_user(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(adm.db, "execute", _execute)
+    monkeypatch.setattr("utils.db_api.users.ensure_user", _ensure_user)
+
+    await adm.seed_super_admins([DEV])
+
+    assert len(executed) == 1
+    sql, args = executed[0]
+    assert "DO UPDATE SET is_super = TRUE, is_active = TRUE" in sql
+    assert args == (DEV,)
 
 
 # ── the concealment guard on every mutation ────────────────────────────────────

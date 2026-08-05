@@ -22,7 +22,8 @@ def add_admin_cancel_keyboard() -> InlineKeyboardMarkup:
     return kb
 
 
-def admin_detail_keyboard(admin: dict, is_super: bool = False, is_self: bool = False) -> InlineKeyboardMarkup:
+def admin_detail_keyboard(admin: dict, is_super: bool = False, is_self: bool = False,
+                          can_step_down: bool = True) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=2)
     if is_super and not admin["is_super"]:
         # Controls over a regular admin.
@@ -38,8 +39,13 @@ def admin_detail_keyboard(admin: dict, is_super: bool = False, is_self: bool = F
             kb.add(InlineKeyboardButton(
                 "⭐ Make super admin", callback_data=f"adm_promote:{admin['id']}",
             ))
-    elif is_super and admin["is_super"] and is_self:
+    elif is_super and admin["is_super"] and is_self and can_step_down:
         # A super admin can't remove themselves — they hand the role to someone else.
+        #
+        # Not offered to a maintainer (can_step_down=False): their super status comes from
+        # config.ADMINS, so transferring would demote the row and change nothing about
+        # their access, while the confirmation promises they lose it. Giving someone else
+        # the role is what ⭐ Make super admin is for, and it costs the promoter nothing.
         kb.add(InlineKeyboardButton("🔁 Transfer super admin", callback_data="adm_transfer_start"))
     kb.add(InlineKeyboardButton("◀ Back to List", callback_data="adm_bk_list"))
     return kb

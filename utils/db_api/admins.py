@@ -2,12 +2,17 @@ from data import config
 from utils.db_api import db
 
 
-def is_hidden_admin(telegram_id: int | None) -> bool:
-    """Is this id hidden from the 👥 Admins panel (config.HIDDEN_ADMIN_IDS)?
+def is_maintainer(telegram_id: int | None) -> bool:
+    """Is this id one of the deployment's owner accounts (config.ADMINS)?
 
-    Hidden is about visibility only — never about permission. Nothing in this module
-    filters a hidden admin out of a query: they stay in get_all_admins() so alerts and
-    admin DMs keep reaching them, and the panel is the only place that hides them.
+    Two things follow from it, and they are separate: the account is hidden from the
+    👥 Admins panel, and it is permanently a super admin. The second is what stops a
+    maintainer from being locked out of their own deployment by the panel — see
+    is_super_admin below.
+
+    Hiding is about visibility only, never permission. Nothing in this module filters a
+    maintainer out of a query: they stay in get_all_admins() so alerts and admin DMs keep
+    reaching them, and the panel is the only place that hides them.
     """
     try:
         return int(telegram_id) in config.HIDDEN_ADMIN_IDS
@@ -18,16 +23,18 @@ def is_hidden_admin(telegram_id: int | None) -> bool:
 def visible_admins(admins: list[dict], viewer_telegram_id: int) -> list[dict]:
     """The admin rows `viewer_telegram_id` is allowed to see in the panel.
 
-    A hidden admin sees the real, unfiltered list — otherwise the maintainer could not
-    see their own account or manage the team they are hiding from.
+    A maintainer sees the real, unfiltered list — otherwise they could not see their own
+    account or manage the team they are hiding from.
     """
-    if is_hidden_admin(viewer_telegram_id):
+    if is_maintainer(viewer_telegram_id):
         return list(admins)
-    return [a for a in admins if not is_hidden_admin(a["telegram_id"])]
+    return [a for a in admins if not is_maintainer(a["telegram_id"])]
 
 
 async def is_admin(telegram_id: int) -> bool:
     """Returns True if the user is an active admin (super or regular)."""
+    if is_maintainer(telegram_id):
+        return True
     row = await db.fetchrow(
         "SELECT is_active FROM admins WHERE telegram_id = $1",
         telegram_id,
@@ -36,6 +43,16 @@ async def is_admin(telegram_id: int) -> bool:
 
 
 async def is_super_admin(telegram_id: int) -> bool:
+    """Returns True for an active super admin — and always for a maintainer.
+
+    The config override is not a convenience. Every route out of the super-admin role
+    runs through this panel, and one of them (transfer) demotes whoever uses it: a
+    maintainer who hands the role to a customer loses their own management access, with
+    no way back that doesn't involve a direct DB write. Deriving the answer from
+    config.ADMINS instead of the row makes that unlosable.
+    """
+    if is_maintainer(telegram_id):
+        return True
     row = await db.fetchrow(
         "SELECT is_super, is_active FROM admins WHERE telegram_id = $1",
         telegram_id,
@@ -44,18 +61,24 @@ async def is_super_admin(telegram_id: int) -> bool:
 
 
 async def seed_super_admins(telegram_ids: list[int]) -> None:
-    """Ensure every bootstrap id from config.ADMINS exists as an active super admin.
+    """Ensure every maintainer id from config.ADMINS is an active super admin.
 
     Runs on startup so a brand-new deployment has a working super admin without any
-    manual DB step. Uses ON CONFLICT DO NOTHING — an id that already exists is left
-    exactly as-is, so a super admin who later stepped down via transfer is NOT
-    re-promoted on the next restart."""
+    manual DB step, and so an existing one is put back the way config says it should be.
+
+    This used to be ON CONFLICT DO NOTHING, on the reasoning that a super admin who
+    stepped down via transfer shouldn't be re-promoted by a restart. That reasoning
+    belonged to the old meaning of ADMINS, when it was a generic bootstrap list that
+    might name the customer's own people. It now names the maintainer, for whom stepping
+    down is not a thing that should be possible — and leaving the row demoted only made
+    the DB disagree with is_super_admin().
+    """
     from utils.db_api.users import ensure_user
     for tid in telegram_ids:
         await ensure_user(tid)
         await db.execute(
             "INSERT INTO admins (telegram_id, is_super, is_active) VALUES ($1, TRUE, TRUE) "
-            "ON CONFLICT (telegram_id) DO NOTHING",
+            "ON CONFLICT (telegram_id) DO UPDATE SET is_super = TRUE, is_active = TRUE",
             tid,
         )
 

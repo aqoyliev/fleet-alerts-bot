@@ -7,7 +7,7 @@ from states.admin_mgmt import AdminAdd
 from utils.db_api.admins import (
     is_admin,
     is_super_admin,
-    is_hidden_admin,
+    is_maintainer,
     visible_admins,
     get_all_admins,
     get_admin_by_id,
@@ -74,7 +74,7 @@ def _concealed_from(admin: dict | None, viewer_id: int) -> bool:
     but the panel's whole job is that one account isn't in it, and a mutation that
     silently worked on it would undo that.
     """
-    return bool(admin) and is_hidden_admin(admin["telegram_id"]) and not is_hidden_admin(viewer_id)
+    return bool(admin) and is_maintainer(admin["telegram_id"]) and not is_maintainer(viewer_id)
 
 
 async def _show_admin_list(call: types.CallbackQuery, is_super: bool):
@@ -92,7 +92,12 @@ async def _show_admin_detail(call: types.CallbackQuery, admin_id: int, is_super:
         await _show_admin_list(call, is_super)
         return
     is_self = admin["telegram_id"] == call.from_user.id
-    await _edit_or_send(call, _format_admin_detail(admin), admin_detail_keyboard(admin, is_super, is_self))
+    await _edit_or_send(
+        call,
+        _format_admin_detail(admin),
+        admin_detail_keyboard(admin, is_super, is_self,
+                              can_step_down=not is_maintainer(call.from_user.id)),
+    )
 
 
 # ── Entry point (all admins; super admins additionally get controls) ────────────────
@@ -368,7 +373,7 @@ async def _finish_add(message: types.Message, state: FSMContext, new_id: int, di
     # confirmation as any other add. add_admin() would otherwise reactivate the row and
     # reveal — through an error, or through the wording changing — that the id is
     # already something. Only a hidden admin can (re-)add a hidden admin.
-    if is_hidden_admin(new_id) and not is_hidden_admin(message.from_user.id):
+    if is_maintainer(new_id) and not is_maintainer(message.from_user.id):
         await state.finish()
         await message.answer(
             f"✅ <b>{display_name or new_id}</b> added as admin.\n"
