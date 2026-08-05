@@ -16,6 +16,7 @@ from utils.db_api.groups import (
 from utils.db_api.admins import get_all_admins, is_admin
 from utils.db_api.violations import get_violations_by_type, get_top_violators
 from utils.group_parser import extract_vehicle_number
+from utils import group_texts
 from utils.samsara.client import lookup_unit, suggest_units, SamsaraUnavailable
 from utils.webhook_handler import EVENT_TYPE_MAP
 from keyboards.inline.group_settings import group_events_keyboard
@@ -125,6 +126,29 @@ async def cmd_top(message: types.Message):
     await message.reply(text, parse_mode="HTML")
 
 
+@dp.message_handler(commands=["help"], chat_type=GROUP_TYPES)
+async def cmd_group_help(message: types.Message):
+    """/help inside a group. Separate from the DM handler in handlers/users/help.py,
+    which is admin-oriented and private-only; this one answers a driver's question in
+    their own truck's chat.
+
+    No group_exists guard on purpose — an unconfigured group is exactly when someone
+    types /help, and the reply tells them how to configure it.
+    """
+    grp = await get_group(message.chat.id)
+    is_main = config.MAIN_GROUP_ID is not None and message.chat.id == config.MAIN_GROUP_ID
+    await message.reply(
+        group_texts.help_text(
+            config.COMPANY_NAME,
+            unit=(grp or {}).get("vehicle_number"),
+            is_main=is_main,
+            is_admin=await is_admin(message.from_user.id),
+        ),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
 @dp.message_handler(commands=["event_list"], chat_type=[types.ChatType.GROUP, types.ChatType.SUPERGROUP])
 async def cmd_event_list(message: types.Message):
     event_types = await get_group_event_types(message.chat.id)
@@ -199,10 +223,24 @@ async def _resolve_unit(unit: str) -> tuple[str, str]:
     return "ok", canonical
 
 
-async def _notify_admins_unknown_unit(chat: types.Chat, title: str, unit: str):
+async def _say(chat_id: int, text: str):
+    """Post to the group, tolerating the send failing.
+
+    Everything this is used for is a setup instruction, and a group that won't accept the
+    message (bot muted, restricted, removed again in the same second) must not take the
+    registration down with it — the admin DM still reports the same problem.
+    """
+    try:
+        await bot.send_message(chat_id, text, parse_mode="HTML",
+                               disable_web_page_preview=True)
+    except Exception as e:
+        logger.warning(f"Could not post setup message to {chat_id}: {e}")
+
+
+async def _notify_admins_unknown_unit(chat: types.Chat, title: str, unit: str,
+                                      suggestions: list[str]):
     """DM the admins that a group named a unit Samsara has never heard of — usually a
     typo in the group title, or a truck not yet added to the Samsara org."""
-    suggestions = await suggest_units(config.SAMSARA_API_KEY, unit)
     hint = ("\n\nClosest units in Samsara: "
             + ", ".join(f"<code>{s}</code>" for s in suggestions)) if suggestions else ""
     text = (
@@ -225,6 +263,12 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
     new = update.new_chat_member.status
     chat = update.chat
 
+    # Groups only. This update also fires for a DM when someone blocks or unblocks the
+    # bot, and every branch below treats the chat as a group that failed to register —
+    # which used to DM the admins about it, and would now instruct the user to /setunit.
+    if chat.type not in GROUP_TYPES:
+        return
+
     added = new in ("member", "administrator") and old in ("left", "kicked")
     removed = new in ("left", "kicked") and old in ("member", "administrator")
 
@@ -246,6 +290,10 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
 
         if vehicle is None and not is_main:
             logger.warning(f"No unit number for group '{title}' (id={chat.id}) — not registering")
+            # Say it in the group as well as to the admins: the people who can rename the
+            # chat or run /setunit are the ones sitting in it, and until one of them does,
+            # the bot looks installed while sending nothing.
+            await _say(chat.id, group_texts.joined_needs_unit())
             await _notify_admins_parse_failure(chat, title, description)
             return
 
@@ -254,6 +302,7 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
         if is_main:
             await register_group(chat.id, title, None)
             logger.info(f"Registered MAIN group (id={chat.id})")
+            await _say(chat.id, group_texts.joined_main_group(config.COMPANY_NAME))
             return
 
         # The title gives bare digits ("UNIT: 571" → "571") but Samsara may name the
@@ -263,12 +312,18 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
         if status == "missing":
             logger.warning(f"Group '{title}' (id={chat.id}) parsed unit {vehicle}, "
                            f"which is not in Samsara — not registering")
-            await _notify_admins_unknown_unit(chat, title, vehicle)
+            # One roster lookup, two audiences: the group is told how to fix it, the
+            # admins are told it happened.
+            suggestions = await suggest_units(config.SAMSARA_API_KEY, vehicle)
+            await _say(chat.id, group_texts.joined_unknown_unit(
+                config.COMPANY_NAME, vehicle, suggestions))
+            await _notify_admins_unknown_unit(chat, title, vehicle, suggestions)
             return
 
         await register_group(chat.id, title, resolved)
         logger.info(f"Registered group id={chat.id} → unit {resolved}"
                     + (" (unverified)" if status == "unchecked" else ""))
+        await _say(chat.id, group_texts.joined_registered(resolved))
 
     elif removed:
         logger.info(f"Bot removed from {chat.type} '{chat.title}' (id={chat.id})")

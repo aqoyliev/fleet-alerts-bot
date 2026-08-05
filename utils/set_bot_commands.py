@@ -21,14 +21,15 @@ _PRIVATE_COMMANDS = [
 ]
 
 # Driver groups. These exist to RECEIVE that unit's alerts, not to be queried, so the
-# menu is just setup and an off switch. /report, /top, /event_list, /events, /enable and
-# /removegroup still work when typed — they are kept out of the picker so drivers are
-# not offered them.
+# menu is setup, an off switch, and the explainer. /report, /top, /event_list, /events,
+# /enable and /removegroup still work when typed — they are kept out of the picker so
+# drivers are not offered them.
 _GROUP_COMMANDS = [
     types.BotCommand("start", "Open main menu"),
+    types.BotCommand("help", "What this bot posts here, and how to set it up"),
     types.BotCommand("setunit", "Set this group's unit number (e.g. /setunit 1234)"),
-    # /enable is intentionally absent to keep this list to three: whoever mutes a group
-    # is told to use it in the confirmation reply, and it works when typed.
+    # /enable is intentionally absent: whoever mutes a group is told to use it in the
+    # confirmation reply, and it works when typed.
     types.BotCommand("disable", "Mute this group's alerts"),
 ]
 
