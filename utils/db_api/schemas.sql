@@ -14,16 +14,23 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at    TIMESTAMPTZ  DEFAULT NOW()
 );
 
+-- crash_dm is the one notification that is ON by default: crashes never go to a group,
+-- so an admin's DM is the only place a crash is ever reported, and the cost of a missed
+-- one is not symmetric with the cost of an unwanted one. It is a column rather than a
+-- seeded admin_subscriptions row so that turning it off survives a restart.
 CREATE TABLE IF NOT EXISTS admins (
     id          SERIAL      PRIMARY KEY,
     telegram_id BIGINT      UNIQUE NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
     is_super    BOOLEAN     DEFAULT FALSE,
     added_by    BIGINT      REFERENCES users(telegram_id),
     is_active   BOOLEAN     DEFAULT TRUE,
+    crash_dm    BOOLEAN     NOT NULL DEFAULT TRUE,
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Per-admin personal DM subscriptions. event_type = 'all' subscribes to every type.
+-- Per-admin personal DM subscriptions — an ALLOWLIST: a type is delivered only if listed
+-- (event_type = 'all' subscribes to every type). Crash is the exception and is not
+-- represented here at all; it lives in admins.crash_dm because it defaults to ON.
 CREATE TABLE IF NOT EXISTS admin_subscriptions (
     admin_id   INT         NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
     event_type VARCHAR(50) NOT NULL,

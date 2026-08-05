@@ -124,8 +124,28 @@ async def transfer_super_admin(current_telegram_id: int, target_admin_id: int) -
             )
 
 
+CRASH_EVENT_TYPE = "crash"
+
+
 async def get_subscribed_admins(event_type: str) -> list[int]:
-    """Returns telegram_ids of active admins who want a personal DM for this event type."""
+    """Returns telegram_ids of active admins who want a personal DM for this event type.
+
+    Crash is the one type that is opt-OUT: it is read off admins.crash_dm, which defaults
+    to TRUE, so every admin gets crashes until they turn them off in Settings. Every other
+    type is opt-IN through admin_subscriptions, where an admin with no rows gets nothing.
+
+    The asymmetry is deliberate. A crash is never delivered to a group — a DM is the only
+    place it appears — and an admin who never opened Settings would otherwise be told
+    about a collision by nobody at all. Note that a blanket 'all' subscription does not
+    override crash_dm: the column is the crash switch, and it already starts on.
+    """
+    if event_type == CRASH_EVENT_TYPE:
+        rows = await db.fetch(
+            "SELECT telegram_id FROM admins "
+            "WHERE is_active = TRUE AND COALESCE(crash_dm, TRUE)"
+        )
+        return [r["telegram_id"] for r in rows]
+
     rows = await db.fetch(
         """
         SELECT a.telegram_id
@@ -182,7 +202,11 @@ async def delete_admin(admin_id: int) -> None:
 
 
 async def get_admin_subscriptions(telegram_id: int) -> list[str]:
-    """Returns list of event_types the admin is subscribed to for personal DMs."""
+    """Returns list of event_types the admin is subscribed to for personal DMs.
+
+    Includes 'crash' when admins.crash_dm is on, so the Settings toggles render from one
+    list and the crash row shows ✅ by default without the UI knowing it is stored apart.
+    """
     rows = await db.fetch(
         """
         SELECT sub.event_type
@@ -192,11 +216,27 @@ async def get_admin_subscriptions(telegram_id: int) -> list[str]:
         """,
         telegram_id,
     )
-    return [r["event_type"] for r in rows]
+    subscriptions = [r["event_type"] for r in rows]
+
+    crash_dm = await db.fetchval(
+        "SELECT COALESCE(crash_dm, TRUE) FROM admins WHERE telegram_id = $1", telegram_id
+    )
+    if crash_dm and CRASH_EVENT_TYPE not in subscriptions:
+        subscriptions.append(CRASH_EVENT_TYPE)
+    return subscriptions
 
 
 async def toggle_subscription(telegram_id: int, event_type: str) -> None:
     """Toggle a personal DM subscription for an event type. Adds if absent, removes if present."""
+    if event_type == CRASH_EVENT_TYPE:
+        # Crash lives in its own column because it defaults to on; flipping it is the
+        # whole opt-out, and it must not also leave a stale admin_subscriptions row.
+        await db.execute(
+            "UPDATE admins SET crash_dm = NOT COALESCE(crash_dm, TRUE) WHERE telegram_id = $1",
+            telegram_id,
+        )
+        return
+
     admin_id = await db.fetchval("SELECT id FROM admins WHERE telegram_id = $1", telegram_id)
     exists = await db.fetchval(
         "SELECT 1 FROM admin_subscriptions WHERE admin_id = $1 AND event_type = $2",

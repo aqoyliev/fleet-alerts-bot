@@ -18,6 +18,11 @@ _MIGRATIONS = [
     "ALTER TABLE alert_groups ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE",
     "CREATE UNIQUE INDEX IF NOT EXISTS alert_groups_tgid ON alert_groups (telegram_group_id)",
     "CREATE INDEX IF NOT EXISTS alert_groups_vehicle ON alert_groups (vehicle_number)",
+    # Crash DMs are on for every admin unless they turn them off. A column defaulting to
+    # TRUE is what makes that work on both sides: existing rows get TRUE when it is added,
+    # new admins get TRUE for free, and an admin who opts out stays opted out — seeding
+    # subscription rows instead would silently re-enable them on the next startup.
+    "ALTER TABLE admins ADD COLUMN IF NOT EXISTS crash_dm BOOLEAN NOT NULL DEFAULT TRUE",
 ]
 
 
