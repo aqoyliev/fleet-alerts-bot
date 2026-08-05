@@ -1,4 +1,29 @@
+from data import config
 from utils.db_api import db
+
+
+def is_hidden_admin(telegram_id: int | None) -> bool:
+    """Is this id hidden from the 👥 Admins panel (config.HIDDEN_ADMIN_IDS)?
+
+    Hidden is about visibility only — never about permission. Nothing in this module
+    filters a hidden admin out of a query: they stay in get_all_admins() so alerts and
+    admin DMs keep reaching them, and the panel is the only place that hides them.
+    """
+    try:
+        return int(telegram_id) in config.HIDDEN_ADMIN_IDS
+    except (TypeError, ValueError):
+        return False
+
+
+def visible_admins(admins: list[dict], viewer_telegram_id: int) -> list[dict]:
+    """The admin rows `viewer_telegram_id` is allowed to see in the panel.
+
+    A hidden admin sees the real, unfiltered list — otherwise the maintainer could not
+    see their own account or manage the team they are hiding from.
+    """
+    if is_hidden_admin(viewer_telegram_id):
+        return list(admins)
+    return [a for a in admins if not is_hidden_admin(a["telegram_id"])]
 
 
 async def is_admin(telegram_id: int) -> bool:

