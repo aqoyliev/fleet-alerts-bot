@@ -31,6 +31,13 @@ def admin_detail_keyboard(admin: dict, is_super: bool = False, is_self: bool = F
             InlineKeyboardButton(toggle_label, callback_data=f"adm_toggle_active:{admin['id']}"),
             InlineKeyboardButton("🗑 Remove", callback_data=f"adm_remove:{admin['id']}"),
         )
+        # Promotion is offered only for an active admin: a deactivated super admin is a
+        # contradiction the rest of the panel has no way to undo, since none of these
+        # controls are drawn for a super.
+        if admin["is_active"]:
+            kb.add(InlineKeyboardButton(
+                "⭐ Make super admin", callback_data=f"adm_promote:{admin['id']}",
+            ))
     elif is_super and admin["is_super"] and is_self:
         # A super admin can't remove themselves — they hand the role to someone else.
         kb.add(InlineKeyboardButton("🔁 Transfer super admin", callback_data="adm_transfer_start"))
@@ -47,6 +54,15 @@ def admin_transfer_choose_keyboard(admins: list[dict]) -> InlineKeyboardMarkup:
             callback_data=f"adm_transfer_to:{a['id']}",
         ))
     kb.add(InlineKeyboardButton("◀ Back", callback_data="adm_bk_list"))
+    return kb
+
+
+def admin_promote_confirm_keyboard(admin_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.row(
+        InlineKeyboardButton("✅ Yes, promote", callback_data=f"adm_promote_confirm:{admin_id}"),
+        InlineKeyboardButton("❌ Cancel", callback_data=f"adm_detail:{admin_id}"),
+    )
     return kb
 
 

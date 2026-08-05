@@ -14,6 +14,7 @@ from utils.db_api.admins import (
     set_admin_active,
     delete_admin,
     add_admin,
+    promote_to_super,
     transfer_super_admin,
 )
 from utils.db_api.users import ensure_user
@@ -22,6 +23,7 @@ from keyboards.inline.admin_mgmt import (
     admin_detail_keyboard,
     admin_remove_confirm_keyboard,
     add_admin_cancel_keyboard,
+    admin_promote_confirm_keyboard,
     admin_transfer_choose_keyboard,
     admin_transfer_confirm_keyboard,
 )
@@ -194,6 +196,69 @@ async def cb_adm_remove_confirm(call: types.CallbackQuery):
     await delete_admin(admin_id)
     await call.answer("Admin removed.")
     await _show_admin_list(call, is_super=True)
+
+
+# ── Promote to super admin (the promoter keeps their own role) ──────────────────────
+
+@dp.callback_query_handler(lambda c: c.data.startswith("adm_promote:"))
+async def cb_adm_promote(call: types.CallbackQuery):
+    if not await is_super_admin(call.from_user.id):
+        await call.answer("⛔ Super admins only.", show_alert=True)
+        return
+    admin_id = int(call.data.split(":")[1])
+    admin = await get_admin_by_id(admin_id)
+    if not admin or _concealed_from(admin, call.from_user.id):
+        await call.answer("Admin not found.", show_alert=True)
+        return
+    if admin["is_super"]:
+        await call.answer("Already a super admin.", show_alert=True)
+        return
+    if not admin["is_active"]:
+        await call.answer("⛔ Activate this admin first.", show_alert=True)
+        return
+
+    uname = f" (@{admin['username']})" if admin["username"] else ""
+    text = (
+        f"⭐ Make <b>{admin['full_name']}</b>{uname} a <b>super admin</b>?\n\n"
+        "They will be able to add, remove, activate and deactivate admins, and promote "
+        "others.\n"
+        "You keep your own super admin role.\n\n"
+        "<i>Note: this panel offers no way to demote them afterwards.</i>"
+    )
+    await _edit_or_send(call, text, admin_promote_confirm_keyboard(admin_id))
+    await call.answer()
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("adm_promote_confirm:"))
+async def cb_adm_promote_confirm(call: types.CallbackQuery):
+    if not await is_super_admin(call.from_user.id):
+        await call.answer("⛔ Super admins only.", show_alert=True)
+        return
+    admin_id = int(call.data.split(":")[1])
+    admin = await get_admin_by_id(admin_id)
+    if not admin or _concealed_from(admin, call.from_user.id):
+        await call.answer("Admin not found.", show_alert=True)
+        await _show_admin_list(call, is_super=True)
+        return
+    if admin["is_super"] or not admin["is_active"]:
+        await call.answer("That admin can't be promoted.", show_alert=True)
+        await _show_admin_detail(call, admin_id, is_super=True)
+        return
+
+    await promote_to_super(admin_id)
+    await call.answer("⭐ Promoted to super admin.")
+
+    try:
+        await bot.send_message(
+            admin["telegram_id"],
+            "⭐ You are now a <b>super admin</b>. Open 👥 Admins to manage the team.",
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(is_super=True),
+        )
+    except Exception:
+        pass
+
+    await _show_admin_detail(call, admin_id, is_super=True)
 
 
 # ── Transfer super admin (a super admin steps down to a chosen admin) ───────────────

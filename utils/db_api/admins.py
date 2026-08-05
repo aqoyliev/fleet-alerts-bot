@@ -73,6 +73,18 @@ async def add_admin(telegram_id: int, added_by: int | None = None, is_super: boo
     )
 
 
+async def promote_to_super(admin_id: int) -> None:
+    """Make an existing admin a super admin, leaving whoever promoted them super too.
+
+    This is the difference from transfer_super_admin, which hands the role over and
+    demotes the current holder. A company needs a second super admin without its
+    maintainer stepping down, so promotion had to stop costing the promoter their access.
+    """
+    await db.execute(
+        "UPDATE admins SET is_super = TRUE WHERE id = $1", admin_id
+    )
+
+
 async def transfer_super_admin(current_telegram_id: int, target_admin_id: int) -> None:
     """Move super-admin status from the current holder to another admin, atomically:
     promote the target (and ensure it's active) and demote the current super to a
