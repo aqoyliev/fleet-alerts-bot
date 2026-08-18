@@ -81,3 +81,36 @@ async def test_unknown_unit_is_not_found():
 
 async def test_name_without_digits_does_not_match_everything():
     assert await _client("unit1234").find_vehicle_name("spare truck") is None
+
+
+# ── what lands in the database ─────────────────────────────────────────────────
+
+@pytest.mark.parametrize("typed", ["unit1234", "1234", "unit 1234", "UNIT: 1234",
+                                   "Unit#1234", "unit1234 (lease)"])
+async def test_the_roster_spelling_is_what_gets_stored(typed, monkeypatch):
+    """Alert routing compares the stored unit to the vehicle name by strict SQL
+    equality, so the database must hold Samsara's spelling and never the caller's.
+    Storing what was typed would register a group that then silently receives
+    nothing — the worst outcome, because it looks configured.
+    """
+    import handlers.groups.group_events as ge
+    from data import config
+
+    c = _client("unit1234")
+    monkeypatch.setattr(config, "SAMSARA_API_KEY", "key")
+    monkeypatch.setattr(ge, "lookup_unit", lambda _k, u: c.find_vehicle_name(u))
+
+    status, stored = await ge._resolve_unit(typed)
+    assert (status, stored) == ("ok", "unit1234")
+
+
+async def test_an_unknown_unit_is_rejected_not_stored(monkeypatch):
+    import handlers.groups.group_events as ge
+    from data import config
+
+    c = _client("unit1234")
+    monkeypatch.setattr(config, "SAMSARA_API_KEY", "key")
+    monkeypatch.setattr(ge, "lookup_unit", lambda _k, u: c.find_vehicle_name(u))
+
+    status, _ = await ge._resolve_unit("9999")
+    assert status == "missing"    # the caller refuses to register on this status
