@@ -893,21 +893,34 @@ _PERMANENT_SEND_ERRORS = (
 )
 
 
-async def _drop_unreachable(chat_id: int, exc: Exception) -> None:
-    """Stop targeting a chat the bot can no longer post to.
+# Of the errors above, only being kicked is safe to mute a group over: putting the bot
+# back in the chat fires a my_chat_member update, which re-registers the group and clears
+# the mute (see register_group). ChatNotFound has no such signal — if it ever fires on a
+# group the bot is actually still in, muting would silence it permanently with nobody
+# watching, so that case is skipped for this alert only and retried on the next event.
+_MUTE_ON_ERRORS = (BotKicked,)
 
-    For a group this mutes the row (enabled = FALSE) rather than deleting it, so the
-    group's unit binding, event-type filter, and history survive: re-adding the bot and
-    running the unmute command brings it straight back. A DM is only logged — an admin
-    who blocked the bot keeps their access and can unblock at any time."""
-    if chat_id < 0:
-        try:
-            await set_group_enabled(chat_id, False)
-            logger.warning(f"Group {chat_id} unreachable ({type(exc).__name__}) — muted; unmute after re-adding the bot")
-        except Exception as db_exc:
-            logger.error(f"Could not mute unreachable group {chat_id}: {db_exc}")
-    else:
+
+async def _drop_unreachable(chat_id: int, exc: Exception) -> None:
+    """Stop hammering a chat the bot cannot post to, and mute it when — and only when —
+    re-adding the bot would bring it back on its own.
+
+    Muting sets enabled = FALSE rather than deleting the row, so the group's unit
+    binding, event-type filter and history survive the round trip. A DM is only logged:
+    an admin who blocked the bot keeps their access and can unblock at any time."""
+    if chat_id > 0:
         logger.warning(f"DM {chat_id} unreachable ({type(exc).__name__}) — skipping this alert")
+        return
+    if not isinstance(exc, _MUTE_ON_ERRORS):
+        logger.error(f"Group {chat_id} unreachable ({type(exc).__name__}) — skipping this alert, "
+                     f"left registered because nothing would automatically un-mute it")
+        return
+    try:
+        await set_group_enabled(chat_id, False)
+        logger.warning(f"Group {chat_id} unreachable ({type(exc).__name__}) — muted; "
+                       f"re-adding the bot to the group turns its alerts back on")
+    except Exception as db_exc:
+        logger.error(f"Could not mute unreachable group {chat_id}: {db_exc}")
 
 
 async def _send_all(bot: Bot, chat_ids: list[int], text: str,

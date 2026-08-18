@@ -59,12 +59,14 @@ async def test_kicked_group_is_not_retried_and_gets_muted(muted):
     assert muted == [(-100123, False)]       # group muted so it stops being targeted
 
 
-async def test_chat_not_found_on_text_only_send_mutes_group(muted):
+async def test_chat_not_found_is_not_retried_but_is_left_unmuted(muted):
+    """Nothing would ever un-mute a group silenced by ChatNotFound — there is no
+    re-add event to recover from it — so the send is skipped without muting."""
     bot = _Bot(exc=ChatNotFound("chat not found"))
     await wh._send_with_retry(bot, -100777, "alert")
 
-    assert bot.message_calls == [-100777]
-    assert muted == [(-100777, False)]
+    assert bot.message_calls == [-100777]   # one attempt, not three
+    assert muted == []
 
 
 async def test_blocked_dm_is_skipped_without_touching_groups(muted):
@@ -99,3 +101,22 @@ async def test_send_all_continues_past_a_failing_chat(monkeypatch):
 
     # The dead group used to abort the loop, costing everyone behind it their alert.
     assert delivered == [-100111, 555]
+
+
+# ── re-adding the bot restores a muted group ───────────────────────────────────
+
+async def test_register_group_clears_the_mute(monkeypatch):
+    """The auto-mute is only safe because re-registration undoes it: nobody unmutes a
+    group by hand, so putting the bot back has to set enabled back to TRUE."""
+    import utils.db_api.groups as groups
+    captured = {}
+
+    async def _execute(query, *args):
+        captured["query"] = query
+
+    monkeypatch.setattr(groups.db, "execute", _execute)
+    await groups.register_group(-100123, "UNIT 571", "571")
+
+    q = " ".join(captured["query"].split())
+    assert "ON CONFLICT (telegram_group_id) DO UPDATE" in q
+    assert "enabled = TRUE" in q

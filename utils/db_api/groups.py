@@ -45,14 +45,20 @@ async def get_all_groups() -> list[int]:
 async def register_group(telegram_group_id: int, title: str | None,
                          vehicle_number: str | None) -> None:
     """Insert (or update) a group registration. Called when the bot is added to a group;
-    vehicle_number is the parsed unit for driver groups, or NULL for the main group."""
+    vehicle_number is the parsed unit for driver groups, or NULL for the main group.
+
+    Re-registering clears any mute. A group that went silent because the bot was kicked
+    is muted automatically (see _drop_unreachable), and nobody would think to unmute it
+    by hand afterwards — putting the bot back in the group is the intent signal, so it
+    is what turns the alerts back on."""
     await db.execute(
         """
         INSERT INTO alert_groups (telegram_group_id, title, vehicle_number)
         VALUES ($1, $2, $3)
         ON CONFLICT (telegram_group_id) DO UPDATE
             SET title = EXCLUDED.title,
-                vehicle_number = EXCLUDED.vehicle_number
+                vehicle_number = EXCLUDED.vehicle_number,
+                enabled = TRUE
         """,
         telegram_group_id, title, vehicle_number,
     )
