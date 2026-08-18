@@ -13,10 +13,13 @@ import aiohttp
 from aiohttp import web
 from aiogram import Bot
 from aiogram.types import InputFile, InputMediaVideo, InputMediaPhoto
-from aiogram.utils.exceptions import NetworkError, TelegramAPIError, RetryAfter, MigrateToChat
+from aiogram.utils.exceptions import (
+    NetworkError, TelegramAPIError, RetryAfter, MigrateToChat,
+    BotKicked, BotBlocked, ChatNotFound, UserDeactivated, CantInitiateConversation,
+)
 
 from data import config
-from utils.db_api.groups import get_groups_for_event, migrate_group
+from utils.db_api.groups import get_groups_for_event, migrate_group, set_group_enabled
 from utils.db_api.violations import save_violation
 from utils.db_api.admins import get_subscribed_admins
 from utils.db_api.crash_confirmations import (
@@ -794,8 +797,7 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
             # send a short closure note to the same crash targets.
             if not video_urls and not image_urls:
                 logger.info(f"[samsara] Crash had no media — sending no-video closure note id={event_id}")
-                for chat_id in [*group_ids, *dm_ids]:
-                    await _send_with_retry(bot, chat_id, "📹 <i>No video available for this crash.</i>")
+                await _send_all(bot, [*group_ids, *dm_ids], "📹 <i>No video available for this crash.</i>")
                 return
             if not crash_first_had_location and event.get("location"):
                 # Location wasn't ready for the first alert but is now — send the full
@@ -824,8 +826,7 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
         # Download the media ONCE up front and reuse the bytes for every recipient,
         # rather than re-downloading (potentially large crash clips) per chat.
         media, is_video = await _download_media(video_urls, image_urls)
-        for chat_id in [*group_ids, *dm_ids]:
-            await _send_with_retry(bot, chat_id, text, media, is_video)
+        await _send_all(bot, [*group_ids, *dm_ids], text, media, is_video)
 
     except Exception as e:
         logger.error(f"Event handling error: {e}", exc_info=True)
@@ -883,6 +884,43 @@ async def _migrate_group(old_id: int, new_id: int) -> None:
     logger.info(f"DB updated: group {old_id} → {new_id}")
 
 
+# Telegram errors that mean "this chat will never accept another message": the bot was
+# kicked or blocked, the chat is gone, or the user's account is deactivated. Retrying is
+# pointless — every attempt fails the same way — and these all subclass TelegramAPIError,
+# so without naming them they get swept into the generic retry branch below.
+_PERMANENT_SEND_ERRORS = (
+    BotKicked, BotBlocked, ChatNotFound, UserDeactivated, CantInitiateConversation,
+)
+
+
+async def _drop_unreachable(chat_id: int, exc: Exception) -> None:
+    """Stop targeting a chat the bot can no longer post to.
+
+    For a group this mutes the row (enabled = FALSE) rather than deleting it, so the
+    group's unit binding, event-type filter, and history survive: re-adding the bot and
+    running the unmute command brings it straight back. A DM is only logged — an admin
+    who blocked the bot keeps their access and can unblock at any time."""
+    if chat_id < 0:
+        try:
+            await set_group_enabled(chat_id, False)
+            logger.warning(f"Group {chat_id} unreachable ({type(exc).__name__}) — muted; unmute after re-adding the bot")
+        except Exception as db_exc:
+            logger.error(f"Could not mute unreachable group {chat_id}: {db_exc}")
+    else:
+        logger.warning(f"DM {chat_id} unreachable ({type(exc).__name__}) — skipping this alert")
+
+
+async def _send_all(bot: Bot, chat_ids: list[int], text: str,
+                    media: list[bytes] = None, is_video: bool = False) -> None:
+    """Deliver one alert to every recipient. Each send is isolated: a chat that fails
+    must not cost the recipients behind it in the list their alert."""
+    for chat_id in chat_ids:
+        try:
+            await _send_with_retry(bot, chat_id, text, media, is_video)
+        except Exception as e:
+            logger.error(f"Send to {chat_id} failed, continuing with the rest: {e}", exc_info=True)
+
+
 async def _download_media(video_urls: list[str], image_urls: list[str]) -> tuple[list[bytes], bool]:
     """Download each media URL exactly once so the bytes can be reused for every
     recipient, instead of re-downloading (potentially large) clips per chat.
@@ -931,6 +969,11 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, media: list[bytes]
             except RetryAfter as e:
                 logger.warning(f"Flood control (media) for {chat_id}, waiting {e.timeout}s")
                 await asyncio.sleep(e.timeout + 1)
+            except _PERMANENT_SEND_ERRORS as e:
+                # Nothing will ever reach this chat again — don't retry, and don't fall
+                # through to the text-only path, which would only fail the same way.
+                await _drop_unreachable(chat_id, e)
+                return
             except (TimeoutError, NetworkError, TelegramAPIError) as e:
                 logger.warning(f"Media send failed for {chat_id} (attempt {attempt+1}/3): {e} — retrying")
                 await asyncio.sleep(5)
@@ -948,6 +991,13 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, media: list[bytes]
             except RetryAfter as e:
                 logger.warning(f"Flood control (text) for {chat_id}, waiting {e.timeout}s")
                 await asyncio.sleep(e.timeout + 1)
+            except _PERMANENT_SEND_ERRORS as e:
+                await _drop_unreachable(chat_id, e)
+                return
+            except (TimeoutError, NetworkError, TelegramAPIError) as e:
+                logger.warning(f"Text send failed for {chat_id} (attempt {attempt+1}/3): {e} — retrying")
+                await asyncio.sleep(5)
+        logger.error(f"Text-only fallback exhausted for {chat_id} — alert dropped")
         return
 
     # No media — send text only
@@ -962,6 +1012,9 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str, media: list[bytes]
         except RetryAfter as e:
             logger.warning(f"Flood control (text-only) for {chat_id}, waiting {e.timeout}s")
             await asyncio.sleep(e.timeout + 1)
+        except _PERMANENT_SEND_ERRORS as e:
+            await _drop_unreachable(chat_id, e)
+            return
         except NetworkError as e:
             if attempt < retries:
                 logger.warning(f"NetworkError sending to {chat_id} (attempt {attempt}/{retries}): {e} — retrying in {delay}s")
