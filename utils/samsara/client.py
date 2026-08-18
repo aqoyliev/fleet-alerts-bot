@@ -33,6 +33,19 @@ def _core(name: str) -> str:
     return _UNIT_LABEL_RE.sub("", _normalize(name)).strip()
 
 
+# Last-resort key: the unit's digit run. Rosters decorate names in ways no label rule can
+# anticipate — "unit1234 (lease)", "1234 - Freightliner", "TRK-1234" — and dropping a
+# leading UNIT/TRUCK label does not reach any of those. In a fleet the digits are what
+# actually identify the truck, so they are the final thing compared.
+_DIGITS_RE = re.compile(r"\d{3,7}")
+
+
+def _digits(name: str) -> str:
+    """The unit's identifying digit run, or "" if the name carries none."""
+    m = _DIGITS_RE.search(_normalize(name))
+    return m.group(0) if m else ""
+
+
 def _kph_to_mph(kph: float) -> float:
     return kph * 0.621371
 
@@ -185,13 +198,18 @@ class SamsaraClient:
         """Return the vehicle's name exactly as Samsara spells it, or None if no vehicle
         in the org carries that name.
 
-        Two matching passes, both case- and whitespace-insensitive:
+        Three matching passes, each looser than the last, all case- and
+        whitespace-insensitive:
           1. the name exactly as given;
           2. the name with a leading UNIT/TRUCK label dropped from BOTH sides, so a
-             dispatcher typing 571 finds Samsara's "unit571" and vice versa.
+             dispatcher typing 571 finds Samsara's "unit571" and vice versa;
+          3. the identifying digit run alone, which is the only thing that survives a
+             roster that decorates names ("unit571 (lease)", "571 - Freightliner",
+             "TRK-571").
 
-        The second pass only resolves when exactly ONE vehicle matches — an ambiguous
-        input is treated as not found rather than guessed at. Whichever pass hits, the
+        Passes 2 and 3 only resolve when exactly ONE vehicle matches; a tie stops the
+        search rather than falling through to a looser pass that can only widen it, and
+        an ambiguous input is treated as not found rather than guessed at. Whichever pass hits, the
         return value is the roster's own spelling, because alert routing compares the
         stored unit against the vehicle name by strict SQL equality. Returning what the
         user typed would register a group that then silently never receives anything —
@@ -217,14 +235,19 @@ class SamsaraClient:
         if key in self._vehicle_names:
             return self._vehicle_names[key]
 
-        wanted = _core(unit)
-        if not wanted:
-            return None
-        hits = {n for k, n in self._vehicle_names.items() if _core(k) == wanted}
-        if len(hits) == 1:
-            return hits.pop()
-        if hits:
-            logger.warning(f"Samsara unit '{unit}' is ambiguous: {sorted(hits)}")
+        for key_of in (_core, _digits):
+            wanted = key_of(unit)
+            if not wanted:
+                continue
+            hits = {n for k, n in self._vehicle_names.items() if key_of(k) == wanted}
+            if len(hits) == 1:
+                return hits.pop()
+            if hits:
+                # Two trucks answer to this — guessing would route a group's alerts to
+                # the wrong unit, so stop here rather than fall through to a looser pass
+                # that can only widen the tie.
+                logger.warning(f"Samsara unit '{unit}' is ambiguous: {sorted(hits)}")
+                return None
         return None
 
     async def nearby_units(self, unit: str, limit: int = 5) -> list[str]:
