@@ -114,3 +114,35 @@ async def test_an_unknown_unit_is_rejected_not_stored(monkeypatch):
 
     status, _ = await ge._resolve_unit("9999")
     assert status == "missing"    # the caller refuses to register on this status
+
+
+# ── nothing unverified reaches the database ────────────────────────────────────
+
+def _patch(monkeypatch, api_key, lookup):
+    import handlers.groups.group_events as ge
+    from data import config
+    monkeypatch.setattr(config, "SAMSARA_API_KEY", api_key)
+    monkeypatch.setattr(ge, "lookup_unit", lookup)
+    return ge
+
+
+async def test_samsara_outage_refuses_rather_than_storing_a_guess(monkeypatch):
+    """With a roster configured there is a canonical spelling this guess could disagree
+    with, and a mismatch registers a group that silently receives nothing."""
+    from utils.samsara.client import SamsaraUnavailable
+
+    async def _down(*_a, **_k):
+        raise SamsaraUnavailable("down")
+
+    ge = _patch(monkeypatch, "key", _down)
+    assert await ge._resolve_unit("1234") == ("unavailable", "1234")
+
+
+async def test_a_fleet_without_samsara_still_registers(monkeypatch):
+    """No key means no roster to be canonical against — a Motive-only fleet must not be
+    locked out of registering its groups."""
+    async def _unused(*_a, **_k):
+        raise AssertionError("must not be called without an API key")
+
+    ge = _patch(monkeypatch, "", _unused)
+    assert await ge._resolve_unit("1234") == ("no_roster", "1234")

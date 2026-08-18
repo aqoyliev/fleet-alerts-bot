@@ -44,6 +44,23 @@ def joined_registered(unit: str) -> str:
     )
 
 
+def joined_roster_unavailable(unit: str) -> str:
+    """Posted when the bot joins a driver group but Samsara could not be reached.
+
+    Deliberately not a registration. The roster is the authority on how a unit is
+    spelled, and alert routing matches that spelling exactly — so a group registered on
+    an unverified guess looks connected and then never posts anything. Better to say
+    plainly that setup is unfinished and give the one command that finishes it.
+    """
+    return (
+        f"⚠️ <b>Not connected yet — {_unit_label(unit)}</b>\n\n"
+        "I read this group's truck number, but couldn't reach Samsara to check how it's "
+        "spelled there. Saving it unverified would leave this group silent, so I "
+        "haven't saved it.\n\n"
+        f"Please run <code>/setunit {unit}</code> in a few minutes to finish setup."
+    )
+
+
 def joined_main_group(company: str) -> str:
     """Posted when the bot joins the company-wide main group."""
     return (

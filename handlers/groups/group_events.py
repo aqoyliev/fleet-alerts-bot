@@ -202,20 +202,28 @@ async def _resolve_unit(unit: str) -> tuple[str, str]:
     Returns (status, value):
       ("ok", <name as Samsara spells it>)  — exists; store this, not what was typed
       ("missing", unit)                    — no such vehicle in the org
-      ("unchecked", unit)                  — no API key, or Samsara couldn't be reached
+      ("unavailable", unit)                — there is a roster but it could not be read
+      ("no_roster", unit)                  — this deployment has no Samsara at all
 
     Storing Samsara's own spelling is the point. Alert routing matches the stored unit
     against the vehicle name by strict equality, and this fleet names trucks "unit571"
     while its Telegram groups say "UNIT: 571" — so the two only ever meet if the
     roster's version is what goes in the database.
+
+    That is why "unavailable" is kept apart from "no_roster". With a key configured
+    there IS a canonical spelling; registering an unverified guess against it produces a
+    group that looks configured and never receives anything, which is the failure this
+    whole function exists to prevent — so the caller refuses and asks for a retry.
+    Without a key there is no canonical spelling to disagree with (a Motive-only fleet),
+    so what the dispatcher typed is all there is and registration proceeds.
     """
     if not config.SAMSARA_API_KEY:
-        return "unchecked", unit
+        return "no_roster", unit
     try:
         canonical = await lookup_unit(config.SAMSARA_API_KEY, unit)
     except SamsaraUnavailable as e:
         logger.warning(f"Samsara unit check unavailable for '{unit}': {e}")
-        return "unchecked", unit
+        return "unavailable", unit
     if canonical is None:
         return "missing", unit
     if canonical != unit:
@@ -309,6 +317,14 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
         # same truck "unit571". Register the roster's spelling or the group receives
         # nothing, silently.
         status, resolved = await _resolve_unit(vehicle)
+        if status == "unavailable":
+            # Registering the parsed spelling unverified would very likely store
+            # something the roster does not match, leaving the group silent. Say so and
+            # let whoever is in the chat run /setunit once Samsara answers again.
+            logger.warning(f"Group '{title}' (id={chat.id}) parsed unit {vehicle}, "
+                           f"but Samsara could not be reached — not registering")
+            await _say(chat.id, group_texts.joined_roster_unavailable(vehicle))
+            return
         if status == "missing":
             logger.warning(f"Group '{title}' (id={chat.id}) parsed unit {vehicle}, "
                            f"which is not in Samsara — not registering")
@@ -322,7 +338,7 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
 
         await register_group(chat.id, title, resolved)
         logger.info(f"Registered group id={chat.id} → unit {resolved}"
-                    + (" (unverified)" if status == "unchecked" else ""))
+                    + (" (no Samsara roster to verify against)" if status == "no_roster" else ""))
         await _say(chat.id, group_texts.joined_registered(resolved))
 
     elif removed:
@@ -383,9 +399,18 @@ async def cmd_setunit(message: types.Message):
         logger.info(f"Rejected /setunit {typed} in group {message.chat.id} — not in Samsara")
         return
 
-    # Fail open on an outage: Samsara being down must not block setting up a group.
-    note = ("\n\n⚠️ <i>Couldn't reach Samsara to verify this unit — double-check it.</i>"
-            if status == "unchecked" else "")
+    if status == "unavailable":
+        # The roster is the authority on how this unit is spelled, and storing a guess
+        # against it registers a group that silently never receives anything.
+        await message.reply(
+            "⚠️ Couldn't reach Samsara to verify that unit, so it wasn't saved — "
+            "the spelling has to match the roster exactly or this group would receive "
+            "nothing. Please try again in a few minutes.",
+        )
+        logger.warning(f"Deferred /setunit {typed} in group {message.chat.id} — Samsara unreachable")
+        return
+
+    note = ""
     if status == "ok" and unit != typed:
         note = f"\n\n<i>Matched Samsara's <code>{unit}</code>.</i>"
 
