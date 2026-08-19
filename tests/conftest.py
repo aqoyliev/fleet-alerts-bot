@@ -8,3 +8,6 @@ os.environ.setdefault("ADMINS", "1")
 os.environ.setdefault("DATABASE_URL", "postgresql://u:p@localhost/db")
 os.environ.setdefault("COMPANY_SLUG", "testco")
 os.environ.setdefault("COMPANY_NAME", "Test Co")
+# Optional in production (blank just hides the panel button), but set here so the
+# keyboard test has a URL to assert on.
+os.environ.setdefault("WEBAPP_URL", "https://example.test")

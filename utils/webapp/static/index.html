@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+  <title>Admin Panel</title>
+  <!-- Telegram's bridge. The one external resource on this page, and it can't be
+       vendored: it is how the WebApp object gets wired to the client. -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/panel/app.css">
+</head>
+<body>
+
+<!-- Shown instead of everything else when the page is opened outside Telegram, or when
+     the credential has expired. Both are dead ends for the app, so they get the whole
+     screen rather than an error toast on top of a UI that cannot work. -->
+<div id="blocker" class="blocker" hidden>
+  <div class="blocker-emoji" id="blocker-emoji">🔒</div>
+  <h1 id="blocker-title">Open this from Telegram</h1>
+  <p id="blocker-text">This panel is a Telegram Mini App. Open your bot's chat and tap
+    <b>🖥 Admin Panel</b>.</p>
+  <button class="btn" id="blocker-action" hidden>Close</button>
+</div>
+
+<div id="app" hidden>
+  <header class="topbar">
+    <div class="topbar-title" id="screen-title">Dashboard</div>
+    <div class="topbar-sub" id="company-name"></div>
+  </header>
+
+  <main id="main">
+    <!-- Screens are rendered into here by app.js; only one is present at a time. -->
+    <div class="loading" id="loading"><span class="spinner"></span></div>
+  </main>
+
+  <nav class="tabbar" id="tabbar">
+    <button class="tab is-active" data-tab="dashboard">
+      <span class="tab-icon">📊</span><span class="tab-label">Dashboard</span>
+    </button>
+    <button class="tab" data-tab="groups">
+      <span class="tab-icon">👥</span><span class="tab-label">Groups</span>
+    </button>
+    <button class="tab" data-tab="alerts">
+      <span class="tab-icon">🔔</span><span class="tab-label">Alerts</span>
+    </button>
+    <button class="tab" data-tab="admins">
+      <span class="tab-icon">⚙️</span><span class="tab-label">Admins</span>
+    </button>
+  </nav>
+</div>
+
+<script src="/panel/app.js"></script>
+</body>
+</html>

@@ -84,6 +84,23 @@ async def suggest_units(api_key: str, unit: str) -> list[str]:
         return []
 
 
+async def list_units(api_key: str) -> list[str]:
+    """Every vehicle name in the org, as Samsara spells them, sorted.
+
+    This is what lets the admin panel offer a unit picker instead of a text box. Handing
+    over the canonical spellings means the common path can't produce a value that fails
+    lookup_unit — though the server still checks, because a dropdown is a convenience and
+    not a validator.
+
+    Raises SamsaraUnavailable, like lookup_unit: an empty list would be indistinguishable
+    from a fleet with no trucks, and the caller needs to tell those apart to decide
+    whether to show "no roster" or "couldn't reach Samsara".
+    """
+    if not api_key:
+        raise SamsaraUnavailable("no Samsara API key configured")
+    return await _client_for(api_key).all_vehicle_names()
+
+
 def _client_for(api_key: str) -> "SamsaraClient":
     client = _clients.get(api_key)
     if client is None:
@@ -249,6 +266,24 @@ class SamsaraClient:
                 logger.warning(f"Samsara unit '{unit}' is ambiguous: {sorted(hits)}")
                 return None
         return None
+
+    async def all_vehicle_names(self) -> list[str]:
+        """The whole roster, sorted, as Samsara spells it.
+
+        Same staleness rule as find_vehicle_name, and the same distinction between an
+        empty fleet and an unreachable one: with no cached roster to fall back on, a
+        failed refresh raises rather than returning [], because a picker showing zero
+        trucks and a picker that couldn't load are different things to a dispatcher.
+        """
+        stale = (
+            self._vehicles_at is None
+            or datetime.now(timezone.utc) - self._vehicles_at > timedelta(minutes=30)
+        )
+        if stale:
+            answered = await self._refresh_vehicles()
+            if not answered and self._vehicles_at is None:
+                raise SamsaraUnavailable("could not fetch the vehicle roster")
+        return sorted(self._vehicle_names.values())
 
     async def nearby_units(self, unit: str, limit: int = 5) -> list[str]:
         """Roster names that look like `unit`, for a 'did you mean' hint. Best-effort:

@@ -1,0 +1,280 @@
+/* Admin panel styling.
+ *
+ * Every colour is a Telegram theme variable with a fallback, and there is not one
+ * `prefers-color-scheme` block in this file. That is deliberate: Telegram publishes the
+ * user's actual palette — including custom themes we could never enumerate — as CSS
+ * custom properties, so reading from those means light, dark and everything else are all
+ * correct without us maintaining a second palette that would drift from the first.
+ *
+ * app.js maps themeParams onto these names at boot and again on the themeChanged event.
+ */
+
+:root {
+  --bg:          var(--tg-theme-bg-color, #ffffff);
+  --text:        var(--tg-theme-text-color, #000000);
+  --hint:        var(--tg-theme-hint-color, #707579);
+  --link:        var(--tg-theme-link-color, #3390ec);
+  --button:      var(--tg-theme-button-color, #3390ec);
+  --button-text: var(--tg-theme-button-text-color, #ffffff);
+  --secondary:   var(--tg-theme-secondary-bg-color, #f4f4f5);
+  --section:     var(--tg-theme-section-bg-color, var(--bg));
+  --separator:   var(--tg-theme-section-separator-color, rgba(128, 128, 128, 0.22));
+  --destructive: var(--tg-theme-destructive-text-color, #e53935);
+  --accent:      var(--tg-theme-accent-text-color, var(--link));
+
+  --radius: 12px;
+  --gap: 12px;
+  --tabbar-h: 58px;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+/* Must outrank the display values set on .blocker and #app below. Without it a class
+   that sets `display` silently defeats the hidden attribute, and the "open this from
+   Telegram" screen renders on top of a perfectly working panel. */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  overscroll-behavior-y: contain;
+}
+
+button { font: inherit; color: inherit; }
+
+/* ── chrome ─────────────────────────────────────────────────────────────────── */
+
+.topbar {
+  position: sticky; top: 0; z-index: 10;
+  padding: 14px 16px 10px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--separator);
+}
+.topbar-title { font-size: 20px; font-weight: 700; }
+.topbar-sub { font-size: 13px; color: var(--hint); margin-top: 2px; }
+
+#main {
+  padding: var(--gap) var(--gap) calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 20px);
+  min-height: 60vh;
+}
+
+.tabbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  background: var(--bg);
+  border-top: 1px solid var(--separator);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.tab {
+  appearance: none; background: none; border: 0;
+  /* 44px is the floor for a comfortable thumb target; the bar is taller than it looks
+     because the label sits under the icon. */
+  min-height: var(--tabbar-h);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; color: var(--hint); cursor: pointer;
+}
+.tab-icon { font-size: 20px; line-height: 1; filter: grayscale(1); opacity: .65; }
+.tab-label { font-size: 11px; }
+.tab.is-active { color: var(--link); }
+.tab.is-active .tab-icon { filter: none; opacity: 1; }
+
+/* ── blocker / loading ──────────────────────────────────────────────────────── */
+
+.blocker {
+  min-height: 100vh;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; padding: 32px 28px; gap: 8px;
+}
+.blocker-emoji { font-size: 48px; }
+.blocker h1 { font-size: 20px; margin: 4px 0; }
+.blocker p { color: var(--hint); margin: 0; font-size: 15px; }
+.blocker .btn { margin-top: 20px; }
+
+.loading { display: flex; justify-content: center; padding: 48px 0; }
+.spinner {
+  width: 26px; height: 26px; border-radius: 50%;
+  border: 2.5px solid var(--separator); border-top-color: var(--link);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── building blocks ────────────────────────────────────────────────────────── */
+
+.card {
+  background: var(--section);
+  border: 1px solid var(--separator);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin-bottom: var(--gap);
+}
+.card-title {
+  font-size: 13px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--hint); margin-bottom: 10px;
+}
+
+.btn {
+  appearance: none; border: 0; border-radius: 10px;
+  background: var(--button); color: var(--button-text);
+  padding: 12px 18px; font-weight: 600; cursor: pointer; min-height: 44px;
+}
+.btn-secondary { background: var(--secondary); color: var(--text); }
+.btn-danger { background: transparent; color: var(--destructive);
+              border: 1px solid var(--destructive); }
+.btn-block { display: block; width: 100%; }
+
+.segmented {
+  display: flex; background: var(--secondary);
+  border-radius: 10px; padding: 3px; margin-bottom: var(--gap);
+}
+.segmented button {
+  flex: 1; appearance: none; background: none; border: 0; cursor: pointer;
+  padding: 9px 4px; border-radius: 8px; font-size: 14px; color: var(--hint);
+  min-height: 38px;
+}
+.segmented button.is-active {
+  background: var(--bg); color: var(--text); font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
+}
+
+/* ── dashboard ──────────────────────────────────────────────────────────────── */
+
+.headline { text-align: center; padding: 6px 0 2px; }
+.headline-number { font-size: 52px; font-weight: 700; line-height: 1; }
+.headline-label { color: var(--hint); font-size: 14px; margin-top: 6px; }
+
+.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+         margin-bottom: var(--gap); }
+.tile {
+  background: var(--section); border: 1px solid var(--separator);
+  border-radius: var(--radius); padding: 12px 8px; text-align: center;
+}
+.tile-value { font-size: 22px; font-weight: 700; }
+.tile-label { font-size: 11px; color: var(--hint); margin-top: 3px; }
+
+/* A bar row: label on the left, proportional fill behind, count on the right. Built
+   from divs rather than a chart library — the whole visual is "which bar is longest",
+   and a canvas chart would not inherit any of the theme variables above. */
+.bar-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; }
+.bar-row + .bar-row { border-top: 1px solid var(--separator); }
+.bar-name { flex: 0 0 auto; font-size: 14px; display: flex; align-items: center; gap: 6px; }
+/* display:block on both — these are spans, and width/height do nothing on an inline box,
+   which renders the whole bar as an invisible hairline. */
+.bar-track { display: block; flex: 1 1 auto; height: 6px; background: var(--secondary);
+             border-radius: 3px; overflow: hidden; }
+.bar-fill { display: block; height: 100%; background: var(--link); border-radius: 3px; }
+.bar-count { flex: 0 0 auto; font-variant-numeric: tabular-nums; font-weight: 600;
+             font-size: 14px; min-width: 2ch; text-align: right; }
+
+.trend { display: flex; align-items: flex-end; gap: 3px; height: 74px; margin-top: 4px; }
+.trend-col { flex: 1; display: flex; flex-direction: column; align-items: center;
+             gap: 4px; justify-content: flex-end; height: 100%; }
+.trend-bar { width: 100%; background: var(--link); border-radius: 3px 3px 0 0;
+             min-height: 2px; opacity: .85; }
+.trend-day { font-size: 9px; color: var(--hint); }
+
+/* Rendered only when something is muted, which is most days nothing. A group that looks
+   configured and is silent is the failure this whole codebase is built to avoid, so when
+   it happens it gets a loud card rather than a subtle badge three taps away. */
+.warn-card {
+  background: color-mix(in srgb, var(--destructive) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--destructive) 40%, transparent);
+  border-radius: var(--radius); padding: 13px 14px; margin-bottom: var(--gap);
+  cursor: pointer; display: flex; align-items: center; gap: 10px;
+}
+.warn-card b { color: var(--destructive); }
+.warn-card small { display: block; color: var(--hint); margin-top: 2px; font-size: 12px; }
+
+/* ── list rows ──────────────────────────────────────────────────────────────── */
+
+.rows { background: var(--section); border: 1px solid var(--separator);
+        border-radius: var(--radius); overflow: hidden; }
+.row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px; min-height: 56px; cursor: pointer; background: none;
+  border: 0; width: 100%; text-align: left;
+}
+.row + .row { border-top: 1px solid var(--separator); }
+.row-main { flex: 1 1 auto; min-width: 0; }
+.row-title { font-size: 15px; font-weight: 500; overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
+.row-sub { font-size: 12.5px; color: var(--hint); margin-top: 2px;
+           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-side { flex: 0 0 auto; color: var(--hint); font-size: 13px; text-align: right; }
+.row-chevron { flex: 0 0 auto; color: var(--hint); opacity: .5; }
+
+.badge {
+  display: inline-block; padding: 2px 7px; border-radius: 6px;
+  font-size: 11px; font-weight: 600; background: var(--secondary); color: var(--hint);
+  vertical-align: middle;
+}
+.badge-unit { background: color-mix(in srgb, var(--link) 16%, transparent); color: var(--link); }
+.badge-main { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.badge-muted { background: color-mix(in srgb, var(--destructive) 14%, transparent);
+               color: var(--destructive); }
+.badge-super { background: color-mix(in srgb, #f0a500 22%, transparent); color: #b57c00; }
+
+/* ── switch ─────────────────────────────────────────────────────────────────── */
+
+.switch { flex: 0 0 auto; width: 50px; height: 30px; border-radius: 15px;
+          background: var(--secondary); border: 0; position: relative; cursor: pointer;
+          transition: background .18s; padding: 0; }
+.switch::after {
+  content: ""; position: absolute; top: 3px; left: 3px;
+  width: 24px; height: 24px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .3); transition: transform .18s;
+}
+.switch.is-on { background: #34c759; }
+.switch.is-on::after { transform: translateX(20px); }
+
+/* ── chips ──────────────────────────────────────────────────────────────────── */
+
+.chips { display: flex; flex-wrap: wrap; gap: 7px; }
+.chip {
+  appearance: none; border: 1px solid var(--separator); background: var(--secondary);
+  color: var(--hint); border-radius: 16px; padding: 7px 12px; font-size: 13px;
+  cursor: pointer; min-height: 34px;
+}
+.chip.is-on { background: var(--link); border-color: var(--link); color: #fff; font-weight: 600; }
+
+.filter-bar { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 10px;
+              margin-bottom: 2px; scrollbar-width: none; }
+.filter-bar::-webkit-scrollbar { display: none; }
+.filter-bar .chip { white-space: nowrap; flex: 0 0 auto; }
+
+/* ── detail screen ──────────────────────────────────────────────────────────── */
+
+.field { display: flex; align-items: center; justify-content: space-between;
+         gap: 12px; padding: 11px 0; }
+.field + .field { border-top: 1px solid var(--separator); }
+.field-label { font-size: 15px; }
+.field-value { color: var(--hint); font-size: 14px; text-align: right;
+               overflow: hidden; text-overflow: ellipsis; }
+
+.input {
+  width: 100%; padding: 12px; border-radius: 10px; min-height: 44px;
+  border: 1px solid var(--separator); background: var(--bg); color: var(--text);
+  font: inherit;
+}
+/* appearance:none so the control matches the theme in dark mode, where a native select
+   renders its own light chrome on some WebViews. That removes the dropdown arrow too, so
+   the wrapper draws one back — without it the field reads as a text box and nobody taps
+   it to see the roster. */
+.select-wrap { position: relative; }
+.select-wrap::after {
+  content: "▾"; position: absolute; right: 14px; top: 50%;
+  transform: translateY(-50%); color: var(--hint); pointer-events: none; font-size: 14px;
+}
+select.input { appearance: none; padding-right: 34px; }
+
+.day-header {
+  font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--hint); padding: 14px 2px 6px;
+}
+
+.empty { text-align: center; color: var(--hint); padding: 40px 20px; font-size: 15px; }
+.note { font-size: 13px; color: var(--hint); margin-top: 8px; line-height: 1.45; }
+.note-warn { color: var(--destructive); }
+.danger-zone { margin-top: 28px; }

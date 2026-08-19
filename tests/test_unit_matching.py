@@ -93,37 +93,37 @@ async def test_the_roster_spelling_is_what_gets_stored(typed, monkeypatch):
     Storing what was typed would register a group that then silently receives
     nothing — the worst outcome, because it looks configured.
     """
-    import handlers.groups.group_events as ge
+    from utils import units
     from data import config
 
     c = _client("unit1234")
     monkeypatch.setattr(config, "SAMSARA_API_KEY", "key")
-    monkeypatch.setattr(ge, "lookup_unit", lambda _k, u: c.find_vehicle_name(u))
+    monkeypatch.setattr(units, "lookup_unit", lambda _k, u: c.find_vehicle_name(u))
 
-    status, stored = await ge._resolve_unit(typed)
+    status, stored = await units.resolve_unit(typed)
     assert (status, stored) == ("ok", "unit1234")
 
 
 async def test_an_unknown_unit_is_rejected_not_stored(monkeypatch):
-    import handlers.groups.group_events as ge
+    from utils import units
     from data import config
 
     c = _client("unit1234")
     monkeypatch.setattr(config, "SAMSARA_API_KEY", "key")
-    monkeypatch.setattr(ge, "lookup_unit", lambda _k, u: c.find_vehicle_name(u))
+    monkeypatch.setattr(units, "lookup_unit", lambda _k, u: c.find_vehicle_name(u))
 
-    status, _ = await ge._resolve_unit("9999")
+    status, _ = await units.resolve_unit("9999")
     assert status == "missing"    # the caller refuses to register on this status
 
 
 # ── nothing unverified reaches the database ────────────────────────────────────
 
 def _patch(monkeypatch, api_key, lookup):
-    import handlers.groups.group_events as ge
+    from utils import units
     from data import config
     monkeypatch.setattr(config, "SAMSARA_API_KEY", api_key)
-    monkeypatch.setattr(ge, "lookup_unit", lookup)
-    return ge
+    monkeypatch.setattr(units, "lookup_unit", lookup)
+    return units
 
 
 async def test_samsara_outage_refuses_rather_than_storing_a_guess(monkeypatch):
@@ -134,8 +134,8 @@ async def test_samsara_outage_refuses_rather_than_storing_a_guess(monkeypatch):
     async def _down(*_a, **_k):
         raise SamsaraUnavailable("down")
 
-    ge = _patch(monkeypatch, "key", _down)
-    assert await ge._resolve_unit("1234") == ("unavailable", "1234")
+    units = _patch(monkeypatch, "key", _down)
+    assert await units.resolve_unit("1234") == ("unavailable", "1234")
 
 
 async def test_a_fleet_without_samsara_still_registers(monkeypatch):
@@ -144,5 +144,5 @@ async def test_a_fleet_without_samsara_still_registers(monkeypatch):
     async def _unused(*_a, **_k):
         raise AssertionError("must not be called without an API key")
 
-    ge = _patch(monkeypatch, "", _unused)
-    assert await ge._resolve_unit("1234") == ("no_roster", "1234")
+    units = _patch(monkeypatch, "", _unused)
+    assert await units.resolve_unit("1234") == ("no_roster", "1234")

@@ -1142,6 +1142,12 @@ async def start_webhook_server(bot: Bot, port: int = 8080):
     app.router.add_post("/webhook/samsara", samsara_webhook)
     app.router.add_post("/webhook/motive", motive_webhook)
     app.router.add_get("/health", lambda r: web.Response(text="OK"))
+
+    # The admin Mini App rides on this same server, under /panel. Imported here rather
+    # than at module scope because the panel reads EVENT_TYPE_MAP from this file, and a
+    # top-level import in both directions is a cycle.
+    from utils.webapp import setup_routes
+    setup_routes(app)
     # Close the shared aiohttp session when the server shuts down.
     app.on_cleanup.append(_close_http_session)
 

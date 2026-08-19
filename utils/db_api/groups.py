@@ -92,6 +92,50 @@ async def remove_group(telegram_group_id: int) -> None:
     )
 
 
+async def set_group_unit(telegram_group_id: int, vehicle_number: str) -> None:
+    """Repoint an already-registered group at a different unit, leaving its mute alone.
+
+    register_group is the wrong call for this even though it would write the same column.
+    It treats every write as a (re-)registration and therefore clears the mute — correct
+    when the bot is added back to a group that went silent, wrong when a dispatcher is
+    only fixing a typo in the unit of a group they muted this morning. Reusing it would
+    turn an unrelated edit into an un-mute, and nobody would connect the two events.
+    """
+    await db.execute(
+        "UPDATE alert_groups SET vehicle_number = $2 WHERE telegram_group_id = $1",
+        telegram_group_id, vehicle_number,
+    )
+
+
+async def get_groups_overview() -> list[dict]:
+    """Every registered group with the fields the admin panel lists, filter folded in.
+
+    get_all_groups is not this: it returns only the telegram ids of the catch-all groups
+    that receive the daily digest. The panel needs one row per group, and it needs them in
+    ONE query — calling get_group_event_types per group turns opening the Groups tab on a
+    40-truck fleet into 41 round trips.
+
+    The ordering is digit-aware deliberately. This fleet's roster spells units "unit571"
+    and "unit2007", and a plain VARCHAR sort files unit2007 before unit571, so a
+    dispatcher scanning the list for a truck cannot find it where they expect. The main
+    group (NULL unit) is pinned first because it behaves unlike every other row.
+    """
+    rows = await db.fetch(
+        r"""
+        SELECT g.id, g.telegram_group_id, g.title, g.vehicle_number,
+               COALESCE(g.enabled, TRUE) AS enabled, g.created_at,
+               ARRAY(SELECT t.event_type FROM group_event_types t
+                     WHERE t.group_id = g.id ORDER BY t.event_type) AS event_types
+        FROM alert_groups g
+        ORDER BY (g.vehicle_number IS NULL) DESC,
+                 NULLIF(regexp_replace(COALESCE(g.vehicle_number, ''), '\D', '', 'g'),
+                        '')::bigint NULLS LAST,
+                 g.vehicle_number
+        """
+    )
+    return [dict(r) for r in rows]
+
+
 async def set_group_event_types(telegram_group_id: int, event_types: set[str]) -> None:
     """Replace a group's event-type allowlist. An empty set clears the filter, which
     (per get_groups_for_event) means the group receives every type."""

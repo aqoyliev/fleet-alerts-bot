@@ -77,6 +77,18 @@ CRASH_GROUP_ID = int(_crash_group_raw) if _crash_group_raw else None
 # Minimum severity a speeding event must reach to be alerted ("low"/"medium"/"high"/"critical").
 SPEEDING_MIN_SEVERITY = env.str("SPEEDING_MIN_SEVERITY", "high")
 
+# ── Admin Mini App ──────────────────────────────────────────────────────────────
+# Public HTTPS base URL this deployment is reachable at — the same host the Motive and
+# Samsara webhooks already point at. The admin panel is served from /app on it, and the
+# bot's ☰ menu button is pointed there at startup.
+#
+# There is no way to discover this from inside the container (Railway's domain isn't in
+# the environment), so it has to be stated. Blank is a supported state and means "serve
+# the panel but don't advertise it": the routes still answer, the menu button just isn't
+# set. That keeps a deployment that hasn't been told its URL from failing to boot, and
+# keeps a wrong URL from being pinned onto the bot.
+WEBAPP_URL = env.str("WEBAPP_URL", "").strip().rstrip("/")
+
 # ── Samsara (optional — leave blank if this company has no Samsara fleet) ────────
 # API key is the bearer token used for the harsh-event poll callback; the webhook
 # secret signs inbound Samsara webhooks (blank = skip signature verification).
