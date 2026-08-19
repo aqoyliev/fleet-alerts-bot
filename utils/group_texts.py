@@ -16,8 +16,9 @@ utils/set_bot_commands); they are listed only in the admin section of /help.
 Everything here is HTML — the bot's default parse mode.
 """
 
-# Crash alerts go to admin DMs only and never to a group (see data/event_catalog), so
-# they are left out of this description on purpose.
+# Crash alerts are left out of this description on purpose: they never reach a driver
+# group or the main group, only admin DMs and the dedicated CRASH_GROUP_ID chat (see
+# data/event_catalog and the crash branch in webhook_handler._handle_event).
 _WHAT_I_POST = "speeding, hard braking, harsh turns and similar safety events"
 
 
@@ -72,6 +73,22 @@ def joined_main_group(company: str) -> str:
     )
 
 
+def joined_crash_group(company: str) -> str:
+    """Posted when the bot joins the group nominated as CRASH_GROUP_ID.
+
+    Says the quiet part out loud: this chat will look dead for weeks at a stretch. A
+    crash-only group that nobody has told is crash-only reads as a broken bot, and
+    someone eventually removes it — right before the one message it exists to deliver.
+    """
+    return (
+        "✅ <b>Connected — crash alerts only</b>\n\n"
+        f"This group receives <b>crash detections</b> for {company}'s whole fleet, and "
+        "nothing else. No speeding, no hard braking — those go to the driver groups.\n\n"
+        "<b>Expect silence.</b> No message here means no crash, not a broken bot.\n\n"
+        "Please keep me in this group and leave notifications on."
+    )
+
+
 def joined_needs_unit() -> str:
     """Posted when no unit number could be parsed from the group name or description.
 
@@ -105,7 +122,7 @@ def joined_unknown_unit(company: str, unit: str, suggestions: list[str] | None =
 
 
 def help_text(company: str, *, unit: str | None = None, is_main: bool = False,
-              is_admin: bool = False) -> str:
+              is_crash: bool = False, is_admin: bool = False) -> str:
     """The /help reply inside a group.
 
     Deliberately not the same text as the DM /help (handlers/users/help.py): that one is a
@@ -114,7 +131,15 @@ def help_text(company: str, *, unit: str | None = None, is_main: bool = False,
     """
     lines = [f"🚛 <b>{company} — Fleet Alerts</b>\n"]
 
-    if is_main:
+    if is_crash:
+        # Checked before is_main and before the unregistered-group warning: the crash
+        # group has no row in alert_groups on purpose, so both of those would otherwise
+        # describe it wrongly — the second one alarmingly so.
+        lines.append(
+            "I post <b>crash detections</b> for the whole fleet here, and nothing else. "
+            "Silence means no crash.\n"
+        )
+    elif is_main:
         lines.append(
             f"This is the main group: I post <b>every</b> unit's alerts here — "
             f"{_WHAT_I_POST}.\n"
@@ -131,15 +156,29 @@ def help_text(company: str, *, unit: str | None = None, is_main: bool = False,
         )
 
     lines.append("<b>Commands</b>")
-    if not is_main:
-        lines.append("/setunit 1234 — set or correct this group's unit")
-    lines += [
-        "/disable — mute alerts in this group",
-        "/enable — turn them back on",
-        "/help — this message",
-    ]
+    if is_crash:
+        # /setunit, /disable and /enable all need a row in alert_groups, and the crash
+        # group deliberately has none. Offering them here would hand someone a command
+        # that answers "this group isn't registered" — in the group that matters most.
+        lines.append("/help — this message")
+    else:
+        if not is_main:
+            lines.append("/setunit 1234 — set or correct this group's unit")
+        lines += [
+            "/disable — mute alerts in this group",
+            "/enable — turn them back on",
+            "/help — this message",
+        ]
 
-    if is_admin:
+    if is_admin and is_crash:
+        # No /events or /removegroup: this group's membership comes from CRASH_GROUP_ID
+        # in the deployment's .env, so there is no filter to edit and no row to remove.
+        lines += [
+            "\n🔑 <b>Admins</b>",
+            "/report — yesterday's violations · /top — today's worst units",
+            "Crash routing is set by <code>CRASH_GROUP_ID</code> in the deployment config.",
+        ]
+    elif is_admin:
         lines += [
             "\n🔑 <b>Admins</b>",
             "/events — choose which event types this group gets",

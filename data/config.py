@@ -59,6 +59,21 @@ COMPANY_NAME = env.str("COMPANY_NAME")            # display name, e.g. "HF Truck
 _main_group_raw = env.str("MAIN_GROUP_ID", "").strip()
 MAIN_GROUP_ID = int(_main_group_raw) if _main_group_raw else None
 
+# The one group that receives CRASH alerts, and only crash alerts.
+#
+# Crashes deliberately do not follow the normal group routing: a wreck is not news for
+# the driver's own chat, and pushing it to the all-fleet main group buries it under the
+# day's speeding alerts. So crashes go to subscribed admin DMs plus this group, and no
+# other event type is ever routed here — "crash only" is a property of the routing, not
+# of a filter someone has to remember to set.
+#
+# This group is intentionally NOT registered in `alert_groups`: a row there with a NULL
+# unit *is* the all-fleet main group in this schema, and it would pull the crash group
+# into the daily digest (see get_all_groups). Membership is decided here and nowhere
+# else. Leave blank to keep crashes DM-only, which is the behaviour before this setting.
+_crash_group_raw = env.str("CRASH_GROUP_ID", "").strip()
+CRASH_GROUP_ID = int(_crash_group_raw) if _crash_group_raw else None
+
 # Minimum severity a speeding event must reach to be alerted ("low"/"medium"/"high"/"critical").
 SPEEDING_MIN_SEVERITY = env.str("SPEEDING_MIN_SEVERITY", "high")
 

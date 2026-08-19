@@ -1,9 +1,10 @@
 """Tests for crash DMs being on by default.
 
 Every other event type is opt-in: an admin with no admin_subscriptions rows gets nothing.
-Crash can't work that way — it is never delivered to a group, so a DM is the only place a
-crash is ever reported, and an admin who never opened Settings would hear about a
-collision from nobody. It is stored as admins.crash_dm DEFAULT TRUE, and these pin down
+Crash can't work that way — it reaches no group but the deployment's optional
+CRASH_GROUP_ID chat (see tests/test_crash_group.py), so for most fleets a DM is the only
+place a crash is reported at all, and an admin who never opened Settings would hear about
+a collision from nobody. It is stored as admins.crash_dm DEFAULT TRUE, and these pin down
 that the default is on, that turning it off sticks, and that nothing else changed.
 """
 import pytest

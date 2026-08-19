@@ -678,14 +678,20 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
                 persisted_type = rtype
                 logger.info(f"[samsara] Persisted {rtype} early (id={event.get('id')}) before media resolved")
                 if rtype == "crash":
-                    # Crash alerts go to subscribed DMs only — never to groups.
+                    # Crash alerts never reach a driver group or the main group: subscribed
+                    # admin DMs plus the dedicated crash group, and that is all. The same
+                    # target list is rebuilt for the video follow-up below, so both halves
+                    # of a crash land in the same chats.
                     targets = await get_subscribed_admins("crash")
+                    if config.CRASH_GROUP_ID:
+                        targets = [config.CRASH_GROUP_ID, *targets]
                     text = _format_crash_initial(first_event, company_display)
-                    for cid in targets:
-                        await _send_with_retry(bot, cid, text)
+                    # _send_all, not a bare loop: one unreachable chat must not cost the
+                    # recipients behind it the one alert that matters most.
+                    await _send_all(bot, targets, text)
                     crash_card_sent = True
                     crash_first_had_location = bool(first_loc)
-                    logger.info(f"[samsara] Crash full alert → {len(targets)} DM target(s) id={event.get('id')}")
+                    logger.info(f"[samsara] Crash full alert → {len(targets)} target(s) id={event.get('id')}")
 
             harsh_data = await _fetch_samsara_harsh_event(
                 event["_samsara_vehicle_id"], event["_samsara_timestamp_ms"],
@@ -782,8 +788,12 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
         group_ids = await get_groups_for_event(event_type, (_get_vehicle(event) or "").strip())
         dm_ids = await get_subscribed_admins(event_type)
         if event_type == "crash":
-            # Crash alerts go to subscribed DMs only — never to groups.
-            group_ids = []
+            # Crash alerts never follow the normal group routing: a wreck is not news for
+            # the driver's own chat, and in the all-fleet main group it would be buried
+            # under the day's speeding alerts. They go to subscribed admin DMs plus the
+            # one group the company nominated for them, which by construction receives
+            # crashes and nothing else — no other event type routes to CRASH_GROUP_ID.
+            group_ids = [config.CRASH_GROUP_ID] if config.CRASH_GROUP_ID else []
         if not group_ids and not dm_ids:
             logger.info(f"No targets for event='{event_type}' — skipping")
             return

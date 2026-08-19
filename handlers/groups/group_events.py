@@ -137,11 +137,13 @@ async def cmd_group_help(message: types.Message):
     """
     grp = await get_group(message.chat.id)
     is_main = config.MAIN_GROUP_ID is not None and message.chat.id == config.MAIN_GROUP_ID
+    is_crash = config.CRASH_GROUP_ID is not None and message.chat.id == config.CRASH_GROUP_ID
     await message.reply(
         group_texts.help_text(
             config.COMPANY_NAME,
             unit=(grp or {}).get("vehicle_number"),
             is_main=is_main,
+            is_crash=is_crash,
             is_admin=await is_admin(message.from_user.id),
         ),
         parse_mode="HTML",
@@ -295,6 +297,17 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
         title = chat.title or ""
         vehicle = extract_vehicle_number(title, description)
         is_main = config.MAIN_GROUP_ID is not None and chat.id == config.MAIN_GROUP_ID
+
+        # Checked before anything else, including the unit parse: the crash group's title
+        # may well contain digits, and matching one of them would register it as a driver
+        # group and start sending it a truck's speeding alerts.
+        if config.CRASH_GROUP_ID is not None and chat.id == config.CRASH_GROUP_ID:
+            # No register_group call on purpose — see the CRASH_GROUP_ID note in
+            # data/config.py. Routing for this chat comes from the config, so a DB row
+            # would only add ways for it to be wrong.
+            logger.info(f"Bot added to CRASH group (id={chat.id}) — crash alerts only")
+            await _say(chat.id, group_texts.joined_crash_group(config.COMPANY_NAME))
+            return
 
         if vehicle is None and not is_main:
             logger.warning(f"No unit number for group '{title}' (id={chat.id}) — not registering")

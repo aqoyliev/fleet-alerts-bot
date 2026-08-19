@@ -2,8 +2,8 @@
 
 EVENT_TYPE_MAP (in utils.webhook_handler) carries provider aliases and duplicates; this
 is the curated, de-duplicated list a group admin actually toggles. Crash is intentionally
-absent — crash alerts go to admin DMs only, never to any group, so there is nothing to
-filter.
+absent — crash alerts bypass this filter entirely, going to subscribed admin DMs plus the
+deployment's CRASH_GROUP_ID chat and no other group, so there is nothing here to filter.
 
 A group's filter is stored in group_event_types as an ALLOWLIST: no rows means "all types",
 otherwise only the listed types are delivered. next_event_filter() encodes the toggle rule
