@@ -26,6 +26,7 @@ GROUP_FILTER_TYPES = [
     ("drowsy_driving",                "😴", "Drowsiness"),
     ("road_facing_cam_obstruction",   "📷", "Road Camera Obstructed"),
     ("driver_facing_cam_obstruction", "📷", "Driver Camera Obstructed"),
+    ("obstructed_camera",             "📷", "Camera Obstructed (Samsara)"),
     ("unsafe_parking",                "🅿️", "Unsafe Parking"),
     ("near_miss",                     "⚠️", "Near Miss"),
 ]

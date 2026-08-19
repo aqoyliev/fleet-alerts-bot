@@ -191,9 +191,16 @@ async def test_poll_noncrash_gives_up_after_three_attempts(patch_poll):
     assert session.calls == 3
 
 
-async def test_poll_obstructed_camera_skips(patch_poll):
-    patch_poll["install"]([_FakeResp(200, {"harshEventType": "Obstructed Camera"})])
-    assert await wh._fetch_samsara_harsh_event("v1", 1, "key") is None
+async def test_poll_obstructed_camera_is_not_skipped(patch_poll):
+    # Obstructed Camera is now a real, alertable type — resolved like any other
+    # harsh event (polled up to 3 attempts, sent even with no media).
+    session = patch_poll["install"]([
+        _FakeResp(200, {"harshEventType": "Obstructed Camera"}),
+    ])
+    data = await wh._fetch_samsara_harsh_event("v1", 1, "key")
+    assert data is not None
+    assert data["harshEventType"] == "Obstructed Camera"
+    assert session.calls == 3
 
 
 async def test_poll_http_error_gives_up(patch_poll):

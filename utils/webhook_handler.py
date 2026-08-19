@@ -156,6 +156,7 @@ EVENT_TYPE_MAP = {
     "inattentive_driving":          ("😵", "INATTENTIVE DRIVING"),
     "drowsy_driving":               ("😴", "POSSIBLE DROWSINESS"),
     "no_seat_belt":                 ("🚫", "NO SEAT BELT"),
+    "obstructed_camera":            ("📷", "CAMERA OBSTRUCTED"),
 }
 
 # Only process these event types — everything else is ignored
@@ -442,9 +443,6 @@ async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int, api_key
                 data = await r.json()
                 last_data = data
                 harsh_type = data.get("harshEventType") or ""
-                if harsh_type == "Obstructed Camera":
-                    logger.info("[samsara] Obstructed Camera — skipping event")
-                    return None
                 if harsh_type == "Crash" and not is_crash:
                     is_crash = True
                     max_attempts = 15  # ~5 min total at 20s intervals
