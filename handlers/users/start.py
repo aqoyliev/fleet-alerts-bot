@@ -9,7 +9,7 @@ from data import config
 
 logger = logging.getLogger(__name__)
 from utils.db_api.users import upsert_user
-from utils.db_api.admins import is_admin, is_super_admin
+from utils.db_api.admins import is_admin
 from keyboards.default.main_menu import main_menu_keyboard
 
 
@@ -79,12 +79,11 @@ async def bot_start(message: types.Message):
             await _set_menu_button(message.chat.id, to_panel=False)
         await message.answer("⛔ You don't have access to this bot.")
         return
-    is_super = await is_super_admin(message.from_user.id)
     if config.WEBAPP_URL:
         await _set_menu_button(message.chat.id, to_panel=True)
     await message.answer(
         f"Welcome, {message.from_user.full_name}!",
-        reply_markup=main_menu_keyboard(is_super=is_super)
+        reply_markup=main_menu_keyboard()
     )
     panel = _panel_button()
     if panel is not None:
@@ -95,25 +94,6 @@ async def bot_start(message: types.Message):
             reply_markup=panel,
         )
 
-
-
-@dp.message_handler(commands=["myid", "id"], chat_type=types.ChatType.PRIVATE)
-async def cmd_myid(message: types.Message):
-    """Tell any user their own Telegram ID. Lets a prospective admin (including Premium
-    users whose forwards hide their account) fetch the number a super admin needs to add
-    them. Also records their name so the eventual add shows it."""
-    await upsert_user(
-        telegram_id=message.from_user.id,
-        full_name=message.from_user.full_name,
-        username=message.from_user.username,
-        language_code=message.from_user.language_code,
-    )
-    premium = " ⭐" if getattr(message.from_user, "is_premium", False) else ""
-    await message.answer(
-        f"🆔 Your Telegram user ID is <code>{message.from_user.id}</code>{premium}\n\n"
-        "Send this number to your administrator so they can add you.",
-        parse_mode="HTML",
-    )
 
 
 @dp.message_handler(text="📊 Violations Report")

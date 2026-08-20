@@ -133,14 +133,36 @@ async def test_startup_puts_the_maintainer_row_back(monkeypatch):
 # ── the concealment guard on every mutation ────────────────────────────────────
 
 def test_mutations_treat_a_hidden_admin_as_nonexistent(hidden_dev):
-    from handlers.users.admin_mgmt import _concealed_from
     dev_row = {"telegram_id": DEV}
-    assert _concealed_from(dev_row, viewer_id=SUPER) is True
-    assert _concealed_from(dev_row, viewer_id=REGULAR) is True
+    assert adm._concealed_from(dev_row, viewer_id=SUPER) is True
+    assert adm._concealed_from(dev_row, viewer_id=REGULAR) is True
     # ...but not to the hidden admin themselves, or they couldn't open their own entry.
-    assert _concealed_from(dev_row, viewer_id=DEV) is False
+    assert adm._concealed_from(dev_row, viewer_id=DEV) is False
     # ...and never for anyone else's row.
-    assert _concealed_from({"telegram_id": REGULAR}, viewer_id=SUPER) is False
+    assert adm._concealed_from({"telegram_id": REGULAR}, viewer_id=SUPER) is False
+
+
+def test_the_hidden_account_is_still_concealed_from_promotion(hidden_dev):
+    assert adm._concealed_from({"telegram_id": DEV}, viewer_id=SUPER) is True
+
+
+async def test_promote_only_touches_the_target(monkeypatch):
+    """The distinction from transfer_super_admin, which demotes the current holder. If
+    promotion did that, the maintainer would lose access every time a company gained a
+    super admin."""
+    executed = []
+
+    async def _fake_execute(sql, *args):
+        executed.append((" ".join(sql.split()), args))
+
+    monkeypatch.setattr(adm.db, "execute", _fake_execute)
+    await adm.promote_to_super(42)
+
+    assert len(executed) == 1
+    sql, args = executed[0]
+    assert sql == "UPDATE admins SET is_super = TRUE WHERE id = $1"
+    assert args == (42,)
+    assert "FALSE" not in sql.upper()
 
 
 def test_config_parses_ids_and_ignores_junk():

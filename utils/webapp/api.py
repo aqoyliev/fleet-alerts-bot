@@ -400,11 +400,10 @@ async def delete_group(request: web.Request) -> web.Response:
 
 # ── admin mutations ─────────────────────────────────────────────────────────────
 #
-# Every rule below is already enforced by handlers/users/admin_mgmt.py. They are repeated
-# here rather than shared because the two surfaces disagree about what they have in hand
-# (a CallbackQuery vs a Request) — but wherever this file enforces less than that one
-# does, the panel is a way around the bot's own guard rails, so the rules are transcribed
-# rather than reinvented.
+# This is now the only surface for admin management — the old in-chat 👥 Admins flow
+# was removed once the panel covered everything it did. The refusals below (no
+# self-removal, no touching a super admin, maintainer concealed) are the same rules
+# that flow used to enforce.
 
 async def _load_target_admin(request: web.Request) -> tuple[dict | None, web.Response | None]:
     admin_id = _int_param(request, "admin_id")

@@ -31,6 +31,16 @@ def visible_admins(admins: list[dict], viewer_telegram_id: int) -> list[dict]:
     return [a for a in admins if not is_maintainer(a["telegram_id"])]
 
 
+def _concealed_from(admin: dict | None, viewer_id: int) -> bool:
+    """True when this viewer must be told the admin doesn't exist.
+
+    Every caller answers with "Admin not found" for a concealed admin, indistinguishable
+    from one that was actually removed. The panel's whole job is that one account isn't
+    in it, and a mutation that silently worked on it would undo that.
+    """
+    return bool(admin) and is_maintainer(admin["telegram_id"]) and not is_maintainer(viewer_id)
+
+
 async def is_admin(telegram_id: int) -> bool:
     """Returns True if the user is an active admin (super or regular)."""
     if is_maintainer(telegram_id):

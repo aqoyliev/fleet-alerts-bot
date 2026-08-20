@@ -1,9 +1,9 @@
-"""Admin management through the panel obeys the same refusals as the 👥 Admins panel.
+"""Admin management through the panel refuses the same things the old in-chat flow did.
 
-handlers/users/admin_mgmt.py refuses self-removal, refuses touching a super admin, and
-answers "Admin not found" for a concealed maintainer. Those rules exist because losing
-them costs someone their access with no way back that isn't a hand-written SQL statement,
-so the HTTP surface reproduces every one — plus a guard the chat flow doesn't need.
+Self-removal, touching a super admin, and mutating a concealed maintainer are all
+refused. Those rules exist because losing them costs someone their access with no way
+back that isn't a hand-written SQL statement — the panel is now the only surface that
+mutates admins, so it carries every one of them itself.
 """
 
 import hashlib

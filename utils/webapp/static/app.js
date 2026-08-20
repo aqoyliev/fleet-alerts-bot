@@ -710,7 +710,6 @@ function addAdmin() {
       <div class="card">
         <div class="card-title">Telegram ID</div>
         <input class="input" id="new-admin-id" inputmode="numeric" placeholder="e.g. 123456789">
-        <div class="note">Ask them to send /myid to the bot to find their ID.</div>
       </div>
     </div>`);
   const save = el('<button class="btn btn-block">Add admin</button>');

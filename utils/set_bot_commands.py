@@ -1,8 +1,8 @@
 """Command menus shown in Telegram's ☰ picker.
 
 Menus are set per SCOPE rather than globally. A single global list leaks the private
--chat commands into every driver group, where a driver taps /myid or /help and gets
-either silence or a wall of admin text. Telegram resolves the most specific scope
+-chat commands into every driver group, where a driver taps /help and gets a wall of
+admin text. Telegram resolves the most specific scope
 first, so the group list below is what a driver sees and the private list is what an
 admin sees in a DM.
 
@@ -17,7 +17,6 @@ from aiogram import types
 _PRIVATE_COMMANDS = [
     types.BotCommand("start", "Open main menu"),
     types.BotCommand("help", "How to use this bot"),
-    types.BotCommand("myid", "Show my Telegram user ID"),
 ]
 
 # Driver groups. These exist to RECEIVE that unit's alerts, not to be queried, so the

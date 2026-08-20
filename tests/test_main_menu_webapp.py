@@ -21,7 +21,7 @@ def _buttons(markup) -> list[dict]:
 # ── the reply keyboard stays out of it ──────────────────────────────────────────
 
 def test_the_reply_keyboard_carries_no_panel_button(monkeypatch):
-    """Deliberately absent. The keyboard is a persistent strip of three commands and the
+    """Deliberately absent. The keyboard is a persistent strip of two commands and the
     panel is not one of them — it belongs on the Menu button, where someone looks for a
     bot's main surface. Asserted with a URL configured, since that is the state in which
     a button would otherwise appear."""
@@ -30,14 +30,14 @@ def test_the_reply_keyboard_carries_no_panel_button(monkeypatch):
 
     assert not any("web_app" in b for b in buttons)
     assert [b["text"] for b in buttons] == [
-        "📊 Violations Report", "👥 Admins", "⚙️ Settings",
+        "📊 Violations Report", "⚙️ Settings",
     ]
 
 
 def test_the_keyboard_is_the_same_without_a_url(monkeypatch):
     monkeypatch.setattr(config, "WEBAPP_URL", "")
     assert [b["text"] for b in _buttons(main_menu_keyboard())] == [
-        "📊 Violations Report", "👥 Admins", "⚙️ Settings",
+        "📊 Violations Report", "⚙️ Settings",
     ]
 
 

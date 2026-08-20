@@ -15,8 +15,7 @@ async def bot_help(message: types.Message):
         "This bot monitors your fleet and reports safety violations from Motive and Samsara.\n",
         "<b>Commands:</b>",
         "/start — Open the main menu",
-        "/help — Show this help message",
-        "/myid — Show your Telegram user ID\n",
+        "/help — Show this help message\n",
         "<b>In a driver's group</b>",
         "/help — What the bot posts there, and whether the group is set up (anyone)",
         "/setunit 1234 — Set this group's unit number (anyone)",
@@ -33,8 +32,7 @@ async def bot_help(message: types.Message):
     if await is_super_admin(message.from_user.id):
         text += [
             "\n\n🔑 <b>Super Admin Features:</b>",
-            "Use <b>👥 Admins</b> from the main menu to add, activate, deactivate, and remove admins.",
-            "To add someone: tap <b>➕ Add Admin</b>, then forward a message from them, share their contact, or send their numeric ID. If forwarding is blocked by their privacy/Premium settings, ask them to send /myid and paste the number.",
-            "You can't remove yourself. To step down, open your own entry and tap <b>🔁 Transfer super admin</b> to hand the role to another admin.",
+            "Manage admins from the <b>🖥 Admin Panel</b> — open it from the ☰ menu or the "
+            "button under /start. Add, activate, deactivate, and remove admins there.",
         ]
     await message.answer("\n".join(text), parse_mode="HTML")
