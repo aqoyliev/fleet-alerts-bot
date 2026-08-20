@@ -238,6 +238,27 @@ async def _notify_admins_unknown_unit(chat: types.Chat, title: str, unit: str,
             logger.error(f"Failed to notify admin {admin_id} of unknown unit: {e}")
 
 
+async def _notify_admins_group_registered(chat: types.Chat, title: str, unit: str,
+                                          by: str | None = None):
+    """DM the admins that a group is now set up and will start receiving a unit's alerts.
+
+    The failure paths above (_notify_admins_parse_failure, _notify_admins_unknown_unit)
+    already tell admins when setup didn't work; this is the missing success half, so
+    admins learn a group came online the same way they learn one went silent.
+    """
+    source = f" by {by}" if by else " (auto-detected from the group's name)"
+    text = (
+        "✅ <b>Group set up</b>\n\n"
+        f"<b>{title or 'A group'}</b> (id <code>{chat.id}</code>) is now registered for "
+        f"unit <code>{unit}</code>{source} and will start receiving its alerts."
+    )
+    for admin_id in await _admin_ids():
+        try:
+            await bot.send_message(admin_id, text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to notify admin {admin_id} of group setup: {e}")
+
+
 @dp.my_chat_member_handler()
 async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
     old = update.old_chat_member.status
@@ -324,6 +345,7 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
         logger.info(f"Registered group id={chat.id} → unit {resolved}"
                     + (" (no Samsara roster to verify against)" if status == "no_roster" else ""))
         await _say(chat.id, group_texts.joined_registered(resolved))
+        await _notify_admins_group_registered(chat, title, resolved)
 
     elif removed:
         logger.info(f"Bot removed from {chat.type} '{chat.title}' (id={chat.id})")
@@ -404,6 +426,8 @@ async def cmd_setunit(message: types.Message):
         parse_mode="HTML",
     )
     logger.info(f"Unit for group {message.chat.id} set to {unit} by {message.from_user.id}")
+    await _notify_admins_group_registered(message.chat, message.chat.title or "", unit,
+                                          by=message.from_user.full_name)
 
 
 @dp.message_handler(commands=["disable", "mute"], chat_type=GROUP_TYPES)
