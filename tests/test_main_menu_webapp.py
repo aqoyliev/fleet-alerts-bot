@@ -64,3 +64,64 @@ def test_no_inline_button_without_a_url(monkeypatch):
 
     monkeypatch.setattr(config, "WEBAPP_URL", "")
     assert _panel_button() is None
+
+
+# ── the ☰ Menu button ───────────────────────────────────────────────────────────
+
+async def test_the_menu_button_is_set_per_chat_not_globally(monkeypatch):
+    """A default menu button applies to every private chat the bot has, so scoping it to
+    one chat is what keeps "Admin Panel" from appearing for every driver who DMs the bot.
+    The chat_id in the call is the whole guarantee."""
+    import json as _json
+    from handlers.users import start
+
+    sent = []
+
+    async def _request(method, data=None):
+        sent.append((method, data))
+        return True
+
+    monkeypatch.setattr(config, "WEBAPP_URL", "https://fleet.example")
+    monkeypatch.setattr(start.bot, "request", _request)
+
+    await start._set_menu_button(12345, to_panel=True)
+
+    method, data = sent[0]
+    assert method == "setChatMenuButton"
+    assert data["chat_id"] == 12345
+    button = _json.loads(data["menu_button"])
+    assert button["type"] == "web_app"
+    assert button["web_app"]["url"] == "https://fleet.example/panel/"
+
+
+async def test_the_menu_button_is_put_back_for_a_non_admin(monkeypatch):
+    """A removed admin's Menu button must stop advertising a door they can't open."""
+    import json as _json
+    from handlers.users import start
+
+    sent = []
+
+    async def _request(method, data=None):
+        sent.append((method, data))
+        return True
+
+    monkeypatch.setattr(config, "WEBAPP_URL", "https://fleet.example")
+    monkeypatch.setattr(start.bot, "request", _request)
+
+    await start._set_menu_button(12345, to_panel=False)
+
+    assert _json.loads(sent[0][1]["menu_button"]) == {"type": "commands"}
+
+
+async def test_a_failed_menu_button_does_not_break_start(monkeypatch):
+    """Telegram refusing the call is a smaller problem than /start raising in a
+    dispatcher's face."""
+    from handlers.users import start
+
+    async def _boom(_method, _data=None):
+        raise RuntimeError("Bad Request: menu button not supported")
+
+    monkeypatch.setattr(config, "WEBAPP_URL", "https://fleet.example")
+    monkeypatch.setattr(start.bot, "request", _boom)
+
+    await start._set_menu_button(12345, to_panel=True)   # must not raise
