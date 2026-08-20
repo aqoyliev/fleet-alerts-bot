@@ -1,10 +1,13 @@
-"""The panel's entry point is a reply-keyboard button carrying a web_app payload.
+"""How an admin actually reaches the Mini App.
 
-aiogram 2.15 predates Bot API 6.0 and has no WebAppInfo type, so the payload is passed as
-a plain dict and survives only because TelegramObject serializes unknown kwargs verbatim.
-That is an implementation detail of the library, not a documented contract — so it gets a
-test. If a future aiogram bump changes it, this fails loudly instead of the button
-quietly vanishing from every dispatcher's keyboard.
+There are two doors and neither is the reply keyboard: the ☰ Menu button, pointed at the
+panel per chat when someone passes the admin check, and an inline button on /start.
+
+Both carry their web_app payload as a plain dict, because aiogram 2.15 predates Bot API
+6.0 and has no WebAppInfo type — it survives only because TelegramObject serializes
+unknown kwargs verbatim. That is an implementation detail of the library rather than a
+documented contract, so it is pinned here: a future aiogram bump fails these loudly
+instead of the button quietly vanishing.
 """
 
 from data import config
@@ -15,45 +18,36 @@ def _buttons(markup) -> list[dict]:
     return [b for row in markup.to_python()["keyboard"] for b in row]
 
 
-def test_the_panel_button_carries_a_web_app_url(monkeypatch):
+# ── the reply keyboard stays out of it ──────────────────────────────────────────
+
+def test_the_reply_keyboard_carries_no_panel_button(monkeypatch):
+    """Deliberately absent. The keyboard is a persistent strip of three commands and the
+    panel is not one of them — it belongs on the Menu button, where someone looks for a
+    bot's main surface. Asserted with a URL configured, since that is the state in which
+    a button would otherwise appear."""
     monkeypatch.setattr(config, "WEBAPP_URL", "https://fleet.example")
     buttons = _buttons(main_menu_keyboard())
 
-    panel = [b for b in buttons if "web_app" in b]
-    assert len(panel) == 1, "expected exactly one web_app button"
-    assert panel[0]["web_app"] == {"url": "https://fleet.example/panel/"}
-    assert "Admin Panel" in panel[0]["text"]
-
-
-def test_the_existing_buttons_are_untouched(monkeypatch):
-    monkeypatch.setattr(config, "WEBAPP_URL", "https://fleet.example")
-    labels = [b["text"] for b in _buttons(main_menu_keyboard())]
-    for expected in ("📊 Violations Report", "👥 Admins", "⚙️ Settings"):
-        assert expected in labels
-
-
-def test_a_deployment_without_a_url_keeps_the_original_keyboard(monkeypatch):
-    """Blank WEBAPP_URL is a supported state — a deployment that hasn't been given a
-    public domain must keep exactly the three buttons it has today, not gain a button
-    that opens nothing."""
-    monkeypatch.setattr(config, "WEBAPP_URL", "")
-    buttons = _buttons(main_menu_keyboard())
-
+    assert not any("web_app" in b for b in buttons)
     assert [b["text"] for b in buttons] == [
         "📊 Violations Report", "👥 Admins", "⚙️ Settings",
     ]
-    assert not any("web_app" in b for b in buttons)
 
 
-def test_start_offers_an_inline_panel_button_too(monkeypatch):
-    """Two launch contexts, because they are not equally supported: some clients pass a
-    Mini App its signed credential from an inline button but not from a keyboard button.
-    The dispatcher should not have to know which client they are on."""
+def test_the_keyboard_is_the_same_without_a_url(monkeypatch):
+    monkeypatch.setattr(config, "WEBAPP_URL", "")
+    assert [b["text"] for b in _buttons(main_menu_keyboard())] == [
+        "📊 Violations Report", "👥 Admins", "⚙️ Settings",
+    ]
+
+
+# ── the inline button on /start ─────────────────────────────────────────────────
+
+def test_start_offers_an_inline_panel_button(monkeypatch):
     from handlers.users.start import _panel_button
 
     monkeypatch.setattr(config, "WEBAPP_URL", "https://fleet.example")
-    markup = _panel_button().to_python()
-    button = markup["inline_keyboard"][0][0]
+    button = _panel_button().to_python()["inline_keyboard"][0][0]
 
     assert button["web_app"] == {"url": "https://fleet.example/panel/"}
     assert "Admin Panel" in button["text"]
