@@ -20,6 +20,11 @@
   <p id="blocker-text">This panel is a Telegram Mini App. Open your bot's chat and tap
     <b>🖥 Admin Panel</b>.</p>
   <button class="btn" id="blocker-action" hidden>Close</button>
+  <!-- Filled in when the launch context is wrong. Which of the several reasons applies
+       is invisible from the outside — the screen looks identical whether the bridge
+       script failed to load, the client is too old, or the button type didn't carry a
+       credential — so the answer is put on screen rather than guessed at. -->
+  <pre class="diag" id="blocker-diag" hidden></pre>
 </div>
 
 <div id="app" hidden>

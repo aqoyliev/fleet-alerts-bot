@@ -92,6 +92,12 @@ button { font: inherit; color: inherit; }
 .blocker h1 { font-size: 20px; margin: 4px 0; }
 .blocker p { color: var(--hint); margin: 0; font-size: 15px; }
 .blocker .btn { margin-top: 20px; }
+.diag {
+  margin-top: 26px; padding: 10px 12px; max-width: 100%; overflow-x: auto;
+  background: var(--secondary); border-radius: 8px; text-align: left;
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--hint); white-space: pre-wrap; word-break: break-all;
+}
 
 .loading { display: flex; justify-content: center; padding: 48px 0; }
 .spinner {

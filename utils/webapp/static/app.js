@@ -7,7 +7,10 @@
 
 'use strict';
 
-const tg = window.Telegram && window.Telegram.WebApp;
+// Resolved in boot(), not at load time: the bridge script is fetched from telegram.org,
+// and on a slow connection it can still be in flight when this file executes. Reading it
+// once at module scope turns that race into a permanent "open this from Telegram".
+let tg = null;
 const API = '/panel/api';
 
 const state = {
@@ -147,6 +150,35 @@ function showBlocker(kind) {
     action.textContent = 'Close';
     action.onclick = () => tg && tg.close && tg.close();
   }
+  if (kind === 'outside') showDiagnostics();
+}
+
+/** Print what the launch actually handed us.
+ *
+ *  "No credential" has several causes that look identical on screen — the bridge script
+ *  never loaded, the client is too old to send one, or the button that opened this app
+ *  isn't a kind that carries one — and they have different fixes. Rather than guess from
+ *  a screenshot, show the facts. */
+function showDiagnostics() {
+  const w = window.Telegram;
+  const app = w && w.WebApp;
+  let unsafe = '(none)';
+  try {
+    const u = app && app.initDataUnsafe;
+    unsafe = u && Object.keys(u).length ? JSON.stringify(u).slice(0, 220) : '(empty)';
+  } catch (e) { unsafe = '(unreadable)'; }
+
+  const lines = [
+    `Telegram object : ${w ? 'yes' : 'NO — bridge script did not load'}`,
+    `WebApp object   : ${app ? 'yes' : 'no'}`,
+    `platform        : ${(app && app.platform) || '—'}`,
+    `version         : ${(app && app.version) || '—'}`,
+    `initData length : ${app && app.initData ? app.initData.length : 0}`,
+    `initDataUnsafe  : ${unsafe}`,
+  ];
+  const box = $('#blocker-diag');
+  box.textContent = lines.join('\n');
+  box.hidden = false;
 }
 
 function setLoading() {
@@ -701,13 +733,33 @@ function addAdmin() {
 
 // ── boot ────────────────────────────────────────────────────────────────────────
 
+/** Wait for the bridge script, which is fetched from telegram.org and may still be in
+ *  flight. Short budget: if it isn't there in two seconds it isn't coming, and a
+ *  dispatcher staring at a blank panel is worse than being told what went wrong. */
+async function waitForTelegram(ms = 2000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (window.Telegram && window.Telegram.WebApp) return window.Telegram.WebApp;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return (window.Telegram && window.Telegram.WebApp) || null;
+}
+
 async function boot() {
-  // No initData means this was not opened as a Mini App (a desktop browser, or a plain
-  // url button). Every request would 401, so say so once instead of failing four times.
+  tg = await waitForTelegram();
+
+  // ready() before the credential is read, not after: it is how the client is told the
+  // page is up, and some clients only settle the launch parameters once it has been
+  // called. Cheap to do first, and it removes a whole class of "empty on first paint".
+  if (tg) {
+    applyTheme();
+    try { tg.ready(); } catch (_) { /* older client */ }
+  }
+
+  // No initData means nothing here can be authorized — every request would 401. Say so
+  // once, with the diagnostics, instead of failing four screens in a row.
   if (!tg || !tg.initData) { showBlocker('outside'); return; }
 
-  applyTheme();
-  tg.ready();
   tg.expand();
   if (tg.setHeaderColor) { try { tg.setHeaderColor('secondary_bg_color'); } catch (_) { } }
   if (tg.disableVerticalSwipes) { try { tg.disableVerticalSwipes(); } catch (_) { } }

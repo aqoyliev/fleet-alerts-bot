@@ -43,3 +43,24 @@ def test_a_deployment_without_a_url_keeps_the_original_keyboard(monkeypatch):
         "📊 Violations Report", "👥 Admins", "⚙️ Settings",
     ]
     assert not any("web_app" in b for b in buttons)
+
+
+def test_start_offers_an_inline_panel_button_too(monkeypatch):
+    """Two launch contexts, because they are not equally supported: some clients pass a
+    Mini App its signed credential from an inline button but not from a keyboard button.
+    The dispatcher should not have to know which client they are on."""
+    from handlers.users.start import _panel_button
+
+    monkeypatch.setattr(config, "WEBAPP_URL", "https://fleet.example")
+    markup = _panel_button().to_python()
+    button = markup["inline_keyboard"][0][0]
+
+    assert button["web_app"] == {"url": "https://fleet.example/panel/"}
+    assert "Admin Panel" in button["text"]
+
+
+def test_no_inline_button_without_a_url(monkeypatch):
+    from handlers.users.start import _panel_button
+
+    monkeypatch.setattr(config, "WEBAPP_URL", "")
+    assert _panel_button() is None
