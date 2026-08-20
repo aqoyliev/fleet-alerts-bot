@@ -78,16 +78,39 @@ CRASH_GROUP_ID = int(_crash_group_raw) if _crash_group_raw else None
 SPEEDING_MIN_SEVERITY = env.str("SPEEDING_MIN_SEVERITY", "high")
 
 # ── Admin Mini App ──────────────────────────────────────────────────────────────
-# Public HTTPS base URL this deployment is reachable at — the same host the Motive and
-# Samsara webhooks already point at. The admin panel is served from /app on it, and the
-# bot's ☰ menu button is pointed there at startup.
-#
-# There is no way to discover this from inside the container (Railway's domain isn't in
-# the environment), so it has to be stated. Blank is a supported state and means "serve
-# the panel but don't advertise it": the routes still answer, the menu button just isn't
-# set. That keeps a deployment that hasn't been told its URL from failing to boot, and
-# keeps a wrong URL from being pinned onto the bot.
-WEBAPP_URL = env.str("WEBAPP_URL", "").strip().rstrip("/")
+
+def _resolve_webapp_url(explicit: str, railway_domain: str) -> str:
+    """Where this deployment is reachable from a phone — the base URL the admin panel is
+    served from and the one the 🖥 Admin Panel keyboard button points at.
+
+    Railway publishes the service's own public hostname into the container as
+    RAILWAY_PUBLIC_DOMAIN (a bare host, no scheme), so on Railway this needs no
+    configuration at all. That is worth reading rather than asking for: it is the single
+    value the panel requires, it is the one thing the process genuinely cannot infer about
+    itself, and a deployment where somebody forgot to paste it is a panel with no way in.
+
+    An explicit WEBAPP_URL still wins, because a custom domain — or anything sitting in
+    front of the service — is a fact only the operator knows.
+
+    Blank remains a supported state and means "serve the panel but don't advertise it":
+    the routes still answer, the keyboard button simply isn't offered. That keeps a
+    deployment with no public domain booting normally instead of pinning a broken URL
+    onto every admin's keyboard.
+    """
+    if explicit:
+        return explicit.rstrip("/")
+    if railway_domain:
+        host = railway_domain.rstrip("/")
+        # Railway hands over a bare hostname, but tolerate one that already carries a
+        # scheme rather than producing "https://https://…".
+        return host if host.startswith(("http://", "https://")) else f"https://{host}"
+    return ""
+
+
+WEBAPP_URL = _resolve_webapp_url(
+    env.str("WEBAPP_URL", "").strip(),
+    env.str("RAILWAY_PUBLIC_DOMAIN", "").strip(),
+)
 
 # ── Samsara (optional — leave blank if this company has no Samsara fleet) ────────
 # API key is the bearer token used for the harsh-event poll callback; the webhook
