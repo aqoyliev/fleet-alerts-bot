@@ -148,8 +148,8 @@ async def bootstrap(request: web.Request) -> web.Response:
         },
         "company": {"name": config.COMPANY_NAME, "slug": config.COMPANY_SLUG},
         "event_types": [
-            {"type": t, "emoji": emoji, "label": label}
-            for t, emoji, label in GROUP_FILTER_TYPES
+            {"type": types[0], "emoji": emoji, "label": label}
+            for types, emoji, label in GROUP_FILTER_TYPES
         ],
         "main_group_id": config.MAIN_GROUP_ID,
         "crash_group_id": config.CRASH_GROUP_ID,
@@ -374,7 +374,7 @@ async def toggle_event(request: web.Request) -> web.Response:
         selected: list[str] = []
     else:
         event_type = body.get("event_type")
-        if event_type not in {t for t, _, _ in GROUP_FILTER_TYPES}:
+        if event_type not in {types[0] for types, _, _ in GROUP_FILTER_TYPES}:
             return _fail("bad_event_type", "That isn't an event type this bot sends.")
         current = set(await get_group_event_types(tgid))
         updated = next_event_filter(current, event_type)

@@ -9,12 +9,12 @@ def group_events_keyboard(allowed: list[str]) -> InlineKeyboardMarkup:
     all_mode = not allowed
     allowed_set = set(allowed)
     kb = InlineKeyboardMarkup(row_width=1)
-    for event_type, emoji, label in GROUP_FILTER_TYPES:
-        on = all_mode or event_type in allowed_set
+    for event_types, emoji, label in GROUP_FILTER_TYPES:
+        on = all_mode or set(event_types) <= allowed_set
         icon = "✅" if on else "⬜"
         kb.add(InlineKeyboardButton(
             f"{icon} {emoji} {label}",
-            callback_data=f"grpevt:tog:{event_type}",
+            callback_data=f"grpevt:tog:{event_types[0]}",
         ))
     kb.add(InlineKeyboardButton("🔄 Reset to all events", callback_data="grpevt:all"))
     return kb
