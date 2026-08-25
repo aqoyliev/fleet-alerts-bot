@@ -18,6 +18,7 @@ const state = {
   tab: 'dashboard',
   detail: null,        // {type, ...} when a detail view is pushed over a tab
   period: 'today',
+  groupsQuery: '',
   alertFilter: { type: '', unit: '' },
   alertItems: [],
   alertNext: null,
@@ -335,43 +336,84 @@ async function dashboardScreen() {
 // ── screen 2: groups ────────────────────────────────────────────────────────────
 
 async function groupsScreen() {
-  const groups = await api('/groups');
+  const [groups, roster] = await Promise.all([api('/groups'), api('/units')]);
   const wrap = el('<div></div>');
 
-  if (!groups.length) {
-    render(el('<div class="empty">No groups registered yet.<br>'
-      + 'Add the bot to a truck\'s group to get started.</div>'));
-    return;
+  const search = el(`<input class="input" style="margin-bottom:14px"
+      placeholder="Search groups or units" value="${esc(state.groupsQuery)}">`);
+  wrap.appendChild(search);
+
+  const listWrap = el('<div></div>');
+  wrap.appendChild(listWrap);
+
+  function renderList(query) {
+    listWrap.innerHTML = '';
+    const q = query.trim().toLowerCase();
+    const matches = (g) => !q
+      || (g.title || '').toLowerCase().includes(q)
+      || (g.vehicle_number || '').toLowerCase().includes(q);
+    const filtered = groups.filter(matches);
+
+    if (!groups.length) {
+      listWrap.appendChild(el('<div class="empty">No groups registered yet.<br>'
+        + 'Add the bot to a truck\'s group to get started.</div>'));
+    } else if (!filtered.length) {
+      listWrap.appendChild(el(`<div class="empty">No groups match "${esc(query)}".</div>`));
+    } else {
+      const rows = el('<div class="rows"></div>');
+      filtered.forEach((g) => {
+        const unitBadge = g.is_main
+          ? '<span class="badge badge-main">ALL UNITS</span>'
+          : `<span class="badge badge-unit">${esc(g.vehicle_number || '—')}</span>`;
+        const muted = g.enabled ? '' : ' <span class="badge badge-muted">MUTED</span>';
+        const filter = g.filter_mode === 'all' ? 'All events' : `${g.event_types.length} event types`;
+
+        const row = el(`<button class="row">
+            <div class="row-main">
+              <div class="row-title">${unitBadge}${muted}
+                ${esc(g.title || 'Untitled group')}</div>
+              <div class="row-sub">${filter} · ${g.alerts_7d} alerts this week</div>
+            </div>
+            <span class="row-chevron">›</span>
+          </button>`);
+        row.onclick = () => {
+          haptic();
+          pushDetail({ type: 'group', id: g.telegram_group_id, title: g.title || 'Group' });
+        };
+        rows.appendChild(row);
+      });
+      listWrap.appendChild(rows);
+    }
+
+    if (state.boot.crash_group_id) {
+      listWrap.appendChild(el(`<div class="note">💥 Crash alerts go to a dedicated chat
+        configured in the deployment settings, not listed here.</div>`));
+    }
+
+    // Samsara units with no group at all — the coverage gap no per-group screen can show,
+    // since a missing group has nowhere in the groups list to appear.
+    if (roster.available) {
+      const unconnected = roster.units.filter((u) => !u.linked
+        && (!q || u.name.toLowerCase().includes(q)));
+      if (unconnected.length) {
+        const card = el(`<div class="card">
+            <div class="card-title">Not connected to a group (${unconnected.length})</div>
+          </div>`);
+        const chips = el('<div class="chips"></div>');
+        unconnected.forEach((u) => {
+          chips.appendChild(el(`<span class="chip" style="cursor:default">${esc(u.name)}</span>`));
+        });
+        card.appendChild(chips);
+        card.appendChild(el(`<div class="note">These units have no Telegram group receiving
+          their alerts. Add the bot to that unit's group chat, then run /setunit there.</div>`));
+        listWrap.appendChild(card);
+      }
+    }
   }
 
-  const rows = el('<div class="rows"></div>');
-  groups.forEach((g) => {
-    const unitBadge = g.is_main
-      ? '<span class="badge badge-main">ALL UNITS</span>'
-      : `<span class="badge badge-unit">${esc(g.vehicle_number || '—')}</span>`;
-    const muted = g.enabled ? '' : ' <span class="badge badge-muted">MUTED</span>';
-    const filter = g.filter_mode === 'all' ? 'All events' : `${g.event_types.length} event types`;
+  search.oninput = () => { state.groupsQuery = search.value; renderList(search.value); };
+  renderList(state.groupsQuery);
 
-    const row = el(`<button class="row">
-        <div class="row-main">
-          <div class="row-title">${unitBadge}${muted}
-            ${esc(g.title || 'Untitled group')}</div>
-          <div class="row-sub">${filter} · ${g.alerts_7d} alerts this week</div>
-        </div>
-        <span class="row-chevron">›</span>
-      </button>`);
-    row.onclick = () => {
-      haptic();
-      pushDetail({ type: 'group', id: g.telegram_group_id, title: g.title || 'Group' });
-    };
-    rows.appendChild(row);
-  });
-  wrap.appendChild(rows);
-
-  if (state.boot.crash_group_id) {
-    wrap.appendChild(el(`<div class="note">💥 Crash alerts go to a dedicated chat
-      configured in the deployment settings, not listed here.</div>`));
-  }
   render(wrap);
 }
 
