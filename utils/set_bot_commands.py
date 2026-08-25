@@ -6,9 +6,12 @@ admin text. Telegram resolves the most specific scope
 first, so the group list below is what a driver sees and the private list is what an
 admin sees in a DM.
 
-Hiding a command does NOT disable it. /events, /event_list, /disable, /enable and
-/removegroup all still work when typed in a group — they are admin tools, kept out of
-the picker so drivers are not offered them.
+Hiding a command does NOT disable it. /events, /event_list and /removegroup all still
+work when typed in a group — they are admin tools, kept out of the picker so drivers
+are not offered them.
+
+/start is absent from the group list on purpose: it opens the private main menu, which
+is a DM concept and does nothing useful typed into a group.
 """
 from aiogram import types
 
@@ -20,16 +23,14 @@ _PRIVATE_COMMANDS = [
 ]
 
 # Driver groups. These exist to RECEIVE that unit's alerts, not to be queried, so the
-# menu is setup, an off switch, and the explainer. /report, /top, /event_list, /events,
-# /enable and /removegroup still work when typed — they are kept out of the picker so
+# menu is setup plus the on/off switch and the explainer. /report, /top, /event_list,
+# /events and /removegroup still work when typed — they are kept out of the picker so
 # drivers are not offered them.
 _GROUP_COMMANDS = [
-    types.BotCommand("start", "Open main menu"),
     types.BotCommand("help", "What this bot posts here, and how to set it up"),
     types.BotCommand("setunit", "Set this group's unit number (e.g. /setunit 1234)"),
-    # /enable is intentionally absent: whoever mutes a group is told to use it in the
-    # confirmation reply, and it works when typed.
     types.BotCommand("disable", "Mute this group's alerts"),
+    types.BotCommand("enable", "Turn this group's alerts back on"),
 ]
 
 
