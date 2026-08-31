@@ -48,6 +48,20 @@ async def get_company_slug_by_group(telegram_group_id: int) -> str | None:
     return row["slug"] if row else None
 
 
+async def get_group_alert_source(telegram_group_id: int) -> str | None:
+    """Which provider this group is restricted to ('motive'/'samsara'), or None for both.
+
+    The counterpart of the alert_source filter in get_groups_for_event: a group that only
+    receives one provider's alerts must also report only that provider's numbers, or
+    /report contradicts the very feed it is posted in.
+    """
+    row = await db.fetchrow(
+        "SELECT alert_source FROM company_groups WHERE telegram_group_id = $1",
+        telegram_group_id,
+    )
+    return row["alert_source"] if row else None
+
+
 async def get_groups_for_event(company_slug: str, event_type: str, source: str = "motive") -> list[int]:
     """
     Returns telegram_group_ids that should receive this event type for the given company.

@@ -686,6 +686,10 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
     try:
         company_display = await get_company_name(company_slug) or company_slug.title()
 
+        # Which provider reported this. Decides both where the alert goes and how the row
+        # is counted later, so it is derived once here rather than at each use.
+        alert_source = "samsara" if event.get("_source") == "samsara" else "motive"
+
         # Set once we persist the row at the first poll response, so the post-poll
         # save below is skipped (and records which type we already committed).
         persisted_type = None
@@ -718,6 +722,7 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
                     event_id=_event_id_to_bigint(event.get("id")),
                     occurred_at=_parse_occurred(first_event),
                     severity=_event_severity(first_event),
+                    source=alert_source,
                 )
                 persisted_type = rtype
                 logger.info(f"[samsara] Persisted {rtype} early (id={event.get('id')}) before media resolved")
@@ -823,11 +828,11 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
                 event_id=_event_id_to_bigint(event.get("id")),
                 occurred_at=_parse_occurred(event),
                 severity=_event_severity(event),
+                source=alert_source,
             )
 
         # Route by provider: Samsara alerts go only to the company's Samsara group(s),
         # Motive alerts to the original group(s). Groups with alert_source NULL get both.
-        alert_source = "samsara" if event.get("_source") == "samsara" else "motive"
         group_ids = await get_groups_for_event(company_slug, event_type, alert_source)
         dm_ids = await get_subscribed_admins(event_type, company_slug)
         if event_type == "crash":

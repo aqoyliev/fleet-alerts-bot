@@ -15,20 +15,23 @@ logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
 
-async def _get_company_groups(company_slug: str) -> list[int]:
-    # Every company group gets the daily report, regardless of alert_source — the
-    # report aggregates violations from both providers (the violations table doesn't
-    # record source), so provider-restricted groups receive the same combined report.
+async def _get_company_groups(company_slug: str) -> list[dict]:
+    """Every group of this company, with the provider it is restricted to (NULL = both).
+
+    The source travels with the group because the report is now built per provider: a
+    group that received only Samsara alerts all day would otherwise wake up to a report
+    counting Motive's events too.
+    """
     rows = await fetch(
         """
-        SELECT cg.telegram_group_id
+        SELECT cg.telegram_group_id, cg.alert_source
         FROM company_groups cg
         JOIN companies c ON c.id = cg.company_id
         WHERE c.slug = $1
         """,
         company_slug,
     )
-    return [r["telegram_group_id"] for r in rows]
+    return [dict(r) for r in rows]
 
 
 def _format_daily_report(company_name: str, rows: list[dict], date_str: str) -> str:
@@ -66,11 +69,17 @@ async def send_daily_reports(bot: Bot):
     companies = await get_all_companies()
     for company in companies:
         try:
-            rows = await get_violations_by_type(company["slug"], since=yesterday_start, until=today_start)
-            text = _format_daily_report(company["name"], rows, date_str)
-            group_ids = await _get_company_groups(company["slug"])
-            for chat_id in group_ids:
-                await bot.send_message(chat_id, text, parse_mode="HTML")
+            groups = await _get_company_groups(company["slug"])
+            # One report per distinct alert_source, built once and reused: a company with
+            # both fleets has two groups but at most two versions of the report.
+            texts: dict[str | None, str] = {}
+            for group in groups:
+                source = group["alert_source"]
+                if source not in texts:
+                    rows = await get_violations_by_type(company["slug"], since=yesterday_start,
+                                                        until=today_start, source=source)
+                    texts[source] = _format_daily_report(company["name"], rows, date_str)
+                await bot.send_message(group["telegram_group_id"], texts[source], parse_mode="HTML")
         except Exception as e:
             logger.error(f"Daily report error for {company['slug']}: {e}", exc_info=True)
 

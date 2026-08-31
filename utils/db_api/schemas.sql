@@ -86,8 +86,16 @@ CREATE TABLE IF NOT EXISTS violations (
     event_id     BIGINT       UNIQUE,
     severity     VARCHAR(20),
     occurred_at  TIMESTAMPTZ  NOT NULL,
-    created_at   TIMESTAMPTZ  DEFAULT NOW()
+    created_at   TIMESTAMPTZ  DEFAULT NOW(),
+    -- Which provider reported it: 'motive' or 'samsara'. A company with both fleets has
+    -- one group per provider (company_groups.alert_source), and a report run in one of
+    -- them must count only that provider's events.
+    -- NULL means the row predates this column. Those are read as Motive, which is what
+    -- they overwhelmingly are: Samsara was wired up per company well after Motive.
+    source       VARCHAR(20)
 );
+
+ALTER TABLE violations ADD COLUMN IF NOT EXISTS source VARCHAR(20);
 
 CREATE INDEX IF NOT EXISTS violations_company_occurred ON violations (company_slug, occurred_at);
 CREATE INDEX IF NOT EXISTS violations_vehicle ON violations (vehicle_number);

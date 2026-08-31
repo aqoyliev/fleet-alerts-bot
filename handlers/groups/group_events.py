@@ -7,7 +7,8 @@ from aiogram import types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from loader import dp
-from utils.db_api.companies import get_company_slug_by_group, get_company_name, get_group_event_types
+from utils.db_api.companies import (get_company_slug_by_group, get_company_name,
+                                   get_group_event_types, get_group_alert_source)
 from utils.db_api.violations import get_violations_by_type, get_top_violators
 from utils.webhook_handler import EVENT_TYPE_MAP
 
@@ -57,7 +58,9 @@ async def cmd_report(message: types.Message):
     now_et = datetime.now(tz=ET)
     today_start = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
     yesterday_start = today_start - timedelta(days=1)
-    rows = await get_violations_by_type(slug, since=yesterday_start, until=today_start)
+    source = await get_group_alert_source(message.chat.id)
+    rows = await get_violations_by_type(slug, since=yesterday_start, until=today_start,
+                                        source=source)
     company_name = await get_company_name(slug) or slug
     date_str = yesterday_start.strftime("%b %d, %Y")
     text = _report_text(company_name, rows, date_str)
@@ -82,7 +85,8 @@ async def cb_report_toggle(call: types.CallbackQuery):
         until = today_start
         date_str = since.strftime("%b %d, %Y")
 
-    rows = await get_violations_by_type(slug, since=since, until=until)
+    source = await get_group_alert_source(call.message.chat.id)
+    rows = await get_violations_by_type(slug, since=since, until=until, source=source)
     company_name = await get_company_name(slug) or slug
     text = _report_text(company_name, rows, date_str)
     await call.message.edit_text(text, parse_mode="HTML", reply_markup=_report_keyboard(period))
@@ -104,7 +108,9 @@ async def cmd_top(message: types.Message):
 
     now_et = datetime.now(tz=ET)
     today_start = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
-    rows = await get_top_violators(slug, since=today_start, until=now_et, limit=limit)
+    source = await get_group_alert_source(message.chat.id)
+    rows = await get_top_violators(slug, since=today_start, until=now_et, limit=limit,
+                                   source=source)
     company_name = await get_company_name(slug) or slug
     date_str = today_start.strftime("%b %d, %Y")
 
