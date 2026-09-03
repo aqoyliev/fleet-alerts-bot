@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot
 
 from data import config
-from utils.db_api.groups import get_all_groups
+from utils.db_api.groups import get_alert_target
 from utils.db_api.violations import get_violations_by_type
 from utils.webhook_handler import EVENT_TYPE_MAP
 
@@ -50,8 +50,8 @@ async def send_daily_reports(bot: Bot):
     try:
         rows = await get_violations_by_type(since=yesterday_start, until=today_start)
         text = _format_daily_report(config.COMPANY_NAME, rows, date_str)
-        group_ids = await get_all_groups()
-        for chat_id in group_ids:
+        chat_id = await get_alert_target()
+        if chat_id:
             await bot.send_message(chat_id, text, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Daily report error: {e}", exc_info=True)

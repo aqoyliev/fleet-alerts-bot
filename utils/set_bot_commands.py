@@ -1,14 +1,10 @@
 """Command menus shown in Telegram's ☰ picker.
 
-Menus are set per SCOPE rather than globally. A single global list leaks the private
--chat commands into every driver group, where a driver taps /help and gets a wall of
-admin text. Telegram resolves the most specific scope
-first, so the group list below is what a driver sees and the private list is what an
-admin sees in a DM.
-
-Hiding a command does NOT disable it. /events, /event_list and /removegroup all still
-work when typed in a group — they are admin tools, kept out of the picker so drivers
-are not offered them.
+Menus are set per SCOPE rather than globally. A single global list would put the
+private-chat commands into the group too, where a driver taps /help and gets admin text
+meant for a DM. Telegram resolves the most specific scope first, so the group list below
+is what's offered in the one configured group and the private list is what an admin sees
+in a DM.
 
 /start is absent from the group list on purpose: it opens the private main menu, which
 is a DM concept and does nothing useful typed into a group.
@@ -22,15 +18,13 @@ _PRIVATE_COMMANDS = [
     types.BotCommand("help", "How to use this bot"),
 ]
 
-# Driver groups. These exist to RECEIVE that unit's alerts, not to be queried, so the
-# menu is setup plus the on/off switch and the explainer. /report, /top, /event_list,
-# /events and /removegroup still work when typed — they are kept out of the picker so
-# drivers are not offered them.
+# The one configured group.
 _GROUP_COMMANDS = [
-    types.BotCommand("help", "What this bot posts here, and how to set it up"),
-    types.BotCommand("setunit", "Set this group's unit number (e.g. /setunit 1234)"),
-    types.BotCommand("disable", "Mute this group's alerts"),
-    types.BotCommand("enable", "Turn this group's alerts back on"),
+    types.BotCommand("help", "What this bot posts here"),
+    types.BotCommand("report", "Yesterday's violations"),
+    types.BotCommand("top", "Today's top violators"),
+    types.BotCommand("disable", "Mute alerts in this group"),
+    types.BotCommand("enable", "Turn alerts back on"),
 ]
 
 

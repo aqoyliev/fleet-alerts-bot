@@ -184,24 +184,6 @@ async def get_recent_events(limit: int = 50, before_ts=None, before_id: int | No
     return [dict(r) for r in rows]
 
 
-async def get_counts_by_vehicle(since) -> dict[str, int]:
-    """Alerts per unit since `since`, for the count on each row of the groups list.
-
-    Returned as a plain mapping rather than joined onto alert_groups: the two tables are
-    tied only by a bare vehicle_number string with no foreign key between them, so the
-    join would be an outer one against an unconstrained column. The caller attaches the
-    counts in Python, where a missing unit is simply zero.
-    """
-    rows = await db.fetch(
-        """
-        SELECT vehicle_number, COUNT(*) AS total
-        FROM violations
-        WHERE occurred_at >= $1
-        GROUP BY vehicle_number
-        """,
-        since,
-    )
-    return {r["vehicle_number"]: r["total"] for r in rows}
 
 
 async def get_vehicle_events(vehicle_number: str, since, until=None,

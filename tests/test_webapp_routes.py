@@ -103,7 +103,7 @@ async def test_super_only_routes_refuse_a_plain_admin(client, monkeypatch):
     monkeypatch.setattr(auth, "is_admin", _always(True))
     monkeypatch.setattr(auth, "is_super_admin", _always(False))
 
-    for path in ("/panel/api/groups/-100123/remove", "/panel/api/admins",
+    for path in ("/panel/api/admins",
                  "/panel/api/admins/1/update", "/panel/api/admins/1/remove"):
         resp = await client.post(path, json={"confirm": True},
                                  headers={"X-Telegram-Init-Data": _init_data()})
@@ -151,7 +151,6 @@ async def test_bootstrap_returns_the_shape_the_frontend_reads(client, monkeypatc
 
     assert data["me"] == {"telegram_id": 42, "is_super": True}
     assert data["company"]["name"]
-    assert data["event_types"] and {"type", "emoji", "label"} <= set(data["event_types"][0])
 
 
 async def test_bootstrap_never_hands_the_samsara_key_to_the_browser(client, monkeypatch):
@@ -171,28 +170,15 @@ async def test_bootstrap_never_hands_the_samsara_key_to_the_browser(client, monk
     assert (await resp.json())["samsara_enabled"] is True
 
 
-async def test_groups_serializes_datetimes(client, monkeypatch):
-    """asyncpg returns datetime objects, which json refuses. The _json_default hook is
-    easy to leave out of a new endpoint and only fails once real rows exist."""
-    from datetime import datetime, timezone
-
+async def test_group_route_returns_the_singleton_status(client, monkeypatch):
     monkeypatch.setattr(auth, "is_admin", _always(True))
 
-    async def _overview():
-        return [{"id": 1, "telegram_group_id": -100, "title": "Unit 571",
-                 "vehicle_number": "unit571", "enabled": True,
-                 "created_at": datetime.now(timezone.utc), "event_types": []}]
+    async def _status():
+        return {"telegram_group_id": -100999, "enabled": True}
 
-    async def _counts(_since):
-        return {"unit571": 4}
+    monkeypatch.setattr(api, "get_group_status", _status)
 
-    monkeypatch.setattr(api, "get_groups_overview", _overview)
-    monkeypatch.setattr(api, "get_counts_by_vehicle", _counts)
-
-    resp = await client.get("/panel/api/groups",
+    resp = await client.get("/panel/api/group",
                             headers={"X-Telegram-Init-Data": _init_data()})
     assert resp.status == 200
-    row = (await resp.json())[0]
-    assert row["filter_mode"] == "all"      # no rows in group_event_types = every type
-    assert row["alerts_7d"] == 4
-    assert isinstance(row["created_at"], str)
+    assert await resp.json() == {"telegram_group_id": -100999, "enabled": True}

@@ -51,18 +51,14 @@ def setup_routes(app: web.Application) -> None:
 
     app.router.add_get("/panel/api/bootstrap", api.bootstrap)
     app.router.add_get("/panel/api/stats", api.stats)
-    app.router.add_get("/panel/api/groups", api.groups)
+    app.router.add_get("/panel/api/group", api.group)
     app.router.add_get("/panel/api/alerts", api.alerts)
-    app.router.add_get("/panel/api/units", api.units)
     app.router.add_get("/panel/api/admins", api.admins)
 
     # Mutations are POST even where PATCH/DELETE would read better. Telegram's WebView
     # and the proxies in front of it are reliably fine with GET and POST; the others are
     # occasionally not, and a panel that works everywhere beats one that is REST-shaped.
-    app.router.add_post("/panel/api/groups/{tgid}/enabled", api.set_enabled)
-    app.router.add_post("/panel/api/groups/{tgid}/unit", api.set_unit)
-    app.router.add_post("/panel/api/groups/{tgid}/events", api.toggle_event)
-    app.router.add_post("/panel/api/groups/{tgid}/remove", api.delete_group)
+    app.router.add_post("/panel/api/group/enabled", api.set_group_enabled_route)
 
     app.router.add_post("/panel/api/admins", api.create_admin)
     app.router.add_post("/panel/api/admins/{admin_id}/update", api.update_admin)

@@ -1,9 +1,9 @@
--- Fleet Alerts Bot — Database Schema (single-company build)
+-- Fleet Alerts Bot — Database Schema (single-group build)
 --
--- This deployment serves exactly ONE company; its identity and provider
--- credentials come from the .env file (see data/config.py), so there is no
--- `companies` table here. Everything below is scoped implicitly to that one
--- company.
+-- This deployment serves exactly ONE company and ONE Telegram group; its identity,
+-- provider credentials and destination group come from the .env file (see
+-- data/config.py), so there is no `companies` table and no per-vehicle group table
+-- here. Everything below is scoped implicitly to that one company and that one group.
 
 CREATE TABLE IF NOT EXISTS users (
     telegram_id   BIGINT       PRIMARY KEY,
@@ -37,29 +37,17 @@ CREATE TABLE IF NOT EXISTS admin_subscriptions (
     PRIMARY KEY (admin_id, event_type)
 );
 
--- Telegram groups that receive this company's alerts.
+-- The single Telegram group this deployment sends every alert to (config.GROUP_CHAT_ID).
 --
--- vehicle_number ties a group to a single unit: driver groups (auto-registered when
--- the bot is added, parsed from the group title/description) carry the unit number and
--- receive only that unit's alerts. The main group (config.MAIN_GROUP_ID) has a NULL
--- vehicle_number and receives every unit's alerts.
-CREATE TABLE IF NOT EXISTS alert_groups (
-    id                SERIAL      PRIMARY KEY,
-    telegram_group_id BIGINT      NOT NULL UNIQUE,
-    label             VARCHAR(100),
-    title             VARCHAR(255),
-    vehicle_number    VARCHAR(50),
-    enabled           BOOLEAN     DEFAULT TRUE,
-    created_at        TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS alert_groups_vehicle ON alert_groups (vehicle_number);
-
--- Optional per-group event-type filter. A group with no rows here receives every type.
-CREATE TABLE IF NOT EXISTS group_event_types (
-    group_id   INT         NOT NULL REFERENCES alert_groups(id) ON DELETE CASCADE,
-    event_type VARCHAR(50) NOT NULL,
-    PRIMARY KEY (group_id, event_type)
+-- A true singleton, not a table of groups: id is pinned to 1 by the CHECK constraint, so
+-- there is exactly one row, ever. It's seeded from GROUP_CHAT_ID on first boot
+-- (ensure_group) and from then on the row — not the env var — is authoritative, which is
+-- what lets migrate_group() repoint it when Telegram upgrades a basic group to a
+-- supergroup without the seed re-inserting a stale duplicate.
+CREATE TABLE IF NOT EXISTS alert_group (
+    id                INT     PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    telegram_group_id BIGINT  NOT NULL,
+    enabled           BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE TABLE IF NOT EXISTS violations (

@@ -18,7 +18,6 @@ const state = {
   tab: 'dashboard',
   detail: null,        // {type, ...} when a detail view is pushed over a tab
   period: 'today',
-  groupsQuery: '',
   alertFilter: { type: '', unit: '' },
   alertItems: [],
   alertNext: null,
@@ -134,7 +133,7 @@ function dayLabel(iso) {
 // ── screen chrome ───────────────────────────────────────────────────────────────
 
 const TITLES = {
-  dashboard: 'Dashboard', groups: 'Groups', alerts: 'Alerts', admins: 'Admins',
+  dashboard: 'Dashboard', alerts: 'Alerts', admins: 'Admins',
 };
 
 function showBlocker(kind) {
@@ -227,9 +226,8 @@ function renderCurrent() {
   $('#screen-title').textContent = state.detail ? state.detail.title : TITLES[state.tab];
   setLoading();
   const view = state.detail
-    ? { group: groupDetail, admin: adminDetail }[state.detail.type]
-    : { dashboard: dashboardScreen, groups: groupsScreen,
-        alerts: alertsScreen, admins: adminsScreen }[state.tab];
+    ? { admin: adminDetail }[state.detail.type]
+    : { dashboard: dashboardScreen, alerts: alertsScreen, admins: adminsScreen }[state.tab];
   view().catch((e) => {
     if (e.message === 'unauthenticated') return;
     render(el(`<div class="empty">${esc(e.message)}</div>`));
@@ -241,7 +239,10 @@ function renderCurrent() {
 const PERIODS = [['today', 'Today'], ['7d', '7 days'], ['30d', '30 days']];
 
 async function dashboardScreen() {
-  const data = await api(`/stats?period=${encodeURIComponent(state.period)}`);
+  const [data, group] = await Promise.all([
+    api(`/stats?period=${encodeURIComponent(state.period)}`),
+    api('/group'),
+  ]);
   const wrap = el('<div></div>');
 
   const seg = el('<div class="segmented"></div>');
@@ -252,18 +253,9 @@ async function dashboardScreen() {
   });
   wrap.appendChild(seg);
 
-  // The muted warning comes before the numbers on purpose: a silent group is a problem
-  // the numbers themselves cannot show, because its alerts are missing from them.
-  if (data.groups.muted > 0) {
-    const n = data.groups.muted;
-    const card = el(`<div class="warn-card">
-        <span style="font-size:22px">🔕</span>
-        <div><b>${n} group${n > 1 ? 's are' : ' is'} muted</b>
-          <small>${esc(data.groups.muted_titles.join(', '))}</small></div>
-      </div>`);
-    card.onclick = () => { haptic(); selectTab('groups'); };
-    wrap.appendChild(card);
-  }
+  // The group's mute state comes before the numbers on purpose: a muted group is a
+  // problem the numbers themselves cannot show, because its alerts are missing from them.
+  wrap.appendChild(renderGroupCard(group));
 
   wrap.appendChild(el(`<div class="card headline">
       <div class="headline-number">${data.totals.total}</div>
@@ -333,108 +325,18 @@ async function dashboardScreen() {
   render(wrap);
 }
 
-// ── screen 2: groups ────────────────────────────────────────────────────────────
+// ── the one group's mute switch, shown on the dashboard ──────────────────────────
 
-async function groupsScreen() {
-  const [groups, roster] = await Promise.all([api('/groups'), api('/units')]);
-  const wrap = el('<div></div>');
-
-  const search = el(`<input class="input" style="margin-bottom:14px"
-      placeholder="Search groups or units" value="${esc(state.groupsQuery)}">`);
-  wrap.appendChild(search);
-
-  const listWrap = el('<div></div>');
-  wrap.appendChild(listWrap);
-
-  function renderList(query) {
-    listWrap.innerHTML = '';
-    const q = query.trim().toLowerCase();
-    const matches = (g) => !q
-      || (g.title || '').toLowerCase().includes(q)
-      || (g.vehicle_number || '').toLowerCase().includes(q);
-    const filtered = groups.filter(matches);
-
-    if (!groups.length) {
-      listWrap.appendChild(el('<div class="empty">No groups registered yet.<br>'
-        + 'Add the bot to a truck\'s group to get started.</div>'));
-    } else if (!filtered.length) {
-      listWrap.appendChild(el(`<div class="empty">No groups match "${esc(query)}".</div>`));
-    } else {
-      const rows = el('<div class="rows"></div>');
-      filtered.forEach((g) => {
-        const unitBadge = g.is_main
-          ? '<span class="badge badge-main">ALL UNITS</span>'
-          : `<span class="badge badge-unit">${esc(g.vehicle_number || '—')}</span>`;
-        const muted = g.enabled ? '' : ' <span class="badge badge-muted">MUTED</span>';
-        const filter = g.filter_mode === 'all' ? 'All events' : `${g.event_types.length} event types`;
-
-        const row = el(`<button class="row">
-            <div class="row-main">
-              <div class="row-title">${unitBadge}${muted}
-                ${esc(g.title || 'Untitled group')}</div>
-              <div class="row-sub">${filter} · ${g.alerts_7d} alerts this week</div>
-            </div>
-            <span class="row-chevron">›</span>
-          </button>`);
-        row.onclick = () => {
-          haptic();
-          pushDetail({ type: 'group', id: g.telegram_group_id, title: g.title || 'Group' });
-        };
-        rows.appendChild(row);
-      });
-      listWrap.appendChild(rows);
-    }
-
-    if (state.boot.crash_group_id) {
-      listWrap.appendChild(el(`<div class="note">💥 Crash alerts go to a dedicated chat
-        configured in the deployment settings, not listed here.</div>`));
-    }
-
-    // Samsara units with no group at all — the coverage gap no per-group screen can show,
-    // since a missing group has nowhere in the groups list to appear.
-    if (roster.available) {
-      const unconnected = roster.units.filter((u) => !u.linked
-        && (!q || u.name.toLowerCase().includes(q)));
-      if (unconnected.length) {
-        const card = el(`<div class="card">
-            <div class="card-title">Not connected to a group (${unconnected.length})</div>
-          </div>`);
-        const chips = el('<div class="chips"></div>');
-        unconnected.forEach((u) => {
-          chips.appendChild(el(`<span class="chip" style="cursor:default">${esc(u.name)}</span>`));
-        });
-        card.appendChild(chips);
-        card.appendChild(el(`<div class="note">These units have no Telegram group receiving
-          their alerts. Add the bot to that unit's group chat, then run /setunit there.</div>`));
-        listWrap.appendChild(card);
-      }
-    }
-  }
-
-  search.oninput = () => { state.groupsQuery = search.value; renderList(search.value); };
-  renderList(state.groupsQuery);
-
-  render(wrap);
-}
-
-async function groupDetail() {
-  const id = state.detail.id;
-  const [groups, roster] = await Promise.all([api('/groups'), api('/units')]);
-  const g = groups.find((x) => x.telegram_group_id === id);
-  if (!g) { popDetail(); return; }
-
-  const wrap = el('<div></div>');
-
-  // — alerts on/off —
+function renderGroupCard(group) {
   const card = el('<div class="card"></div>');
-  const field = el(`<div class="field"><span class="field-label">Alerts</span></div>`);
-  const sw = el(`<button class="switch${g.enabled ? ' is-on' : ''}"></button>`);
+  const field = el(`<div class="field"><span class="field-label">Alerts group</span></div>`);
+  const sw = el(`<button class="switch${group && group.enabled ? ' is-on' : ''}"></button>`);
   sw.onclick = async () => {
     const next = !sw.classList.contains('is-on');
-    sw.classList.toggle('is-on', next);      // optimistic; reconciled by the reload below
+    sw.classList.toggle('is-on', next);      // optimistic; reconciled on failure below
     haptic();
     try {
-      await post(`/groups/${id}/enabled`, { enabled: next });
+      await post('/group/enabled', { enabled: next });
       hapticResult(true);
     } catch (e) {
       sw.classList.toggle('is-on', !next);
@@ -445,113 +347,15 @@ async function groupDetail() {
   field.appendChild(sw);
   card.appendChild(field);
   card.appendChild(el(`<div class="field"><span class="field-label">Chat ID</span>
-      <span class="field-value">${esc(String(id))}</span></div>`));
-  wrap.appendChild(card);
-
-  // — unit —
-  if (!g.is_main) {
-    const unitCard = el('<div class="card"><div class="card-title">Unit</div></div>');
-    if (roster.available) {
-      // A picker, not a text box: the roster's spelling is the only one alert routing
-      // matches, so handing over the exact strings removes the whole class of typo.
-      const select = el('<select class="input"></select>');
-      select.appendChild(el(`<option value="">— choose a unit —</option>`));
-      roster.units.forEach((u) => {
-        const taken = u.linked && u.name !== g.vehicle_number ? ' (already linked)' : '';
-        const sel = u.name === g.vehicle_number ? ' selected' : '';
-        select.appendChild(el(
-          `<option value="${esc(u.name)}"${sel}>${esc(u.name)}${taken}</option>`));
-      });
-      select.onchange = () => saveUnit(id, select.value);
-      const wrap = el('<div class="select-wrap"></div>');
-      wrap.appendChild(select);
-      unitCard.appendChild(wrap);
-    } else {
-      const input = el(`<input class="input" value="${esc(g.vehicle_number || '')}"
-                         placeholder="e.g. 1234">`);
-      unitCard.appendChild(input);
-      const save = el('<button class="btn btn-block" style="margin-top:10px">Save unit</button>');
-      save.onclick = () => saveUnit(id, input.value);
-      unitCard.appendChild(save);
-      unitCard.appendChild(el(`<div class="note note-warn">${esc(roster.reason)}</div>`));
-    }
-    wrap.appendChild(unitCard);
+      <span class="field-value">${esc(group ? String(group.telegram_group_id) : '—')}</span></div>`));
+  if (!group || !group.enabled) {
+    card.appendChild(el('<div class="note note-warn">Alerts are paused — nothing is being '
+      + 'sent to the group right now.</div>'));
   }
-
-  // — event filter —
-  const evCard = el('<div class="card"><div class="card-title">Event types</div></div>');
-  const selected = new Set(g.event_types);
-  const chips = el('<div class="chips"></div>');
-
-  const allChip = el(`<button class="chip${g.filter_mode === 'all' ? ' is-on' : ''}">All types</button>`);
-  allChip.onclick = () => toggleEvent(id, { action: 'all' });
-  chips.appendChild(allChip);
-
-  state.boot.event_types.forEach((t) => {
-    const on = g.filter_mode === 'all' || selected.has(t.type);
-    const chip = el(`<button class="chip${on ? ' is-on' : ''}">${esc(t.emoji)} ${esc(t.label)}</button>`);
-    chip.onclick = () => toggleEvent(id, { action: 'toggle', event_type: t.type });
-    chips.appendChild(chip);
-  });
-  evCard.appendChild(chips);
-  evCard.appendChild(el(`<div class="note">${g.filter_mode === 'all'
-    ? 'Receiving every event type, including any added later.'
-    : 'Only the highlighted types are delivered to this group.'}</div>`));
-  wrap.appendChild(evCard);
-
-  // — danger zone —
-  if (state.boot.me.is_super && !g.is_main) {
-    const zone = el('<div class="danger-zone"></div>');
-    const btn = el('<button class="btn btn-danger btn-block">Remove group</button>');
-    btn.onclick = async () => {
-      const ok = await confirmAction(
-        `Remove "${g.title || 'this group'}"? It will stop receiving alerts until the bot is re-added.`);
-      if (!ok) return;
-      try {
-        await post(`/groups/${id}/remove`, { confirm: true });
-        hapticResult(true);
-        popDetail();
-      } catch (e) { hapticResult(false); alertMessage(e.message); }
-    };
-    zone.appendChild(btn);
-    wrap.appendChild(zone);
-  }
-
-  render(wrap);
+  return card;
 }
 
-async function saveUnit(id, unit) {
-  if (!unit) return;
-  try {
-    const res = await post(`/groups/${id}/unit`, { unit });
-    hapticResult(true);
-    if (res.note) alertMessage(res.note);
-    renderCurrent();
-  } catch (e) {
-    hapticResult(false);
-    // The server sends "did you mean" candidates with a 409; showing them is the whole
-    // point of the endpoint returning them rather than a bare rejection.
-    const hint = (e.data && e.data.suggestions && e.data.suggestions.length)
-      ? `\n\nDid you mean: ${e.data.suggestions.join(', ')}`
-      : '';
-    alertMessage(e.message + hint);
-    renderCurrent();
-  }
-}
-
-async function toggleEvent(id, body) {
-  haptic();
-  try {
-    // The response carries the authoritative list — the collapse rule that turns a full
-    // allowlist back into "all types" lives in next_event_filter on the server, and is
-    // deliberately not reimplemented here where it would drift.
-    await post(`/groups/${id}/events`, body);
-    hapticResult(true);
-    renderCurrent();
-  } catch (e) { hapticResult(false); alertMessage(e.message); }
-}
-
-// ── screen 3: alerts ────────────────────────────────────────────────────────────
+// ── screen 2: alerts ────────────────────────────────────────────────────────────
 
 async function alertsScreen(append) {
   const params = new URLSearchParams({ limit: '50' });

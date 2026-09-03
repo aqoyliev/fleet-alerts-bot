@@ -19,7 +19,7 @@ from aiogram.utils.exceptions import (
 )
 
 from data import config
-from utils.db_api.groups import get_groups_for_event, migrate_group, set_group_enabled
+from utils.db_api.groups import get_alert_target, migrate_group, set_group_enabled
 from utils.db_api.violations import save_violation
 from utils.db_api.admins import get_subscribed_admins
 from utils.db_api.crash_confirmations import (
@@ -676,13 +676,14 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
                 persisted_type = rtype
                 logger.info(f"[samsara] Persisted {rtype} early (id={event.get('id')}) before media resolved")
                 if rtype == "crash":
-                    # Crash alerts never reach a driver group or the main group: subscribed
-                    # admin DMs plus the dedicated crash group, and that is all. The same
-                    # target list is rebuilt for the video follow-up below, so both halves
-                    # of a crash land in the same chats.
+                    # Crash alerts go to the one group, same as every other event type —
+                    # this branch skips the poll-and-enrich wait, not the routing. The
+                    # same target list is rebuilt for the video follow-up below, so both
+                    # halves of a crash land in the same chats.
                     targets = await get_subscribed_admins("crash")
-                    if config.CRASH_GROUP_ID:
-                        targets = [config.CRASH_GROUP_ID, *targets]
+                    group_id = await get_alert_target()
+                    if group_id:
+                        targets = [group_id, *targets]
                     text = _format_crash_initial(first_event, company_display)
                     # _send_all, not a bare loop: one unreachable chat must not cost the
                     # recipients behind it the one alert that matters most.
@@ -782,16 +783,10 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
                 severity=_event_severity(event),
             )
 
-        # Route to the matching driver group (by unit) plus the main group.
-        group_ids = await get_groups_for_event(event_type, (_get_vehicle(event) or "").strip())
+        # Route to the one group (every event type, every vehicle) plus subscribed DMs.
+        group_id = await get_alert_target()
+        group_ids = [group_id] if group_id else []
         dm_ids = await get_subscribed_admins(event_type)
-        if event_type == "crash":
-            # Crash alerts never follow the normal group routing: a wreck is not news for
-            # the driver's own chat, and in the all-fleet main group it would be buried
-            # under the day's speeding alerts. They go to subscribed admin DMs plus the
-            # one group the company nominated for them, which by construction receives
-            # crashes and nothing else — no other event type routes to CRASH_GROUP_ID.
-            group_ids = [config.CRASH_GROUP_ID] if config.CRASH_GROUP_ID else []
         if not group_ids and not dm_ids:
             logger.info(f"No targets for event='{event_type}' — skipping")
             return
@@ -902,10 +897,11 @@ _PERMANENT_SEND_ERRORS = (
 
 
 # Of the errors above, only being kicked is safe to mute a group over: putting the bot
-# back in the chat fires a my_chat_member update, which re-registers the group and clears
-# the mute (see register_group). ChatNotFound has no such signal — if it ever fires on a
-# group the bot is actually still in, muting would silence it permanently with nobody
-# watching, so that case is skipped for this alert only and retried on the next event.
+# back in the chat fires a my_chat_member update, which clears the mute (see
+# on_bot_chat_member_update in handlers/groups/group_events.py). ChatNotFound has no such
+# signal — if it ever fires on a group the bot is actually still in, muting would silence
+# it permanently with nobody watching, so that case is skipped for this alert only and
+# retried on the next event.
 _MUTE_ON_ERRORS = (BotKicked,)
 
 

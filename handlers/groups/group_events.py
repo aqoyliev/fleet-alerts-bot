@@ -5,22 +5,13 @@ from zoneinfo import ZoneInfo
 
 from aiogram import types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils.exceptions import MessageNotModified
 
 from loader import dp, bot
 from data import config
-from utils.db_api.groups import (
-    group_exists, get_group_event_types, register_group, get_group,
-    set_group_enabled, remove_group, set_group_event_types, toggle_group_event_type,
-)
+from utils.db_api.groups import is_the_group, set_group_enabled
 from utils.db_api.admins import get_all_admins, is_admin
 from utils.db_api.violations import get_violations_by_type, get_top_violators
-from utils.group_parser import extract_vehicle_number
-from utils import group_texts
-from utils.samsara.client import suggest_units
-from utils.units import resolve_unit
 from utils.webhook_handler import EVENT_TYPE_MAP
-from keyboards.inline.group_settings import group_events_keyboard
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -59,10 +50,15 @@ def _report_keyboard(period: str) -> InlineKeyboardMarkup:
     return kb
 
 
-@dp.message_handler(commands=["report"], chat_type=[types.ChatType.GROUP, types.ChatType.SUPERGROUP])
+async def _require_the_group(chat_id: int) -> bool:
+    """Every group command here only makes sense in the one configured group — there is
+    no other group whose alerts /report or /top could possibly be describing."""
+    return await is_the_group(chat_id)
+
+
+@dp.message_handler(commands=["report"], chat_type=GROUP_TYPES)
 async def cmd_report(message: types.Message):
-    if not await group_exists(message.chat.id):
-        await message.reply("This group isn't configured to receive alerts.")
+    if not await _require_the_group(message.chat.id):
         return
 
     now_et = datetime.now(tz=ET)
@@ -76,11 +72,11 @@ async def cmd_report(message: types.Message):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("grp_report:"))
 async def cb_report_toggle(call: types.CallbackQuery):
-    period = call.data.split(":")[1]
-    if not await group_exists(call.message.chat.id):
-        await call.answer("This group isn't configured to receive alerts.", show_alert=True)
+    if not await _require_the_group(call.message.chat.id):
+        await call.answer()
         return
 
+    period = call.data.split(":")[1]
     now_et = datetime.now(tz=ET)
     today_start = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
     if period == "today":
@@ -97,10 +93,9 @@ async def cb_report_toggle(call: types.CallbackQuery):
     await call.answer()
 
 
-@dp.message_handler(commands=["top"], chat_type=[types.ChatType.GROUP, types.ChatType.SUPERGROUP])
+@dp.message_handler(commands=["top"], chat_type=GROUP_TYPES)
 async def cmd_top(message: types.Message):
-    if not await group_exists(message.chat.id):
-        await message.reply("This group isn't configured to receive alerts.")
+    if not await _require_the_group(message.chat.id):
         return
 
     args = message.get_args()
@@ -130,40 +125,18 @@ async def cmd_top(message: types.Message):
 @dp.message_handler(commands=["help"], chat_type=GROUP_TYPES)
 async def cmd_group_help(message: types.Message):
     """/help inside a group. Separate from the DM handler in handlers/users/help.py,
-    which is admin-oriented and private-only; this one answers a driver's question in
-    their own truck's chat.
-
-    No group_exists guard on purpose — an unconfigured group is exactly when someone
-    types /help, and the reply tells them how to configure it.
-    """
-    grp = await get_group(message.chat.id)
-    is_main = config.MAIN_GROUP_ID is not None and message.chat.id == config.MAIN_GROUP_ID
-    is_crash = config.CRASH_GROUP_ID is not None and message.chat.id == config.CRASH_GROUP_ID
-    await message.reply(
-        group_texts.help_text(
-            config.COMPANY_NAME,
-            unit=(grp or {}).get("vehicle_number"),
-            is_main=is_main,
-            is_crash=is_crash,
-            is_admin=await is_admin(message.from_user.id),
-        ),
-        parse_mode="HTML",
-        disable_web_page_preview=True,
+    which is admin-oriented and private-only."""
+    text = (
+        f"🚛 <b>{config.COMPANY_NAME} — Fleet Alerts</b>\n\n"
+        "This group receives every vehicle's alerts.\n\n"
+        "/report — yesterday's violations\n"
+        "/top — today's top violators\n"
+        "/mute — pause alerts in this group\n"
+        "/unmute — resume alerts\n"
     )
-
-
-@dp.message_handler(commands=["event_list"], chat_type=[types.ChatType.GROUP, types.ChatType.SUPERGROUP])
-async def cmd_event_list(message: types.Message):
-    event_types = await get_group_event_types(message.chat.id)
-    if not event_types:
-        text = "📋 <b>Event Types</b>\n\n✅ All event types (no filter configured)"
-    else:
-        lines = ["📋 <b>Event Types</b>\n"]
-        for et in event_types:
-            emoji, title = EVENT_TYPE_MAP.get(et, ("⚠️", et.replace("_", " ").title()))
-            lines.append(f"{emoji} {title}")
-        text = "\n".join(lines)
-    await message.reply(text, parse_mode="HTML")
+    if await is_admin(message.from_user.id):
+        text += "\nYou're a bot admin — use the 🖥 Admin Panel for dashboard/alerts/admins."
+    await message.reply(text, parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def _admin_ids() -> list[int]:
@@ -181,93 +154,16 @@ async def _admin_ids() -> list[int]:
     return list(ids)
 
 
-async def _notify_admins_parse_failure(chat: types.Chat, title: str, description: str):
-    """DM the admins that a group couldn't be auto-registered because no unit number
-    was found, so they can fix its name/description and re-add the bot."""
-    text = (
-        "⚠️ <b>Couldn't register a group</b>\n\n"
-        f"I was added to <b>{title or 'a group'}</b> "
-        f"(id <code>{chat.id}</code>) but couldn't find a unit number in its name or "
-        "description.\n\n"
-        "Add the unit number (e.g. <code>UNIT: 1234</code> or <code>TRUCK# 1234</code>) "
-        "to the group name or description, then remove and re-add me."
-    )
-    for admin_id in await _admin_ids():
-        try:
-            await bot.send_message(admin_id, text, parse_mode="HTML")
-        except Exception as e:
-            logger.error(f"Failed to notify admin {admin_id} of parse failure: {e}")
-
-
-# Moved to utils/units.py when the admin panel became a second caller: the panel's unit
-# picker and this file's /setunit must reach the same verdict, and two copies of that
-# decision would eventually disagree about which units exist.
-
-
-async def _say(chat_id: int, text: str):
-    """Post to the group, tolerating the send failing.
-
-    Everything this is used for is a setup instruction, and a group that won't accept the
-    message (bot muted, restricted, removed again in the same second) must not take the
-    registration down with it — the admin DM still reports the same problem.
-    """
-    try:
-        await bot.send_message(chat_id, text, parse_mode="HTML",
-                               disable_web_page_preview=True)
-    except Exception as e:
-        logger.warning(f"Could not post setup message to {chat_id}: {e}")
-
-
-async def _notify_admins_unknown_unit(chat: types.Chat, title: str, unit: str,
-                                      suggestions: list[str]):
-    """DM the admins that a group named a unit Samsara has never heard of — usually a
-    typo in the group title, or a truck not yet added to the Samsara org."""
-    hint = ("\n\nClosest units in Samsara: "
-            + ", ".join(f"<code>{s}</code>" for s in suggestions)) if suggestions else ""
-    text = (
-        "⚠️ <b>Couldn't register a group</b>\n\n"
-        f"I was added to <b>{title or 'a group'}</b> (id <code>{chat.id}</code>) and read "
-        f"unit <code>{unit}</code> from its name, but no such vehicle exists in Samsara."
-        f"{hint}\n\n"
-        "Fix the group name, or set it directly with <code>/setunit &lt;unit&gt;</code>."
-    )
-    for admin_id in await _admin_ids():
-        try:
-            await bot.send_message(admin_id, text, parse_mode="HTML")
-        except Exception as e:
-            logger.error(f"Failed to notify admin {admin_id} of unknown unit: {e}")
-
-
-async def _notify_admins_group_registered(chat: types.Chat, title: str, unit: str,
-                                          by: str | None = None):
-    """DM the admins that a group is now set up and will start receiving a unit's alerts.
-
-    The failure paths above (_notify_admins_parse_failure, _notify_admins_unknown_unit)
-    already tell admins when setup didn't work; this is the missing success half, so
-    admins learn a group came online the same way they learn one went silent.
-    """
-    source = f" by {by}" if by else " (auto-detected from the group's name)"
-    text = (
-        "✅ <b>Group set up</b>\n\n"
-        f"<b>{title or 'A group'}</b> (id <code>{chat.id}</code>) is now registered for "
-        f"unit <code>{unit}</code>{source} and will start receiving its alerts."
-    )
-    for admin_id in await _admin_ids():
-        try:
-            await bot.send_message(admin_id, text, parse_mode="HTML")
-        except Exception as e:
-            logger.error(f"Failed to notify admin {admin_id} of group setup: {e}")
-
-
 @dp.my_chat_member_handler()
 async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
+    """Track when the bot is added to or removed from a chat, and self-heal the mute
+    if it was kicked from the one configured group and someone re-adds it — see
+    _drop_unreachable in utils/webhook_handler.py, which is the only thing that mutes
+    a group automatically."""
     old = update.old_chat_member.status
     new = update.new_chat_member.status
     chat = update.chat
 
-    # Groups only. This update also fires for a DM when someone blocks or unblocks the
-    # bot, and every branch below treats the chat as a group that failed to register —
-    # which used to DM the admins about it, and would now instruct the user to /setunit.
     if chat.type not in GROUP_TYPES:
         return
 
@@ -276,184 +172,26 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
 
     if added:
         logger.info(f"Bot added to {chat.type} '{chat.title}' (id={chat.id})")
-
-        # The membership update carries the title but not the description — fetch the
-        # full chat so we can parse both.
-        description = ""
-        try:
-            full = await bot.get_chat(chat.id)
-            description = full.description or ""
-        except Exception as e:
-            logger.warning(f"Could not fetch chat {chat.id} description: {e}")
-
-        title = chat.title or ""
-        vehicle = extract_vehicle_number(title, description)
-        is_main = config.MAIN_GROUP_ID is not None and chat.id == config.MAIN_GROUP_ID
-
-        # Checked before anything else, including the unit parse: the crash group's title
-        # may well contain digits, and matching one of them would register it as a driver
-        # group and start sending it a truck's speeding alerts.
-        if config.CRASH_GROUP_ID is not None and chat.id == config.CRASH_GROUP_ID:
-            # No register_group call on purpose — see the CRASH_GROUP_ID note in
-            # data/config.py. Routing for this chat comes from the config, so a DB row
-            # would only add ways for it to be wrong.
-            logger.info(f"Bot added to CRASH group (id={chat.id}) — crash alerts only")
-            await _say(chat.id, group_texts.joined_crash_group(config.COMPANY_NAME))
-            return
-
-        if vehicle is None and not is_main:
-            logger.warning(f"No unit number for group '{title}' (id={chat.id}) — not registering")
-            # Say it in the group as well as to the admins: the people who can rename the
-            # chat or run /setunit are the ones sitting in it, and until one of them does,
-            # the bot looks installed while sending nothing.
-            await _say(chat.id, group_texts.joined_needs_unit())
-            await _notify_admins_parse_failure(chat, title, description)
-            return
-
-        # Main group registers with a NULL vehicle (receives all units); driver groups
-        # register with their parsed unit number.
-        if is_main:
-            await register_group(chat.id, title, None)
-            logger.info(f"Registered MAIN group (id={chat.id})")
-            await _say(chat.id, group_texts.joined_main_group(config.COMPANY_NAME))
-            return
-
-        # The title gives bare digits ("UNIT: 571" → "571") but Samsara may name the
-        # same truck "unit571". Register the roster's spelling or the group receives
-        # nothing, silently.
-        status, resolved = await resolve_unit(vehicle)
-        if status == "unavailable":
-            # Registering the parsed spelling unverified would very likely store
-            # something the roster does not match, leaving the group silent. Say so and
-            # let whoever is in the chat run /setunit once Samsara answers again.
-            logger.warning(f"Group '{title}' (id={chat.id}) parsed unit {vehicle}, "
-                           f"but Samsara could not be reached — not registering")
-            await _say(chat.id, group_texts.joined_roster_unavailable(vehicle))
-            return
-        if status == "missing":
-            logger.warning(f"Group '{title}' (id={chat.id}) parsed unit {vehicle}, "
-                           f"which is not in Samsara — not registering")
-            # One roster lookup, two audiences: the group is told how to fix it, the
-            # admins are told it happened.
-            suggestions = await suggest_units(config.SAMSARA_API_KEY, vehicle)
-            await _say(chat.id, group_texts.joined_unknown_unit(
-                config.COMPANY_NAME, vehicle, suggestions))
-            await _notify_admins_unknown_unit(chat, title, vehicle, suggestions)
-            return
-
-        await register_group(chat.id, title, resolved)
-        logger.info(f"Registered group id={chat.id} → unit {resolved}"
-                    + (" (no Samsara roster to verify against)" if status == "no_roster" else ""))
-        await _say(chat.id, group_texts.joined_registered(resolved))
-        await _notify_admins_group_registered(chat, title, resolved)
-
+        if await is_the_group(chat.id):
+            await set_group_enabled(chat.id, True)
+            logger.info(f"Re-added to the configured group (id={chat.id}) — alerts unmuted")
     elif removed:
         logger.info(f"Bot removed from {chat.type} '{chat.title}' (id={chat.id})")
 
 
-# ── Manual group management ─────────────────────────────────────────────────────────
-
-async def _require_admin_group(message: types.Message) -> bool:
-    """Guard for admin-only group commands: caller must be a bot admin and the group
-    must be registered. Replies with the reason and returns False when either fails."""
-    if not await is_admin(message.from_user.id):
-        await message.reply("⛔ Only bot admins can do that.")
-        return False
-    if not await group_exists(message.chat.id):
-        await message.reply("This group isn't configured. Set its unit with /setunit first.")
-        return False
-    return True
-
-
-async def _require_registered_group(message: types.Message) -> bool:
-    """Guard for the group commands anyone may use — the group only has to be
-    registered. Drivers run their own group's mute switch, so the alerts they are being
-    sent are theirs to silence; the admins are told about it either way."""
-    if not await group_exists(message.chat.id):
-        await message.reply("This group isn't configured. Set its unit with /setunit first.")
-        return False
-    return True
-
-
-@dp.message_handler(commands=["setunit"], chat_type=GROUP_TYPES)
-async def cmd_setunit(message: types.Message):
-    """Manually set (or correct) this group's unit number — open to anyone in the group,
-    for when the bot couldn't auto-detect it from the name/description."""
-    if config.MAIN_GROUP_ID is not None and message.chat.id == config.MAIN_GROUP_ID:
-        await message.reply("This is the main group — it receives every unit and can't be tied to one.")
-        return
-
-    unit = (message.get_args() or "").strip().lstrip("#").strip()
-    if not unit or not any(c.isdigit() for c in unit) or len(unit) > 50:
-        await message.reply("Usage: <code>/setunit 1234</code>", parse_mode="HTML")
-        return
-
-    # Verify the unit exists before registering. A typo registers a group that looks
-    # configured and then silently never receives anything — much harder to notice
-    # later than being told "no such unit" right now.
-    typed = unit
-    status, unit = await resolve_unit(unit)
-
-    if status == "missing":
-        suggestions = await suggest_units(config.SAMSARA_API_KEY, typed)
-        hint = ("\n\nDid you mean: "
-                + ", ".join(f"<code>{s}</code>" for s in suggestions)) if suggestions else ""
-        await message.reply(
-            f"❌ No unit <code>{typed}</code> found in Samsara.{hint}",
-            parse_mode="HTML",
-        )
-        logger.info(f"Rejected /setunit {typed} in group {message.chat.id} — not in Samsara")
-        return
-
-    if status == "unavailable":
-        # The roster is the authority on how this unit is spelled, and storing a guess
-        # against it registers a group that silently never receives anything.
-        await message.reply(
-            "⚠️ Couldn't reach Samsara to verify that unit, so it wasn't saved — "
-            "the spelling has to match the roster exactly or this group would receive "
-            "nothing. Please try again in a few minutes.",
-        )
-        logger.warning(f"Deferred /setunit {typed} in group {message.chat.id} — Samsara unreachable")
-        return
-
-    note = ""
-    if status == "ok" and unit != typed:
-        note = f"\n\n<i>Matched Samsara's <code>{unit}</code>.</i>"
-
-    await register_group(message.chat.id, message.chat.title or "", unit)
-    await message.reply(
-        f"✅ Unit set to <code>{unit}</code>. This group will now receive its alerts." + note,
-        parse_mode="HTML",
-    )
-    logger.info(f"Unit for group {message.chat.id} set to {unit} by {message.from_user.id}")
-    await _notify_admins_group_registered(message.chat, message.chat.title or "", unit,
-                                          by=message.from_user.full_name)
-
-
 @dp.message_handler(commands=["disable", "mute"], chat_type=GROUP_TYPES)
 async def cmd_disable(message: types.Message):
-    """Mute this group's alerts. Open to anyone in the group — it only silences that
-    group's own unit — and every admin is DMed who did it."""
-    if not await _require_registered_group(message):
+    """Mute alerts to this group. Open to anyone in the group; every admin is DMed."""
+    if not await _require_the_group(message.chat.id):
         return
     await set_group_enabled(message.chat.id, False)
-    # This reply is the ONLY place /enable is advertised — it is deliberately kept out
-    # of the command menu, so the way back has to be stated here.
     await message.reply(
         "🔕 Alerts <b>disabled</b> for this group.\n\n"
         "Send <b>/enable</b> here to turn them back on.",
         parse_mode="HTML",
     )
-
-    grp = await get_group(message.chat.id)
-    unit = (grp or {}).get("vehicle_number")
-    label = (grp or {}).get("title") or message.chat.title or "a group"
-    unit_str = f" (unit {unit})" if unit else ""
     who = message.from_user.full_name
-    text = (
-        "🔕 <b>Group alerts muted</b>\n\n"
-        f"<b>{label}</b>{unit_str} (id <code>{message.chat.id}</code>) was muted by {who}."
-    )
+    text = f"🔕 <b>Alerts muted</b> by {who} (chat <code>{message.chat.id}</code>)."
     for admin_id in await _admin_ids():
         try:
             await bot.send_message(admin_id, text, parse_mode="HTML")
@@ -463,65 +201,9 @@ async def cmd_disable(message: types.Message):
 
 @dp.message_handler(commands=["enable", "unmute"], chat_type=GROUP_TYPES)
 async def cmd_enable(message: types.Message):
-    """Unmute this group's alerts. Open to anyone, necessarily: whoever can mute a group
-    must be able to undo it, or a driver can silence their own alerts for good."""
-    if not await _require_registered_group(message):
+    """Unmute alerts to this group. Open to anyone, necessarily: whoever can mute it
+    must be able to undo it."""
+    if not await _require_the_group(message.chat.id):
         return
     await set_group_enabled(message.chat.id, True)
     await message.reply("🔔 Alerts <b>enabled</b> for this group.", parse_mode="HTML")
-
-
-@dp.message_handler(commands=["removegroup"], chat_type=GROUP_TYPES)
-async def cmd_removegroup(message: types.Message):
-    """Unregister this group (admin only). The bot stays in the chat but sends nothing
-    until it's re-registered with /setunit."""
-    if not await _require_admin_group(message):
-        return
-    await remove_group(message.chat.id)
-    await message.reply(
-        "🗑 This group has been <b>unregistered</b> and will no longer receive alerts.\n"
-        "Use /setunit to register it again.",
-        parse_mode="HTML",
-    )
-    logger.info(f"Group {message.chat.id} unregistered by {message.from_user.id}")
-
-
-def _events_text() -> str:
-    return (
-        "🎛 <b>Event types for this group</b>\n\n"
-        "Tap to toggle. ✅ = received, ⬜ = blocked.\n"
-        "When everything is ✅ the group receives every event type (including new ones)."
-    )
-
-
-@dp.message_handler(commands=["events"], chat_type=GROUP_TYPES)
-async def cmd_events(message: types.Message):
-    """Admin-only control of which event types this group receives."""
-    if not await _require_admin_group(message):
-        return
-    allowed = await get_group_event_types(message.chat.id)
-    await message.reply(_events_text(), parse_mode="HTML", reply_markup=group_events_keyboard(allowed))
-
-
-@dp.callback_query_handler(lambda c: c.data.startswith("grpevt:"))
-async def cb_group_events(call: types.CallbackQuery):
-    if not await is_admin(call.from_user.id):
-        await call.answer("⛔ Admins only.", show_alert=True)
-        return
-    if not await group_exists(call.message.chat.id):
-        await call.answer("This group isn't configured.", show_alert=True)
-        return
-
-    parts = call.data.split(":")
-    action = parts[1]
-    if action == "all":
-        await set_group_event_types(call.message.chat.id, set())
-        allowed = []
-    else:  # "tog"
-        allowed = await toggle_group_event_type(call.message.chat.id, parts[2])
-
-    try:
-        await call.message.edit_reply_markup(reply_markup=group_events_keyboard(allowed))
-    except MessageNotModified:
-        pass
-    await call.answer()

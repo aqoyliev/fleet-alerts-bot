@@ -6,7 +6,7 @@ from utils.notify_admins import on_startup_notify
 from utils.set_bot_commands import set_default_commands
 from utils.webhook_handler import start_webhook_server, resume_pending_crash_confirmations
 from utils.db_api import init_pool, close_pool, run_migrations
-from utils.db_api.groups import ensure_main_group
+from utils.db_api.groups import ensure_group
 from utils.db_api.admins import seed_super_admins
 from utils.daily_report import schedule_daily_reports
 from data.config import ADMINS
@@ -25,7 +25,7 @@ def _admin_ids() -> list[int]:
 async def on_startup(dispatcher):
     await init_pool()
     await run_migrations()
-    await ensure_main_group()
+    await ensure_group()
     await seed_super_admins(_admin_ids())
     await set_default_commands(dispatcher)
     await on_startup_notify(dispatcher)

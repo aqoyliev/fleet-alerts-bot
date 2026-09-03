@@ -299,7 +299,7 @@ async def test_handle_event_downloads_media_once_for_all_recipients(monkeypatch)
 
     monkeypatch.setattr(wh, "_download", _fake_download)
     monkeypatch.setattr(wh, "save_violation", _async_const(None))
-    monkeypatch.setattr(wh, "get_groups_for_event", _async_const([1, 2]))
+    monkeypatch.setattr(wh, "get_alert_target", _async_const(1))
     monkeypatch.setattr(wh, "get_subscribed_admins", _async_const([3]))
 
     bot = _FakeBot()
@@ -317,4 +317,4 @@ async def test_handle_event_downloads_media_once_for_all_recipients(monkeypatch)
     await wh._handle_event(bot, event)
 
     assert len(downloads) == 1                   # ONE download for the single clip...
-    assert bot.video_calls == [1, 2, 3]          # ...delivered to all three recipients
+    assert bot.video_calls == [1, 3]             # ...delivered to the group and the DM

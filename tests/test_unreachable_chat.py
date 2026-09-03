@@ -105,18 +105,20 @@ async def test_send_all_continues_past_a_failing_chat(monkeypatch):
 
 # ── re-adding the bot restores a muted group ───────────────────────────────────
 
-async def test_register_group_clears_the_mute(monkeypatch):
-    """The auto-mute is only safe because re-registration undoes it: nobody unmutes a
-    group by hand, so putting the bot back has to set enabled back to TRUE."""
+async def test_set_group_enabled_updates_by_chat_id(monkeypatch):
+    """The auto-mute is only safe because re-adding the bot undoes it (see
+    on_bot_chat_member_update in handlers/groups/group_events.py) — which depends on
+    this write actually targeting the row by telegram_group_id."""
     import utils.db_api.groups as groups
     captured = {}
 
     async def _execute(query, *args):
         captured["query"] = query
+        captured["args"] = args
 
     monkeypatch.setattr(groups.db, "execute", _execute)
-    await groups.register_group(-100123, "UNIT 571", "571")
+    await groups.set_group_enabled(-100123, True)
 
     q = " ".join(captured["query"].split())
-    assert "ON CONFLICT (telegram_group_id) DO UPDATE" in q
-    assert "enabled = TRUE" in q
+    assert "UPDATE alert_group SET enabled = $2 WHERE telegram_group_id = $1" in q
+    assert captured["args"] == (-100123, True)

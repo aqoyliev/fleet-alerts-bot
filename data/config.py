@@ -50,29 +50,17 @@ DATABASE_URL = env.str("DATABASE_URL")
 COMPANY_SLUG = env.str("COMPANY_SLUG")            # short id, e.g. "hf" — used in report filenames
 COMPANY_NAME = env.str("COMPANY_NAME")            # display name, e.g. "HF Trucking"
 
-# The company's single "main" Telegram group — the dispatcher/office chat that
-# receives EVERY unit's alerts. Each driver's own group (auto-registered when the
-# bot is added, keyed by the unit number parsed from its title/description) receives
-# only that unit's alerts, on top of this one. Telegram group ids are negative.
-# Leave blank/unset if there is no all-fleet main group. Read as a string first so an
-# empty value (MAIN_GROUP_ID=) is treated as "unset" rather than crashing startup.
-_main_group_raw = env.str("MAIN_GROUP_ID", "").strip()
-MAIN_GROUP_ID = int(_main_group_raw) if _main_group_raw else None
-
-# The one group that receives CRASH alerts, and only crash alerts.
+# The one Telegram group this deployment talks to. There is no per-unit routing here
+# (that's the single-company branch this was forked from) — every event, every
+# vehicle, every provider, goes to this one chat. Telegram group ids are negative.
 #
-# Crashes deliberately do not follow the normal group routing: a wreck is not news for
-# the driver's own chat, and pushing it to the all-fleet main group buries it under the
-# day's speeding alerts. So crashes go to subscribed admin DMs plus this group, and no
-# other event type is ever routed here — "crash only" is a property of the routing, not
-# of a filter someone has to remember to set.
-#
-# This group is intentionally NOT registered in `alert_groups`: a row there with a NULL
-# unit *is* the all-fleet main group in this schema, and it would pull the crash group
-# into the daily digest (see get_all_groups). Membership is decided here and nowhere
-# else. Leave blank to keep crashes DM-only, which is the behaviour before this setting.
-_crash_group_raw = env.str("CRASH_GROUP_ID", "").strip()
-CRASH_GROUP_ID = int(_crash_group_raw) if _crash_group_raw else None
+# This value only SEEDS the group on first boot (see ensure_group in
+# utils/db_api/groups.py). From then on the database is authoritative, so the bot can
+# self-heal when Telegram upgrades a basic group to a supergroup (which changes its
+# chat id) without losing track of where alerts go. Changing this env var after the
+# first boot has no effect — update the `alert_group` row instead if the group ever
+# needs to be repointed by hand.
+GROUP_CHAT_ID = env.int("GROUP_CHAT_ID")
 
 # Minimum severity a speeding event must reach to be alerted ("low"/"medium"/"high"/"critical").
 SPEEDING_MIN_SEVERITY = env.str("SPEEDING_MIN_SEVERITY", "high")
