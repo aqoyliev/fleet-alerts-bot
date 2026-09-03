@@ -676,14 +676,14 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
                 persisted_type = rtype
                 logger.info(f"[samsara] Persisted {rtype} early (id={event.get('id')}) before media resolved")
                 if rtype == "crash":
-                    # Crash alerts go to the one group, same as every other event type —
-                    # this branch skips the poll-and-enrich wait, not the routing. The
-                    # same target list is rebuilt for the video follow-up below, so both
-                    # halves of a crash land in the same chats.
+                    # Crashes never reach the group — DM only, to subscribed admins. A
+                    # wreck is not news for a group that otherwise sees ordinary speeding
+                    # and phone-usage alerts all day, and it's what single-company does
+                    # by default too (a group only sees crashes if CRASH_GROUP_ID names
+                    # one specifically). This branch skips the poll-and-enrich wait, not
+                    # the routing. The same target list is rebuilt for the video
+                    # follow-up below, so both halves of a crash land in the same chats.
                     targets = await get_subscribed_admins("crash")
-                    group_id = await get_alert_target()
-                    if group_id:
-                        targets = [group_id, *targets]
                     text = _format_crash_initial(first_event, company_display)
                     # _send_all, not a bare loop: one unreachable chat must not cost the
                     # recipients behind it the one alert that matters most.
@@ -783,8 +783,9 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
                 severity=_event_severity(event),
             )
 
-        # Route to the one group (every event type, every vehicle) plus subscribed DMs.
-        group_id = await get_alert_target()
+        # Route to the one group (every event type but crash) plus subscribed DMs.
+        # Crashes are DM-only — see the _on_first branch above for why.
+        group_id = None if event_type == "crash" else await get_alert_target()
         group_ids = [group_id] if group_id else []
         dm_ids = await get_subscribed_admins(event_type)
         if not group_ids and not dm_ids:

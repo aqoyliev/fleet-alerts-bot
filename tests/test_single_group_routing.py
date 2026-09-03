@@ -38,7 +38,7 @@ def routed(monkeypatch):
 
 
 @pytest.mark.parametrize("event_type", ["speeding", "hard_brake", "harsh_turn",
-                                        "cell_phone", "crash"])
+                                        "cell_phone"])
 async def test_every_event_type_reaches_the_one_group_and_the_dms(routed, event_type):
     await wh._handle_event(object(), {"id": 1, "type": event_type,
                                       "vehicle": {"number": "1234"}})
@@ -46,9 +46,17 @@ async def test_every_event_type_reaches_the_one_group_and_the_dms(routed, event_
     assert routed == [[GROUP, 777]]
 
 
+async def test_a_crash_reaches_only_the_dms_never_the_group(routed):
+    """Crashes are DM-only, same default as single-company: a group only sees a crash if
+    a dedicated crash group is configured, which this build doesn't offer at all."""
+    await wh._handle_event(object(), {"id": 2, "type": "crash", "vehicle": {"number": "1234"}})
+
+    assert routed == [[777]]
+
+
 async def test_a_withdrawn_crash_still_reaches_the_group_as_a_hard_brake(routed):
-    """There is no dedicated crash-only chat in this build — a downgraded crash follows
-    the same single route as everything else."""
+    """A crash Motive later withdraws is re-typed to hard_brake before routing runs, so
+    it takes the normal group route instead of the crash DM-only one."""
     await wh._handle_event(object(), {"id": 3, "type": "crash", "vehicle": {"number": "1234"},
                                       "_type_override": "hard_brake"})
 
@@ -68,7 +76,8 @@ async def test_a_muted_group_gets_nothing_but_dms_still_do(routed, monkeypatch):
 async def test_the_immediate_crash_card_and_the_video_follow_up_go_to_the_same_chats(
         routed, monkeypatch):
     """A Samsara crash is announced twice: the full details the moment the type resolves,
-    then the clip once it has uploaded. Both halves must reach the same group."""
+    then the clip once it has uploaded. Both halves are DM-only — neither should reach
+    the group."""
     async def _no_sleep(*_a, **_k):
         return None
 
@@ -85,5 +94,5 @@ async def test_the_immediate_crash_card_and_the_video_follow_up_go_to_the_same_c
 
     assert len(routed) == 2, "expected the crash card and then the video follow-up"
     for targets in routed:
-        assert GROUP in targets
+        assert GROUP not in targets
         assert 777 in targets
