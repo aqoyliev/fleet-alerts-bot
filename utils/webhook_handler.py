@@ -121,6 +121,12 @@ async def _download(url: str) -> bytes | None:
     return None
 
 
+# Divider between an alert card's blocks. This build's event cards are deliberately
+# laid out differently from the other deployments' — same fields and wording, but
+# ruled into title / unit / event / notes blocks — so an alert is recognizable as this
+# fleet's at a glance. Keep it short: Telegram wraps a long rule on a narrow phone.
+_RULE = "─" * 18
+
 SEVERITY_EMOJI = {
     "low": "🟢",
     "medium": "🟡",
@@ -254,7 +260,24 @@ def _get_vehicle(event: dict) -> str:
     )
 
 
-def _format_event(event: dict, company_name: str = "", samsara: dict | None = None) -> str:
+def _format_event(
+    event: dict,
+    company_name: str = "",
+    samsara: dict | None = None,
+    *,
+    notes: list[str] | None = None,
+) -> str:
+    """Render one alert card.
+
+    Four blocks separated by _RULE: the title, who/what/when (unit, driver, time),
+    what happened (severity and the type's own measurements), and any footer notes.
+    A block that comes out empty takes its rule with it, so a card never ends on a
+    dangling divider — an obstructed-camera event, for instance, carries no severity
+    and often no location at all.
+
+    `notes` appends extra footer lines (the crash card's "video pending") into that
+    last block rather than after it, so the notes stay under one rule.
+    """
     event_type = _get_event_type(event)
     emoji, title = EVENT_TYPE_MAP.get(event_type, ("🚨", event_type.upper().replace("_", " ")))
 
@@ -279,60 +302,73 @@ def _format_event(event: dict, company_name: str = "", samsara: dict | None = No
     meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip()
     sev_display = meta_sev or (event.get("severity") or "").strip() or (samsara.get("severity") or "").strip()
 
-    lines = [f"{emoji} <b>{title}</b>\n"]
+    head = [f"{emoji} <b>{title}</b>"]
     if company_name and event_type == "crash":
-        lines.append(company_name)
-    lines.append(f"🚛 <b>Vehicle:</b> <code>{vehicle}</code>")
-    lines.append(f"👤 <b>Driver:</b> {driver}")
+        head.append(f"<i>{company_name}</i>")
+
+    # Who and when — steady across every event type, so it reads the same every time.
+    who = [
+        f"🚛 <b>Vehicle:</b> <code>{vehicle}</code>",
+        f"👤 <b>Driver:</b> {driver}",
+    ]
+    if start_time:
+        who.append(f"🕐 <b>Time:</b> {start_time}")
+
+    # What happened — severity leads, then whatever this type measures.
+    what: list[str] = []
     if sev_display and event_type not in {"driver_facing_cam_obstruction", "road_facing_cam_obstruction"}:
         sev_emoji = SEVERITY_EMOJI.get(sev_display.lower(), "⚠️")
-        lines.append(f"📊 <b>Severity:</b> {sev_emoji} {sev_display.title()}")
-    lines.append(f"🕐 <b>Time:</b> {start_time}")
+        what.append(f"{sev_emoji} <b>Severity:</b> {sev_display.title()}")
 
     if event_type == "speeding":
         avg = event.get("avg_vehicle_speed")
         limit = event.get("min_posted_speed_limit_in_kph")
         over = event.get("max_over_speed_in_kph")
         if avg:
-            lines.append(f"💨 <b>Average Speed:</b> {_kph_to_mph(avg):.1f} mph")
+            what.append(f"💨 <b>Average Speed:</b> {_kph_to_mph(avg):.1f} mph")
         if limit:
-            lines.append(f"🚦 <b>Speed Limit:</b> {_kph_to_mph(limit):.1f} mph")
+            what.append(f"🚦 <b>Speed Limit:</b> {_kph_to_mph(limit):.1f} mph")
         if over:
-            lines.append(f"📈 <b>Max Over Posted:</b> {_kph_to_mph(over):.1f} mph")
+            what.append(f"📈 <b>Max Over Posted:</b> {_kph_to_mph(over):.1f} mph")
         if duration:
-            lines.append(f"⏱ <b>Duration:</b> {duration}s")
+            what.append(f"⏱ <b>Duration:</b> {duration}s")
         # Samsara enrichment — fetched only when the webhook payload had no speed data
         max_mph = samsara.get("max_speed_mph")
         limit_mph = samsara.get("posted_limit_mph")
         if max_mph:
-            lines.append(f"💨 <b>Max Speed:</b> {max_mph:.1f} mph")
+            what.append(f"💨 <b>Max Speed:</b> {max_mph:.1f} mph")
         if limit_mph:
-            lines.append(f"🚦 <b>Speed Limit:</b> {limit_mph:.1f} mph")
+            what.append(f"🚦 <b>Speed Limit:</b> {limit_mph:.1f} mph")
         if max_mph and limit_mph:
-            lines.append(f"📈 <b>Over Posted:</b> {max_mph - limit_mph:.1f} mph")
+            what.append(f"📈 <b>Over Posted:</b> {max_mph - limit_mph:.1f} mph")
         if not duration and samsara.get("duration_seconds"):
-            lines.append(f"⏱ <b>Duration:</b> {samsara['duration_seconds']}s")
+            what.append(f"⏱ <b>Duration:</b> {samsara['duration_seconds']}s")
         nominatim = event.get("nominatim_location", "") or samsara.get("location", "")
         if nominatim:
-            lines.append(f"📍 <b>Location:</b> {nominatim}")
+            what.append(f"📍 <b>Location:</b> {nominatim}")
     else:
         if location:
-            lines.append(f"📍 <b>Location:</b> {location}")
+            what.append(f"📍 <b>Location:</b> {location}")
         if event_type == "hard_brake" and intensity:
-            lines.append(f"💥 <b>Intensity:</b> {intensity}")
+            what.append(f"💥 <b>Intensity:</b> {intensity}")
         if duration:
-            lines.append(f"⏱ <b>Duration:</b> {duration}s")
+            what.append(f"⏱ <b>Duration:</b> {duration}s")
 
+    foot: list[str] = []
     # Say so when a crash alert went out without Motive's confirmation, so an
     # unverified crash is never mistaken for a verified one.
     if event_type == "crash" and event.get("_crash_unconfirmed"):
-        lines.append("\n⚠️ <i>Unconfirmed — Motive's review could not be reached.</i>")
-
+        foot.append("⚠️ <i>Unconfirmed — Motive's review could not be reached.</i>")
+    foot.extend(notes or [])
     # Tag the source only for Samsara so existing Motive alerts are unchanged.
     if event.get("_source") == "samsara":
-        lines.append("\n<i>via Samsara</i>")
+        foot.append("<i>via Samsara</i>")
 
-    return "\n".join(lines)
+    card = [*head, _RULE, *who]
+    for block in (what, foot):
+        if block:
+            card.extend([_RULE, *block])
+    return "\n".join(card)
 
 
 def _get_camera_media_info(event: dict) -> tuple[list[str], list[str]]:
@@ -367,13 +403,13 @@ def _format_crash_initial(event: dict, company_name: str = "") -> str:
     """First crash alert: the FULL details, sent the instant the crash is detected —
     before the video uploads. Everyone (groups and DMs) gets this, so the complete
     record is delivered even when no video ever resolves."""
-    return _format_event(event, company_name) + "\n\n📹 <i>Video pending…</i>"
+    return _format_event(event, company_name, notes=["📹 <i>Video pending…</i>"])
 
 
 def _format_crash_video_caption(event: dict) -> str:
     """Short caption for the crash video follow-up — the full details already went out
     in the first alert, so this just labels the clip."""
-    return f"💥 <b>CRASH</b> — <code>{_get_vehicle(event)}</code>"
+    return f"💥 <b>CRASH</b> · <code>{_get_vehicle(event)}</code>"
 
 
 # ── Samsara webhook auth ───────────────────────────────────────────────────────

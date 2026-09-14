@@ -43,7 +43,8 @@ def test_enriched_interval():
     assert "Over Posted:</b> 13.7 mph" in out
     assert "Duration:</b> 82s" in out
     assert "I 10, Eminence" in out
-    assert "🆘 Critical" in out  # payload severity wins over interval severity
+    # payload severity wins over interval severity
+    assert "🆘 <b>Severity:</b> Critical" in out
     assert "via Samsara" in out
 
 
@@ -66,7 +67,7 @@ def test_no_enrichment_unchanged():
 def test_severity_fallback_from_interval():
     event = {k: v for k, v in SAMSARA_SPEEDING.items() if k != "severity"}
     out = _format_event(event, "Gurman", DETAILS)
-    assert "🆘 Severe" in out
+    assert "🆘 <b>Severity:</b> Severe" in out
 
 
 def test_driver_fallback_from_interval():
