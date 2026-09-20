@@ -114,11 +114,11 @@ WEBAPP_URL = _resolve_webapp_url(
 
 # ── Samsara (optional — leave blank if this company has no Samsara fleet) ────────
 # API key is the bearer token used for the harsh-event poll callback; the webhook
-# secret signs inbound Samsara webhooks (blank = skip signature verification).
+# secret signs inbound Samsara webhooks.
 SAMSARA_API_KEY = env.str("SAMSARA_API_KEY", "")
 SAMSARA_WEBHOOK_SECRET = env.str("SAMSARA_WEBHOOK_SECRET", "")
 
-# ── Motive / KeepTruckin (optional — leave blank to skip signature verification) ─
+# ── Motive / KeepTruckin ────────────────────────────────────────────────────────
 # Motive signs each webhook with HMAC-SHA1 over the raw body in X-KT-Webhook-Signature.
 MOTIVE_WEBHOOK_SECRET = env.str("MOTIVE_WEBHOOK_SECRET", "")
 # Read-only API token for this company's Motive org. Used to confirm a crash detection
@@ -126,3 +126,25 @@ MOTIVE_WEBHOOK_SECRET = env.str("MOTIVE_WEBHOOK_SECRET", "")
 # review rejects, so absence there is what tells a false crash from a real one. Leave
 # blank and crashes still alert, but flagged unconfirmed (see _motive_crash_is_real).
 MOTIVE_API_KEY = env.str("MOTIVE_API_KEY", "")
+
+# ── Webhook endpoint hardening ──────────────────────────────────────────────────
+# Both webhook URLs are public, and an unsigned one accepts whatever is posted to it:
+# anyone who guesses the host can invent a crash and put it in front of every admin.
+# So a missing provider secret now refuses the delivery instead of trusting it.
+#
+# The escape hatch is for a provider that genuinely cannot sign (or a first hour of
+# bring-up before the secret is pasted in): set ALLOW_UNSIGNED_WEBHOOKS=true and every
+# unsigned delivery is accepted again, loudly, one warning per request.
+ALLOW_UNSIGNED_WEBHOOKS = env.str("ALLOW_UNSIGNED_WEBHOOKS", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+
+# How far a Samsara delivery's own timestamp may be from ours before it is refused.
+# The signature covers that timestamp, so this is what stops a captured-and-replayed
+# delivery from being accepted again days later.
+SAMSARA_MAX_SKEW_SECONDS = 300
+
+# Port for the aiohttp server that serves the webhooks and the admin panel. Railway and
+# Heroku both hand the app its port in $PORT; 8080 is only the local default, and
+# hard-coding it means a platform that picks a different port gets no server at all.
+WEBHOOK_PORT = env.int("PORT", 8080)

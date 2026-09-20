@@ -7,10 +7,18 @@ async def get_groups_for_event(event_type: str, vehicle_number: str | None = Non
     """Returns telegram_group_ids that should receive this event.
 
     Two kinds of group qualify:
-      • the main group (config.MAIN_GROUP_ID) — receives every unit's alerts, and
+      • the all-fleet main group — receives every unit's alerts, and
       • the driver group whose vehicle_number matches this event's unit.
     Either way the group's optional group_event_types filter still applies: a group with
     no rows there receives every type; otherwise only the types listed for it.
+
+    The main group is recognized by its NULL vehicle_number, not only by matching
+    config.MAIN_GROUP_ID: when Telegram upgrades a group to a supergroup its chat id
+    changes, _migrate_group writes the new id into this table, and the id in .env is
+    then the old one — which used to leave the main group silently receiving nothing.
+    A NULL unit is what get_all_groups and the panel already mean by "main group", so
+    this reads it the same way. The config id stays in the test as a belt-and-braces
+    match for the row ensure_main_group creates.
     """
     rows = await db.fetch(
         """
@@ -19,6 +27,7 @@ async def get_groups_for_event(event_type: str, vehicle_number: str | None = Non
         WHERE COALESCE(g.enabled, TRUE)
           AND (
                   ($2::text   IS NOT NULL AND g.vehicle_number = $2)
+               OR g.vehicle_number IS NULL
                OR ($3::bigint IS NOT NULL AND g.telegram_group_id = $3)
               )
           AND (

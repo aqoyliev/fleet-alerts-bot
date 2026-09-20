@@ -205,9 +205,19 @@ class SamsaraClient:
             await self._refresh_vehicles()
         if key in self._vehicles:
             return self._vehicles[key]
-        for name, vid in self._vehicles.items():
-            if name.startswith(key) or key.startswith(name):
-                return vid
+        # Fall back to the same matching find_vehicle_name uses, rather than a prefix
+        # test of its own: a bare startswith made "12" match truck "123" and attach one
+        # truck's speed and location to another truck's alert. That routine drops a
+        # UNIT/TRUCK label, compares the digit run, and refuses an ambiguous answer.
+        try:
+            resolved = await self.find_vehicle_name(vehicle_name)
+        except SamsaraUnavailable as e:
+            # This path only enriches an alert that is going out either way, so an
+            # unreadable roster is "no id", never an exception the caller has to handle.
+            logger.warning(f"Samsara roster unavailable while resolving '{vehicle_name}': {e}")
+            return None
+        if resolved:
+            return self._vehicles.get(_normalize(resolved))
         logger.warning(f"Samsara vehicle not found for name '{vehicle_name}'")
         return None
 

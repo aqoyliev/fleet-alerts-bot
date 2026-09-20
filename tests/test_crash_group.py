@@ -28,7 +28,9 @@ def routed(monkeypatch):
     sent: list[list[int]] = []
 
     async def _save_violation(**kwargs):
-        pass
+        # True = "this event is new", which is what save_violation answers for a row it
+        # actually inserted; _handle_event stops on a False (a duplicate).
+        return True
 
     async def _get_groups_for_event(event_type, vehicle_number=None):
         # Stand-in for a fleet where every group is subscribed to everything, so any

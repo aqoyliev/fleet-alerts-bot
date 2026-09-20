@@ -298,7 +298,7 @@ async def test_handle_event_downloads_media_once_for_all_recipients(monkeypatch)
         return b"VIDEOBYTES"
 
     monkeypatch.setattr(wh, "_download", _fake_download)
-    monkeypatch.setattr(wh, "save_violation", _async_const(None))
+    monkeypatch.setattr(wh, "save_violation", _async_const(True))
     monkeypatch.setattr(wh, "get_groups_for_event", _async_const([1, 2]))
     monkeypatch.setattr(wh, "get_subscribed_admins", _async_const([3]))
 

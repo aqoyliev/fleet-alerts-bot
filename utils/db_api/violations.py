@@ -2,15 +2,27 @@ from utils.db_api import db
 
 
 async def save_violation(vehicle_number: str, event_type: str,
-                         event_id: int | None, occurred_at, severity: str | None = None) -> None:
-    await db.execute(
+                         event_id: int | None, occurred_at, severity: str | None = None) -> bool:
+    """Store one violation. Returns True when this row is new, False when the provider
+    had already sent this event_id.
+
+    The return value is what makes the UNIQUE constraint do more than protect the table:
+    the caller alerts only on a True, so a redelivery, a retry, or a Motive
+    speeding_event_updated arriving after its _created twin no longer puts a second copy
+    of the same alert in everyone's chat. A NULL event_id (a payload with no id at all)
+    can't conflict with anything, so it always counts as new — which is the safe way
+    round: a duplicate alert beats a missing one.
+    """
+    row_id = await db.fetchval(
         """
         INSERT INTO violations (vehicle_number, event_type, event_id, severity, occurred_at)
         VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (event_id) DO NOTHING
+        RETURNING id
         """,
         vehicle_number, event_type, event_id, severity, occurred_at,
     )
+    return row_id is not None
 
 
 async def get_violations_by_type(since, until) -> list[dict]:

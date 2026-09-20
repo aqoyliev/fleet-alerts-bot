@@ -32,11 +32,19 @@ GROUP_FILTER_TYPES = [
     (("seat_belt_violation",),       "🔒", "Seat Belt Violation"),
     (("no_seat_belt",),              "🚫", "No Seat Belt"),
     (("inattentive_driving",),       "😵", "Inattentive Driving"),
-    (("drowsy_driving",),            "😴", "Drowsiness"),
+    # Samsara calls it drowsy_driving, Motive calls it drowsiness. One row, both types:
+    # a filter that listed only Samsara's spelling silently dropped every Motive
+    # drowsiness alert for that group.
+    (("drowsy_driving", "drowsiness"), "😴", "Drowsiness"),
     (("road_facing_cam_obstruction", "driver_facing_cam_obstruction", "obstructed_camera"),
      "📷", "Camera Obstructed"),
     (("unsafe_parking",),            "🅿️", "Unsafe Parking"),
     (("near_miss",),                 "⚠️", "Near Miss"),
+    # Samsara's generic harsh event: what an alert falls back to when its specific type
+    # is one we don't map. Listed so a group that sets any filter at all keeps receiving
+    # it — leaving it out made "everything except speeding" quietly mean "everything
+    # except speeding and any harsh event we couldn't name".
+    (("harsh_event",),               "⚠️", "Other Harsh Event"),
 ]
 
 GROUP_FILTER_TYPE_SET = {t for types, _, _ in GROUP_FILTER_TYPES for t in types}

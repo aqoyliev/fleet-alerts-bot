@@ -10,6 +10,7 @@ from data import config
 logger = logging.getLogger(__name__)
 from utils.db_api.users import upsert_user
 from utils.db_api.admins import is_admin
+from utils.tg_text import esc
 from keyboards.default.main_menu import main_menu_keyboard
 
 
@@ -82,7 +83,7 @@ async def bot_start(message: types.Message):
     if config.WEBAPP_URL:
         await _set_menu_button(message.chat.id, to_panel=True)
     await message.answer(
-        f"Welcome, {message.from_user.full_name}!",
+        f"Welcome, {esc(message.from_user.full_name)}!",
         reply_markup=main_menu_keyboard()
     )
     panel = _panel_button()

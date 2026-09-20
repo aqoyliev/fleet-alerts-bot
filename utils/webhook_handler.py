@@ -34,6 +34,7 @@ from utils.db_api.crash_confirmations import (
 )
 from utils.motive import crash_still_listed
 from utils.samsara.client import fetch_speeding_details
+from utils.tg_text import esc
 
 logger = logging.getLogger(__name__)
 
@@ -302,23 +303,26 @@ def _format_event(
     meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip()
     sev_display = meta_sev or (event.get("severity") or "").strip() or (samsara.get("severity") or "").strip()
 
+    # Everything below is escaped as it goes in: a driver named "A & B" or an address
+    # with a "<" in it would otherwise make Telegram reject the whole card, and a
+    # rejected alert is a dropped alert.
     head = [f"{emoji} <b>{title}</b>"]
     if company_name and event_type == "crash":
-        head.append(f"<i>{company_name}</i>")
+        head.append(f"<i>{esc(company_name)}</i>")
 
     # Who and when — steady across every event type, so it reads the same every time.
     who = [
-        f"🚛 <b>Vehicle:</b> <code>{vehicle}</code>",
-        f"👤 <b>Driver:</b> {driver}",
+        f"🚛 <b>Vehicle:</b> <code>{esc(vehicle)}</code>",
+        f"👤 <b>Driver:</b> {esc(driver)}",
     ]
     if start_time:
-        who.append(f"🕐 <b>Time:</b> {start_time}")
+        who.append(f"🕐 <b>Time:</b> {esc(start_time)}")
 
     # What happened — severity leads, then whatever this type measures.
     what: list[str] = []
     if sev_display and event_type not in {"driver_facing_cam_obstruction", "road_facing_cam_obstruction"}:
         sev_emoji = SEVERITY_EMOJI.get(sev_display.lower(), "⚠️")
-        what.append(f"{sev_emoji} <b>Severity:</b> {sev_display.title()}")
+        what.append(f"{sev_emoji} <b>Severity:</b> {esc(sev_display.title())}")
 
     if event_type == "speeding":
         avg = event.get("avg_vehicle_speed")
@@ -345,12 +349,12 @@ def _format_event(
             what.append(f"⏱ <b>Duration:</b> {samsara['duration_seconds']}s")
         nominatim = event.get("nominatim_location", "") or samsara.get("location", "")
         if nominatim:
-            what.append(f"📍 <b>Location:</b> {nominatim}")
+            what.append(f"📍 <b>Location:</b> {esc(nominatim)}")
     else:
         if location:
-            what.append(f"📍 <b>Location:</b> {location}")
+            what.append(f"📍 <b>Location:</b> {esc(location)}")
         if event_type == "hard_brake" and intensity:
-            what.append(f"💥 <b>Intensity:</b> {intensity}")
+            what.append(f"💥 <b>Intensity:</b> {esc(intensity)}")
         if duration:
             what.append(f"⏱ <b>Duration:</b> {duration}s")
 
@@ -390,13 +394,53 @@ def _parse_occurred(event: dict) -> datetime:
     try:
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except Exception:
-        return datetime.now()
+        return datetime.now(timezone.utc)
 
 
 def _event_severity(event: dict) -> str | None:
     """Normalized severity (metadata.severity → severity), lowercased, or None."""
     meta_sev = ((event.get("metadata") or {}).get("severity") or "").strip().lower()
     return meta_sev or (event.get("severity") or "").strip().lower() or None
+
+
+async def _persist_once(event: dict, event_type: str) -> bool:
+    """Store the violation and say whether it is the first sighting of this event.
+
+    True means "new, go ahead and alert". False means the provider has sent this
+    event_id before — a redelivery, a retry after a slow 200, or Motive's
+    speeding_event_updated following its _created twin — and the alert already went out.
+    Stopping here is what keeps the UNIQUE constraint from being merely a table
+    protection: without it the row is silently skipped and the message sent anyway.
+
+    A database error answers True: the alert is the product and the row is bookkeeping,
+    so an outage may cost a duplicate but must never cost the alert itself.
+    """
+    try:
+        return await save_violation(
+            vehicle_number=_get_vehicle(event),
+            event_type=event_type,
+            event_id=_event_id_to_bigint(event.get("id")),
+            occurred_at=_parse_occurred(event),
+            severity=_event_severity(event),
+        )
+    except Exception as e:
+        logger.error(f"Could not persist violation id={event.get('id')}: {e} — alerting anyway")
+        return True
+
+
+# Strong references to the fire-and-forget tasks started below. asyncio keeps only a
+# weak one, so a task nobody holds can be garbage-collected mid-await — and these are
+# long-lived: a Samsara media poll runs for minutes and a Motive crash confirmation
+# sleeps three of them.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    """Run `coro` in the background, keeping a reference until it finishes."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 
 def _format_crash_initial(event: dict, company_name: str = "") -> str:
@@ -409,7 +453,7 @@ def _format_crash_initial(event: dict, company_name: str = "") -> str:
 def _format_crash_video_caption(event: dict) -> str:
     """Short caption for the crash video follow-up — the full details already went out
     in the first alert, so this just labels the clip."""
-    return f"💥 <b>CRASH</b> · <code>{_get_vehicle(event)}</code>"
+    return f"💥 <b>CRASH</b> · <code>{esc(_get_vehicle(event))}</code>"
 
 
 # ── Samsara webhook auth ───────────────────────────────────────────────────────
@@ -436,6 +480,42 @@ def _verify_hmac(secret: str, body: bytes, provided: str, digestmod=hashlib.sha2
         return _check(base64.b64decode(secret))
     except Exception:
         return False
+
+
+def _unsigned_allowed(provider: str, remote) -> bool:
+    """Whether to process a delivery that arrived with no secret configured to check it.
+
+    Refusing is the default: the endpoint is public, so without a signature anyone who
+    finds the URL can post a crash straight into the admins' chats. A deployment that
+    truly cannot sign sets ALLOW_UNSIGNED_WEBHOOKS and gets a warning per request
+    instead of a refusal.
+    """
+    if config.ALLOW_UNSIGNED_WEBHOOKS:
+        logger.warning(f"[{provider}] No webhook secret configured — accepting unsigned "
+                       f"delivery from {remote} because ALLOW_UNSIGNED_WEBHOOKS is set")
+        return True
+    logger.error(f"[{provider}] Refused a delivery from {remote}: no webhook secret is "
+                 f"configured, so its signature cannot be checked. Set "
+                 f"{provider.upper()}_WEBHOOK_SECRET, or ALLOW_UNSIGNED_WEBHOOKS=true "
+                 f"to accept unsigned deliveries.")
+    return False
+
+
+def _timestamp_is_fresh(raw: str, max_skew: int = 300) -> bool:
+    """Is this delivery's own timestamp close enough to now to not be a replay?
+
+    Samsara signs the timestamp along with the body, so an attacker cannot adjust it —
+    which makes checking it the whole defence against a captured delivery being sent
+    again later. Seconds and milliseconds are both accepted because the header's unit is
+    not worth a production surprise: anything far too large for seconds is milliseconds.
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return False
+    if value > 1e11:  # milliseconds
+        value /= 1000.0
+    return abs(time.time() - value) <= max_skew
 
 
 def _samsara_signed_payload(timestamp: str, body: bytes) -> bytes:
@@ -702,13 +782,12 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
                     return  # a type we'd filter out anyway — don't persist or alert
                 first_loc = (data.get("location") or {}).get("address") or ""
                 first_event = {**event, "type": rtype, "location": first_loc, "camera_media": None}
-                await save_violation(
-                    vehicle_number=_get_vehicle(first_event),
-                    event_type=rtype,
-                    event_id=_event_id_to_bigint(event.get("id")),
-                    occurred_at=_parse_occurred(first_event),
-                    severity=_event_severity(first_event),
-                )
+                if not await _persist_once(first_event, rtype):
+                    # Already in the table: this detection was alerted on before (a
+                    # redelivery, or a restart mid-poll). Leave persisted_type unset so
+                    # the main path sees the same answer and stops there too.
+                    logger.info(f"[samsara] Duplicate event id={event.get('id')} — not alerting again")
+                    return
                 persisted_type = rtype
                 logger.info(f"[samsara] Persisted {rtype} early (id={event.get('id')}) before media resolved")
                 if rtype == "crash":
@@ -808,15 +887,12 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
         logger.info(f"Processing event {event_id} type={event_type}")
 
         # Persist the violation, unless the first-poll hook already saved it. Same
-        # helpers as the hook so the row is identical either way.
-        if persisted_type is None:
-            await save_violation(
-                vehicle_number=_get_vehicle(event),
-                event_type=event_type,
-                event_id=_event_id_to_bigint(event.get("id")),
-                occurred_at=_parse_occurred(event),
-                severity=_event_severity(event),
-            )
+        # helpers as the hook so the row is identical either way. A row that was already
+        # there means this event has been alerted on already — stop rather than send a
+        # second copy of it.
+        if persisted_type is None and not await _persist_once(event, event_type):
+            logger.info(f"Duplicate event id={event_id} type={event_type} — not alerting again")
+            return
 
         # Route to the matching driver group (by unit) plus the main group.
         group_ids = await get_groups_for_event(event_type, (_get_vehicle(event) or "").strip())
@@ -916,9 +992,7 @@ async def resume_pending_crash_confirmations(bot: Bot) -> None:
             if isinstance(payload, str):
                 payload = json.loads(payload)
             logger.info(f"[motive] Resuming crash confirmation {event_id} ({int(age)}s held)")
-            asyncio.create_task(
-                _handle_event(bot, payload, crash_resume_elapsed=age)
-            )
+            _spawn(_handle_event(bot, payload, crash_resume_elapsed=age))
         except Exception as e:
             logger.error(f"[motive] Could not resume crash {event_id}: {e}")
 
@@ -1101,8 +1175,14 @@ async def samsara_webhook(request: web.Request) -> web.Response:
             if not _verify_hmac(secret, signed_payload, provided):
                 logger.warning(f"[samsara] Invalid HMAC signature from {request.remote}")
                 return web.Response(text="Forbidden", status=403)
-        else:
-            logger.warning("[samsara] No webhook secret configured — skipping signature check")
+            # Only meaningful once the signature holds: until then the timestamp is just
+            # a number the sender chose.
+            if not _timestamp_is_fresh(timestamp, config.SAMSARA_MAX_SKEW_SECONDS):
+                logger.warning(f"[samsara] Stale or unreadable timestamp '{timestamp}' "
+                               f"from {request.remote} — refusing as a replay")
+                return web.Response(text="Forbidden", status=403)
+        elif not _unsigned_allowed("samsara", request.remote):
+            return web.Response(text="Forbidden", status=403)
 
         body = json.loads(body_bytes)
         event_id = body.get("eventId") or ""
@@ -1115,7 +1195,7 @@ async def samsara_webhook(request: web.Request) -> web.Response:
             logger.info(f"[samsara] Ignored eventType='{body.get('eventType')}' resolved='{event_type}'")
             return web.Response(text="OK", status=200)
 
-        asyncio.create_task(_handle_event(bot, normalized, api_key))
+        _spawn(_handle_event(bot, normalized, api_key))
         return web.Response(text="OK", status=200)
     except Exception as e:
         logger.error(f"[samsara] Webhook error: {e}", exc_info=True)
@@ -1137,8 +1217,8 @@ async def motive_webhook(request: web.Request) -> web.Response:
             if not _verify_hmac(secret, body_bytes, sig, hashlib.sha1):
                 logger.warning(f"[motive] Invalid HMAC signature from {request.remote}")
                 return web.Response(text="Forbidden", status=403)
-        else:
-            logger.warning("[motive] No webhook secret configured — skipping signature check")
+        elif not _unsigned_allowed("motive", request.remote):
+            return web.Response(text="Forbidden", status=403)
 
         body = json.loads(body_bytes)
 
@@ -1162,7 +1242,16 @@ async def motive_webhook(request: web.Request) -> web.Response:
             event_type = _get_event_type(event)
             if event_type not in ALLOWED_TYPES:
                 logger.debug(f"Unhandled event type='{event_type}' keys={list(event.keys())} payload={json.dumps(event, default=str)[:500]}")
-            asyncio.create_task(_handle_event(bot, event))
+            # Same short-window guard Samsara gets. Motive retries a delivery it thinks
+            # went unanswered and sends speeding_event_updated under the id of the
+            # _created it follows, so without this the same event is processed twice
+            # concurrently — and two tasks racing means both can pass the database check
+            # before either has inserted its row.
+            motive_id = str(event.get("id") or "")
+            if motive_id and _is_duplicate(f"motive:{motive_id}"):
+                logger.info(f"[motive] Duplicate id={motive_id} — skipping")
+                continue
+            _spawn(_handle_event(bot, event))
 
         return web.Response(text="OK", status=200)
     except Exception as e:

@@ -9,6 +9,7 @@ from aiogram import Bot
 from data import config
 from utils.db_api.groups import get_all_groups
 from utils.db_api.violations import get_violations_by_type
+from utils.tg_text import esc
 from utils.webhook_handler import EVENT_TYPE_MAP
 
 logger = logging.getLogger(__name__)
@@ -16,7 +17,7 @@ ET = ZoneInfo("America/New_York")
 
 
 def _format_daily_report(company_name: str, rows: list[dict], date_str: str) -> str:
-    header = f"📊 <b>Daily Violations Report</b>\n<b>{company_name}</b> — {date_str}\n"
+    header = f"📊 <b>Daily Violations Report</b>\n<b>{esc(company_name)}</b> — {date_str}\n"
     if not rows:
         return header + "\n✅ No violations today."
 
@@ -36,7 +37,7 @@ def _format_daily_report(company_name: str, rows: list[dict], date_str: str) -> 
         emoji, title = EVENT_TYPE_MAP.get(event_type, ("⚠️", event_type.replace("_", " ").title()))
         lines.append(f"\n{emoji} <b>{title}</b>")
         for v in by_type[event_type]:
-            lines.append(f"  🚛 {v['vehicle_number']} — {v['total']}")
+            lines.append(f"  🚛 {esc(v['vehicle_number'])} — {v['total']}")
 
     return "\n".join(lines)
 

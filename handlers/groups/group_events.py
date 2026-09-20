@@ -16,6 +16,7 @@ from utils.db_api.groups import (
 from utils.db_api.admins import get_all_admins, is_admin
 from utils.db_api.violations import get_violations_by_type, get_top_violators
 from utils.group_parser import extract_vehicle_number
+from utils.tg_text import esc
 from utils import group_texts
 from utils.samsara.client import suggest_units
 from utils.units import resolve_unit
@@ -28,7 +29,7 @@ GROUP_TYPES = [types.ChatType.GROUP, types.ChatType.SUPERGROUP]
 
 
 def _report_text(company_name: str, rows: list[dict], date_str: str) -> str:
-    header = f"📊 <b>Daily Violations Report</b>\n<b>{company_name}</b> — {date_str}\n"
+    header = f"📊 <b>Daily Violations Report</b>\n<b>{esc(company_name)}</b> — {date_str}\n"
     if not rows:
         return header + "\n✅ No violations today."
 
@@ -46,7 +47,7 @@ def _report_text(company_name: str, rows: list[dict], date_str: str) -> str:
         emoji, title = EVENT_TYPE_MAP.get(event_type, ("⚠️", event_type.replace("_", " ").title()))
         lines.append(f"\n{emoji} <b>{title}</b>")
         for v in by_type[event_type]:
-            lines.append(f"  🚛 {v['vehicle_number']} — {v['total']}")
+            lines.append(f"  🚛 {esc(v['vehicle_number'])} — {v['total']}")
     return "\n".join(lines)
 
 
@@ -115,13 +116,13 @@ async def cmd_top(message: types.Message):
     company_name = config.COMPANY_NAME
     date_str = today_start.strftime("%b %d, %Y")
 
-    header = f"📊 <b>Top {limit} Violators</b>\n<b>{company_name}</b> — {date_str}\n"
+    header = f"📊 <b>Top {limit} Violators</b>\n<b>{esc(company_name)}</b> — {date_str}\n"
     if not rows:
         text = header + "\n✅ No violations today."
     else:
         lines = [header]
         for i, row in enumerate(rows, 1):
-            lines.append(f"{i}. 🚛 {row['vehicle_number']} — {row['total']}")
+            lines.append(f"{i}. 🚛 {esc(row['vehicle_number'])} — {row['total']}")
         text = "\n".join(lines)
 
     await message.reply(text, parse_mode="HTML")
@@ -186,7 +187,7 @@ async def _notify_admins_parse_failure(chat: types.Chat, title: str, description
     was found, so they can fix its name/description and re-add the bot."""
     text = (
         "⚠️ <b>Couldn't register a group</b>\n\n"
-        f"I was added to <b>{title or 'a group'}</b> "
+        f"I was added to <b>{esc(title) or 'a group'}</b> "
         f"(id <code>{chat.id}</code>) but couldn't find a unit number in its name or "
         "description.\n\n"
         "Add the unit number (e.g. <code>UNIT: 1234</code> or <code>TRUCK# 1234</code>) "
@@ -223,11 +224,11 @@ async def _notify_admins_unknown_unit(chat: types.Chat, title: str, unit: str,
     """DM the admins that a group named a unit Samsara has never heard of — usually a
     typo in the group title, or a truck not yet added to the Samsara org."""
     hint = ("\n\nClosest units in Samsara: "
-            + ", ".join(f"<code>{s}</code>" for s in suggestions)) if suggestions else ""
+            + ", ".join(f"<code>{esc(s)}</code>" for s in suggestions)) if suggestions else ""
     text = (
         "⚠️ <b>Couldn't register a group</b>\n\n"
-        f"I was added to <b>{title or 'a group'}</b> (id <code>{chat.id}</code>) and read "
-        f"unit <code>{unit}</code> from its name, but no such vehicle exists in Samsara."
+        f"I was added to <b>{esc(title) or 'a group'}</b> (id <code>{chat.id}</code>) and read "
+        f"unit <code>{esc(unit)}</code> from its name, but no such vehicle exists in Samsara."
         f"{hint}\n\n"
         "Fix the group name, or set it directly with <code>/setunit &lt;unit&gt;</code>."
     )
@@ -249,8 +250,8 @@ async def _notify_admins_group_registered(chat: types.Chat, title: str, unit: st
     source = f" by {by}" if by else " (auto-detected from the group's name)"
     text = (
         "✅ <b>Group set up</b>\n\n"
-        f"<b>{title or 'A group'}</b> (id <code>{chat.id}</code>) is now registered for "
-        f"unit <code>{unit}</code>{source} and will start receiving its alerts."
+        f"<b>{esc(title) or 'A group'}</b> (id <code>{chat.id}</code>) is now registered for "
+        f"unit <code>{esc(unit)}</code>{source} and will start receiving its alerts."
     )
     for admin_id in await _admin_ids():
         try:
@@ -397,9 +398,9 @@ async def cmd_setunit(message: types.Message):
     if status == "missing":
         suggestions = await suggest_units(config.SAMSARA_API_KEY, typed)
         hint = ("\n\nDid you mean: "
-                + ", ".join(f"<code>{s}</code>" for s in suggestions)) if suggestions else ""
+                + ", ".join(f"<code>{esc(s)}</code>" for s in suggestions)) if suggestions else ""
         await message.reply(
-            f"❌ No unit <code>{typed}</code> found in Samsara.{hint}",
+            f"❌ No unit <code>{esc(typed)}</code> found in Samsara.{hint}",
             parse_mode="HTML",
         )
         logger.info(f"Rejected /setunit {typed} in group {message.chat.id} — not in Samsara")
@@ -418,11 +419,11 @@ async def cmd_setunit(message: types.Message):
 
     note = ""
     if status == "ok" and unit != typed:
-        note = f"\n\n<i>Matched Samsara's <code>{unit}</code>.</i>"
+        note = f"\n\n<i>Matched Samsara's <code>{esc(unit)}</code>.</i>"
 
     await register_group(message.chat.id, message.chat.title or "", unit)
     await message.reply(
-        f"✅ Unit set to <code>{unit}</code>. This group will now receive its alerts." + note,
+        f"✅ Unit set to <code>{esc(unit)}</code>. This group will now receive its alerts." + note,
         parse_mode="HTML",
     )
     logger.info(f"Unit for group {message.chat.id} set to {unit} by {message.from_user.id}")
@@ -448,11 +449,11 @@ async def cmd_disable(message: types.Message):
     grp = await get_group(message.chat.id)
     unit = (grp or {}).get("vehicle_number")
     label = (grp or {}).get("title") or message.chat.title or "a group"
-    unit_str = f" (unit {unit})" if unit else ""
+    unit_str = f" (unit {esc(unit)})" if unit else ""
     who = message.from_user.full_name
     text = (
         "🔕 <b>Group alerts muted</b>\n\n"
-        f"<b>{label}</b>{unit_str} (id <code>{message.chat.id}</code>) was muted by {who}."
+        f"<b>{esc(label)}</b>{unit_str} (id <code>{message.chat.id}</code>) was muted by {esc(who)}."
     )
     for admin_id in await _admin_ids():
         try:

@@ -71,3 +71,34 @@ def test_camera_obstruction_is_a_single_toggle_row():
     rows_touching_camera = [types for types, _, _ in GROUP_FILTER_TYPES if CAMERA_TYPES & set(types)]
     assert len(rows_touching_camera) == 1
     assert set(rows_touching_camera[0]) == CAMERA_TYPES
+
+
+# ── every type the bot can actually deliver is filterable ──────────────────────
+#
+# A group with any filter at all receives ONLY the types on its allowlist, and that
+# allowlist is materialized from this catalog. So a deliverable type missing from the
+# catalog is not merely absent from the toggle screen: the first time anyone touches the
+# filter, that type stops arriving and nothing on screen says so. Drowsiness (Motive
+# spells it drowsiness, Samsara drowsy_driving) and Samsara's generic harsh_event were
+# both missing, and both went quiet.
+
+def test_every_deliverable_event_type_can_be_filtered():
+    from utils.webhook_handler import ALLOWED_TYPES
+
+    # Crash is the one deliberate exception: it bypasses group filtering entirely.
+    deliverable = ALLOWED_TYPES - {"crash", "hard_cornering"}
+    assert deliverable <= GROUP_FILTER_TYPE_SET
+
+
+def test_both_spellings_of_drowsiness_travel_together():
+    """Motive says drowsiness, Samsara says drowsy_driving, the admin sees one chip."""
+    result = next_event_filter(set(), "drowsy_driving")
+    assert "drowsiness" not in result
+    assert "drowsy_driving" not in result
+
+
+def test_a_generic_harsh_event_survives_a_custom_filter():
+    """The fallback type an unmapped Samsara harsh event lands on. Turning speeding off
+    must not take it with them."""
+    result = next_event_filter(set(), "speeding")
+    assert "harsh_event" in result

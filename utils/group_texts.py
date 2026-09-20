@@ -16,10 +16,12 @@ utils/set_bot_commands); they are listed only in the admin section of /help.
 Everything here is HTML — the bot's default parse mode.
 """
 
+from utils.tg_text import esc
+
 # Crash alerts are left out of this description on purpose: they never reach a driver
 # group or the main group, only admin DMs and the dedicated CRASH_GROUP_ID chat (see
 # data/event_catalog and the crash branch in webhook_handler._handle_event).
-_WHAT_I_POST = "speeding, hard braking, harsh turns and similar safety events"
+_WHAT_I_POST ="speeding, hard braking, harsh turns and similar safety events"
 
 
 def _unit_label(unit: str) -> str:
@@ -30,6 +32,7 @@ def _unit_label(unit: str) -> str:
     which reads like a bug in the very message that is supposed to confirm the setup
     worked.
     """
+    unit = esc(unit)
     return unit if unit.strip().lower().startswith(("unit", "truck")) else f"unit {unit}"
 
 
@@ -58,7 +61,7 @@ def joined_roster_unavailable(unit: str) -> str:
         "I read this group's truck number, but couldn't reach Samsara to check how it's "
         "spelled there. Saving it unverified would leave this group silent, so I "
         "haven't saved it.\n\n"
-        f"Please run <code>/setunit {unit}</code> in a few minutes to finish setup."
+        f"Please run <code>/setunit {esc(unit)}</code> in a few minutes to finish setup."
     )
 
 
@@ -66,7 +69,7 @@ def joined_main_group(company: str) -> str:
     """Posted when the bot joins the company-wide main group."""
     return (
         "✅ <b>Connected — main group</b>\n\n"
-        f"This is {company}'s main group, so it receives alerts for <b>every</b> unit in "
+        f"This is {esc(company)}'s main group, so it receives alerts for <b>every</b> unit in "
         "the fleet rather than one truck's.\n\n"
         "• <b>/disable</b> — mute alerts here (<b>/enable</b> brings them back)\n"
         "• <b>/help</b> — show the commands"
@@ -82,7 +85,7 @@ def joined_crash_group(company: str) -> str:
     """
     return (
         "✅ <b>Connected — crash alerts only</b>\n\n"
-        f"This group receives <b>crash detections</b> for {company}'s whole fleet, and "
+        f"This group receives <b>crash detections</b> for {esc(company)}'s whole fleet, and "
         "nothing else. No speeding, no hard braking — those go to the driver groups.\n\n"
         "<b>Expect silence.</b> No message here means no crash, not a broken bot.\n\n"
         "Please keep me in this group and leave notifications on."
@@ -110,10 +113,10 @@ def joined_unknown_unit(company: str, unit: str, suggestions: list[str] | None =
     usually a typo in the title, or a truck not yet added to the Samsara org."""
     hint = ""
     if suggestions:
-        hint = "\nClosest trucks in Samsara: " + ", ".join(f"<code>{s}</code>" for s in suggestions) + "\n"
+        hint = "\nClosest trucks in Samsara: " + ", ".join(f"<code>{esc(s)}</code>" for s in suggestions) + "\n"
     return (
-        f"⚠️ <b>Almost there — unit {unit} isn't in Samsara</b>\n\n"
-        f"I read unit <code>{unit}</code> from this group's name, but {company} has no "
+        f"⚠️ <b>Almost there — unit {esc(unit)} isn't in Samsara</b>\n\n"
+        f"I read unit <code>{esc(unit)}</code> from this group's name, but {esc(company)} has no "
         "such truck in Samsara, so I can't route alerts here yet. "
         "<b>Nothing will be sent until that's fixed.</b>\n"
         f"{hint}\n"
@@ -129,7 +132,7 @@ def help_text(company: str, *, unit: str | None = None, is_main: bool = False,
     wall of admin instructions, and this one is read by a driver in their own truck's chat.
     The admin block is appended only for bot admins, so the driver sees four commands.
     """
-    lines = [f"🚛 <b>{company} — Fleet Alerts</b>\n"]
+    lines = [f"🚛 <b>{esc(company)} — Fleet Alerts</b>\n"]
 
     if is_crash:
         # Checked before is_main and before the unregistered-group warning: the crash

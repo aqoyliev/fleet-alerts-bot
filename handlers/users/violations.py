@@ -9,6 +9,7 @@ from loader import dp
 from data import config
 from utils.db_api.admins import is_admin, is_super_admin
 from utils.db_api.violations import get_top_violators, get_vehicle_events
+from utils.tg_text import esc
 from utils.webhook_handler import EVENT_TYPE_MAP
 from keyboards.inline.violations import (
     event_type_keyboard,
@@ -37,21 +38,21 @@ def _period_range(period: str) -> tuple[datetime, datetime]:
 def _format_top10_text(rows: list[dict], period_label: str, company_name: str, event_type: str) -> str:
     if event_type == "speeding":
         header = (
-            f"📊 <b>{company_name} — {period_label}</b>\n"
+            f"📊 <b>{esc(company_name)} — {period_label}</b>\n"
             f"<i>🚨 Speeding only</i>\n"
             f"<i>ℹ️ Download report shows days with 3+ speeding events per unit</i>\n"
         )
     elif event_type == "other":
-        header = f"📊 <b>{company_name} — {period_label}</b>\n<i>⚠️ Other violations (excl. speeding)</i>\n"
+        header = f"📊 <b>{esc(company_name)} — {period_label}</b>\n<i>⚠️ Other violations (excl. speeding)</i>\n"
     else:
-        header = f"📊 <b>{company_name} — {period_label}</b>\n"
+        header = f"📊 <b>{esc(company_name)} — {period_label}</b>\n"
 
     if not rows:
         return header + "\n✅ No violations found."
 
     lines = [header]
     for i, row in enumerate(rows, 1):
-        lines.append(f"{i}. 🚛 Unit {row['vehicle_number']} — {row['total']}")
+        lines.append(f"{i}. 🚛 Unit {esc(row['vehicle_number'])} — {row['total']}")
     return "\n".join(lines)
 
 
