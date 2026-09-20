@@ -1,5 +1,8 @@
-aiogram~=2.14
+aiogram==2.25.2
 environs~=8.0.0
-marshmallow~=3.13.0
+marshmallow<4
 asyncpg~=0.29
 aiohttp~=3.9
+# ZoneInfo has no tz database of its own on some slim images; every report and alert
+# timestamp goes through America/New_York, so this is not optional.
+tzdata

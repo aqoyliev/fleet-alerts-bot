@@ -279,7 +279,13 @@ async def admins(request: web.Request) -> web.Response:
 # ── group mutations ─────────────────────────────────────────────────────────────
 
 async def _load_editable_group(request: web.Request) -> tuple[dict | None, web.Response | None]:
-    """Resolve the {tgid} path param to a group the panel may edit, or an error."""
+    """Resolve the {tgid} path param to a group the panel may edit, or an error.
+
+    Callers must test the error with `is not None`, never for truthiness: aiohttp's
+    Response defines __len__, and an empty-body response is therefore falsy — so a
+    plain `if err:` skipped every refusal this function returns and let the handler
+    run on a group of None.
+    """
     tgid = _int_param(request, "tgid")
     if tgid is None:
         return None, _fail("bad_request", "That group id isn't valid.")
@@ -297,7 +303,7 @@ async def _load_editable_group(request: web.Request) -> tuple[dict | None, web.R
 @require_admin
 async def set_enabled(request: web.Request) -> web.Response:
     group, err = await _load_editable_group(request)
-    if err:
+    if err is not None:
         return err
     enabled = bool((await _body(request)).get("enabled"))
     await set_group_enabled(group["telegram_group_id"], enabled)
@@ -316,7 +322,7 @@ async def set_unit(request: web.Request) -> web.Response:
     utils/units.py for the whole argument.
     """
     group, err = await _load_editable_group(request)
-    if err:
+    if err is not None:
         return err
 
     unit = str((await _body(request)).get("unit", "")).strip().lstrip("#").strip()
@@ -363,7 +369,7 @@ async def toggle_event(request: web.Request) -> web.Response:
     response carries the authoritative list the client re-renders from.
     """
     group, err = await _load_editable_group(request)
-    if err:
+    if err is not None:
         return err
 
     body = await _body(request)
@@ -389,7 +395,7 @@ async def toggle_event(request: web.Request) -> web.Response:
 @require_super
 async def delete_group(request: web.Request) -> web.Response:
     group, err = await _load_editable_group(request)
-    if err:
+    if err is not None:
         return err
     if not (await _body(request)).get("confirm"):
         return _fail("confirm_required", "This needs to be confirmed.")
@@ -442,7 +448,7 @@ async def create_admin(request: web.Request) -> web.Response:
 @require_super
 async def update_admin(request: web.Request) -> web.Response:
     target, err = await _load_target_admin(request)
-    if err:
+    if err is not None:
         return err
 
     body = await _body(request)
@@ -476,7 +482,7 @@ async def update_admin(request: web.Request) -> web.Response:
 @require_super
 async def delete_admin_route(request: web.Request) -> web.Response:
     target, err = await _load_target_admin(request)
-    if err:
+    if err is not None:
         return err
     if not (await _body(request)).get("confirm"):
         return _fail("confirm_required", "This needs to be confirmed.")
