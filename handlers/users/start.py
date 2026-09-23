@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 from utils.db_api.users import upsert_user
 from utils.db_api.admins import is_admin
 from utils.tg_text import esc
-from keyboards.default.main_menu import main_menu_keyboard
+from keyboards.default.main_menu import contact_keyboard, main_menu_keyboard
 
 
 def _panel_button() -> types.InlineKeyboardMarkup | None:
@@ -78,7 +78,15 @@ async def bot_start(message: types.Message):
     if not await is_admin(message.from_user.id):
         if config.WEBAPP_URL:
             await _set_menu_button(message.chat.id, to_panel=False)
-        await message.answer("⛔ You don't have access to this bot.")
+        # Not a dead end any more. The panel and the reports stay shut, but the one
+        # thing a driver legitimately wants from this chat — reaching a person — is
+        # right there, and handlers/users/support.py relays whatever they send.
+        await message.answer(
+            "⛔ You don't have access to this bot's reports.\n\n"
+            "Need something? Tap ✉️ <b>Contact Support</b> and your message goes "
+            "straight to the team — they'll answer you here.",
+            reply_markup=contact_keyboard(),
+        )
         return
     if config.WEBAPP_URL:
         await _set_menu_button(message.chat.id, to_panel=True)

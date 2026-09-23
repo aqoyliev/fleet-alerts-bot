@@ -96,3 +96,20 @@ CREATE TABLE IF NOT EXISTS motive_crash_confirmations (
 -- keeps that lookup off the full table.
 CREATE INDEX IF NOT EXISTS motive_crash_confirmations_pending
     ON motive_crash_confirmations (detected_at) WHERE verdict IS NULL;
+
+-- Support relay: which message in a maintainer's DM belongs to which user.
+--
+-- Written when a message is relayed (header and forwarded copy both get a row), read
+-- when the maintainer replies to one of them. Nothing else can supply the answer — a
+-- forwarded message names its author only when that author allows it, and a reply
+-- otherwise has no sender to route back to.
+--
+-- No foreign key to users: whoever wrote in may never have pressed /start, and a message
+-- reaching a human matters more than the bookkeeping around it.
+CREATE TABLE IF NOT EXISTS support_relays (
+    admin_chat_id    BIGINT      NOT NULL,
+    admin_msg_id     BIGINT      NOT NULL,
+    user_telegram_id BIGINT      NOT NULL,
+    created_at       TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (admin_chat_id, admin_msg_id)
+);
