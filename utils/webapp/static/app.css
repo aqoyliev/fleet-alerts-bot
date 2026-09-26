@@ -1,12 +1,15 @@
 /* Admin panel styling.
  *
- * Every colour is a Telegram theme variable with a fallback, and there is not one
+ * Almost every colour is a Telegram theme variable with a fallback, and there is not one
  * `prefers-color-scheme` block in this file. That is deliberate: Telegram publishes the
  * user's actual palette — including custom themes we could never enumerate — as CSS
  * custom properties, so reading from those means light, dark and everything else are all
  * correct without us maintaining a second palette that would drift from the first.
  *
  * app.js maps themeParams onto these names at boot and again on the themeChanged event.
+ *
+ * The exception is the severity tones below, and it is a deliberate one — see the
+ * comment there.
  */
 
 :root {
@@ -22,9 +25,27 @@
   --destructive: var(--tg-theme-destructive-text-color, #e53935);
   --accent:      var(--tg-theme-accent-text-color, var(--link));
 
+  /* The pressed state of every tappable surface. Derived from the text colour so it is
+     a darkening on a light theme and a lightening on a dark one, without this file
+     having to know which it is in. */
+  --press: color-mix(in srgb, var(--text) 9%, transparent);
+
+  /* Severity tones are fixed rather than themed, unlike everything above. The colour of
+     a crash is carrying meaning, not decoration: a theme whose --link happens to be red
+     would otherwise paint routine speeding in the one colour that has to mean "crash".
+     Kept to four, all legible on light and dark backgrounds at the opacities used. */
+  --tone-crash:    #e5484d;
+  --tone-speeding: #e8a33d;
+  --tone-brake:    #ef6c33;
+  --tone-phone:    #9c6ade;
+
   --radius: 12px;
   --gap: 12px;
   --tabbar-h: 58px;
+  /* Measured at boot and re-measured on resize; this is only the value that applies
+     between first paint and that measurement. Day headers stick underneath the topbar,
+     so it has to be a real number rather than a guess that leaves a gap. */
+  --topbar-h: 56px;
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -45,21 +66,55 @@ html, body {
 
 button { font: inherit; color: inherit; }
 
+/* The tap highlight is switched off globally above, which on its own leaves every row in
+   the app feeling dead under the thumb. Everything tappable gets a pressed state back. */
+:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 8px; }
+
+/* Honour a system-level request for less motion: the shimmer and the screen transition
+   are both decoration, and neither carries information. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important; animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+}
+
 /* ── chrome ─────────────────────────────────────────────────────────────────── */
 
 .topbar {
   position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 12px;
   padding: 14px 16px 10px;
   background: var(--bg);
   border-bottom: 1px solid var(--separator);
 }
+.topbar-main { flex: 1 1 auto; min-width: 0; }
 .topbar-title { font-size: 20px; font-weight: 700; }
-.topbar-sub { font-size: 13px; color: var(--hint); margin-top: 2px; }
+.topbar-sub { font-size: 13px; color: var(--hint); margin-top: 2px;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Refresh doubles as the "this screen is being revalidated" indicator: the panel serves
+   what it already has the instant a tab is opened, so without something spinning there
+   is no way to tell a cached number from a fresh one. */
+.icon-btn {
+  flex: 0 0 auto; appearance: none; border: 0; background: none; cursor: pointer;
+  width: 40px; height: 40px; border-radius: 50%; color: var(--hint);
+  display: grid; place-items: center; padding: 0;
+}
+.icon-btn:active { background: var(--press); }
+.icon-btn svg { width: 21px; height: 21px; display: block; }
+.icon-btn.is-busy { color: var(--link); }
+.icon-btn.is-busy svg { animation: spin .9s linear infinite; }
 
 #main {
-  padding: var(--gap) var(--gap) calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 20px);
+  padding: var(--gap) var(--gap) calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 24px);
   min-height: 60vh;
 }
+
+/* Only when the screen itself changes, never on the in-place re-render that follows a
+   toggle — a card that fades in every time you tap a chip reads as a page reload. */
+.screen-enter { animation: enter .2s ease-out; }
+@keyframes enter { from { opacity: 0; transform: translateY(6px); } }
 
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
@@ -74,12 +129,15 @@ button { font: inherit; color: inherit; }
      because the label sits under the icon. */
   min-height: var(--tabbar-h);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 2px; color: var(--hint); cursor: pointer;
+  gap: 3px; color: var(--hint); cursor: pointer;
 }
-.tab-icon { font-size: 20px; line-height: 1; filter: grayscale(1); opacity: .65; }
+/* Line icons drawn in currentColor, not emoji. Emoji ignore the active colour entirely —
+   the selected tab's icon stayed whatever hue the font vendor chose while its label
+   turned blue — and a grayscale filter over the inactive ones made them muddy. */
+.tab svg { width: 25px; height: 25px; display: block; }
 .tab-label { font-size: 11px; }
 .tab.is-active { color: var(--link); }
-.tab.is-active .tab-icon { filter: none; opacity: 1; }
+.tab:active { background: var(--press); }
 
 /* ── blocker / loading ──────────────────────────────────────────────────────── */
 
@@ -107,6 +165,22 @@ button { font: inherit; color: inherit; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Skeletons, not a spinner, for a first load: they occupy the shape the content will
+   occupy, so the screen does not jump when it arrives, and the wait reads as "loading
+   this list" rather than "loading something". */
+.sk { background: var(--secondary); border-radius: 7px; position: relative;
+      overflow: hidden; }
+.sk::after {
+  content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent,
+              color-mix(in srgb, var(--text) 7%, transparent), transparent);
+  animation: shimmer 1.3s infinite;
+}
+@keyframes shimmer { to { transform: translateX(100%); } }
+.sk-line { height: 13px; }
+.sk-line + .sk-line { margin-top: 8px; }
+.sk-sm { height: 10px; }
+
 /* ── building blocks ────────────────────────────────────────────────────────── */
 
 .card {
@@ -120,16 +194,31 @@ button { font: inherit; color: inherit; }
   font-size: 13px; font-weight: 600; text-transform: uppercase;
   letter-spacing: .04em; color: var(--hint); margin-bottom: 10px;
 }
+.card-head { display: flex; align-items: baseline; justify-content: space-between;
+             gap: 10px; margin-bottom: 10px; }
+.card-head .card-title { margin-bottom: 0; }
+.card-head-note { font-size: 12px; color: var(--hint); font-variant-numeric: tabular-nums; }
+/* A card that is also a button still has to be a card: left to itself a button shrinks
+   to its content, which turned the headline into a small box floating on the left. */
+button.card { display: block; width: 100%; font: inherit; color: inherit;
+              cursor: pointer; }
+button.card:active { background: var(--press); }
 
 .btn {
   appearance: none; border: 0; border-radius: 10px;
   background: var(--button); color: var(--button-text);
   padding: 12px 18px; font-weight: 600; cursor: pointer; min-height: 44px;
+  transition: filter .12s, transform .12s;
 }
+.btn:active { filter: brightness(.92); transform: scale(.99); }
 .btn-secondary { background: var(--secondary); color: var(--text); }
 .btn-danger { background: transparent; color: var(--destructive);
               border: 1px solid var(--destructive); }
 .btn-block { display: block; width: 100%; }
+/* A guard renders as a dimmed button that still answers when tapped, rather than a
+   hidden one — see the note on disable() in app.js. */
+.btn.is-guarded { opacity: .45; }
+.btn.is-guarded:active { filter: none; transform: none; }
 
 .segmented {
   display: flex; background: var(--secondary);
@@ -138,58 +227,97 @@ button { font: inherit; color: inherit; }
 .segmented button {
   flex: 1; appearance: none; background: none; border: 0; cursor: pointer;
   padding: 9px 4px; border-radius: 8px; font-size: 14px; color: var(--hint);
-  min-height: 38px;
+  min-height: 38px; transition: background .15s, color .15s;
 }
 .segmented button.is-active {
   background: var(--bg); color: var(--text); font-weight: 600;
   box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
 }
 
+/* Confirmation that does not need dismissing. Telegram's showAlert is a modal with an OK
+   button, which is the right weight for a failure and much too much for "Saved". */
+.toast {
+  position: fixed; z-index: 40; left: 50%;
+  bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 16px);
+  transform: translate(-50%, 10px); opacity: 0;
+  max-width: calc(100% - 32px);
+  padding: 10px 16px; border-radius: 20px;
+  background: color-mix(in srgb, var(--text) 82%, transparent);
+  color: var(--bg); font-size: 14px; font-weight: 500;
+  pointer-events: none; transition: opacity .18s, transform .18s;
+}
+.toast.is-on { opacity: 1; transform: translate(-50%, 0); }
+
 /* ── dashboard ──────────────────────────────────────────────────────────────── */
 
-.headline { text-align: center; padding: 6px 0 2px; }
-.headline-number { font-size: 52px; font-weight: 700; line-height: 1; }
+.headline { text-align: center; padding: 4px 0 2px; }
+.headline-number { font-size: 46px; font-weight: 700; line-height: 1.05;
+                   font-variant-numeric: tabular-nums; }
 .headline-label { color: var(--hint); font-size: 14px; margin-top: 6px; }
 
 .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
          margin-bottom: var(--gap); }
+/* Buttons, not divs: each one is a shortcut into the list it counts, which is the
+   question a dispatcher asks immediately after reading the number. */
 .tile {
-  background: var(--section); border: 1px solid var(--separator);
-  border-radius: var(--radius); padding: 12px 8px; text-align: center;
+  appearance: none; background: var(--section); border: 1px solid var(--separator);
+  border-radius: var(--radius); padding: 12px 8px; text-align: center; cursor: pointer;
+  color: inherit; font: inherit; display: block; width: 100%;
 }
-.tile-value { font-size: 22px; font-weight: 700; }
+.tile:active { background: var(--press); }
+.tile-value { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .tile-label { font-size: 11px; color: var(--hint); margin-top: 3px; }
+/* Only when there are any. A red 0 reads as a problem, and no crashes is the opposite
+   of a problem — the class is added in app.js only when the count is above zero. */
+.tile-alarm .tile-value { color: var(--tone-crash); }
 
 /* A bar row: label on the left, proportional fill behind, count on the right. Built
    from divs rather than a chart library — the whole visual is "which bar is longest",
    and a canvas chart would not inherit any of the theme variables above. */
-.bar-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; }
+.bar-row { display: flex; align-items: center; gap: 10px; padding: 8px 6px;
+           margin: 0 -6px; border-radius: 8px; }
 .bar-row + .bar-row { border-top: 1px solid var(--separator); }
-.bar-name { flex: 0 0 auto; font-size: 14px; display: flex; align-items: center; gap: 6px; }
+button.bar-row { appearance: none; background: none; border: 0; width: calc(100% + 12px);
+                 cursor: pointer; color: inherit; font: inherit; text-align: left; }
+button.bar-row:active { background: var(--press); }
+/* A fixed column rather than one sized to the label: with the natural width, "Speeding"
+   and "Forward Collision" started their tracks at different x offsets and the bars could
+   no longer be compared by eye, which is the only thing this chart is for. */
+.bar-name { flex: 0 0 38%; min-width: 0; font-size: 14px; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis; }
 /* display:block on both — these are spans, and width/height do nothing on an inline box,
    which renders the whole bar as an invisible hairline. */
 .bar-track { display: block; flex: 1 1 auto; height: 6px; background: var(--secondary);
              border-radius: 3px; overflow: hidden; }
-.bar-fill { display: block; height: 100%; background: var(--link); border-radius: 3px; }
+.bar-fill { display: block; height: 100%; background: var(--link); border-radius: 3px;
+            transition: width .3s ease-out; }
 .bar-count { flex: 0 0 auto; font-variant-numeric: tabular-nums; font-weight: 600;
              font-size: 14px; min-width: 2ch; text-align: right; }
 
-.trend { display: flex; align-items: flex-end; gap: 3px; height: 74px; margin-top: 4px; }
+.trend { display: flex; align-items: flex-end; gap: 3px; height: 78px; margin-top: 4px; }
 .trend-col { flex: 1; display: flex; flex-direction: column; align-items: center;
-             gap: 4px; justify-content: flex-end; height: 100%; }
+             gap: 4px; justify-content: flex-end; height: 100%; cursor: pointer;
+             appearance: none; background: none; border: 0; padding: 0; color: inherit; }
 .trend-bar { width: 100%; background: var(--link); border-radius: 3px 3px 0 0;
-             min-height: 2px; opacity: .85; }
-.trend-day { font-size: 9px; color: var(--hint); }
+             min-height: 2px; opacity: .5; transition: opacity .15s; }
+.trend-col.is-on .trend-bar, .trend-col:active .trend-bar { opacity: 1; }
+.trend-day { font-size: 9px; color: var(--hint); height: 11px; }
+/* The readout replaces the title attribute the columns used to carry: a tooltip needs a
+   hover, and there is no hover on a phone — the value was simply unreachable. */
+.trend-read { font-size: 12px; color: var(--hint); min-height: 17px; margin-top: 8px;
+              text-align: center; }
 
 /* Rendered only when something is muted, which is most days nothing. A group that looks
    configured and is silent is the failure this whole codebase is built to avoid, so when
    it happens it gets a loud card rather than a subtle badge three taps away. */
 .warn-card {
+  appearance: none; width: 100%; text-align: left; font: inherit; color: inherit;
   background: color-mix(in srgb, var(--destructive) 10%, transparent);
   border: 1px solid color-mix(in srgb, var(--destructive) 40%, transparent);
   border-radius: var(--radius); padding: 13px 14px; margin-bottom: var(--gap);
   cursor: pointer; display: flex; align-items: center; gap: 10px;
 }
+.warn-card:active { background: color-mix(in srgb, var(--destructive) 18%, transparent); }
 .warn-card b { color: var(--destructive); }
 .warn-card small { display: block; color: var(--hint); margin-top: 2px; font-size: 12px; }
 
@@ -199,20 +327,34 @@ button { font: inherit; color: inherit; }
         border-radius: var(--radius); overflow: hidden; }
 .row {
   display: flex; align-items: center; gap: 12px;
-  padding: 12px 14px; min-height: 56px; cursor: pointer; background: none;
-  border: 0; width: 100%; text-align: left;
+  padding: 10px 14px; min-height: 58px; background: none;
+  border: 0; width: 100%; text-align: left; color: inherit; font: inherit;
 }
 .row + .row { border-top: 1px solid var(--separator); }
-.row-main { flex: 1 1 auto; min-width: 0; }
+/* A row that carries its own controls cannot itself be a button — a button inside a
+   button is not valid markup and Telegram's WebView does swallow the inner tap. The
+   tappable part is .row-main instead. */
+.row-main { flex: 1 1 auto; min-width: 0; appearance: none; background: none; border: 0;
+            padding: 0; text-align: left; color: inherit; font: inherit; }
+button.row:active, button.row-main:active { background: var(--press); }
+button.row-main:active { border-radius: 8px; }
 .row-title { font-size: 15px; font-weight: 500; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
 .row-sub { font-size: 12.5px; color: var(--hint); margin-top: 2px;
            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row-side { flex: 0 0 auto; color: var(--hint); font-size: 13px; text-align: right; }
+/* Badges sit under the title rather than in front of it. Inline, they ate the width a
+   long group name needed and every such row truncated to "Unit 1422 - a rather long…". */
+.row-meta { display: flex; align-items: center; gap: 6px; margin-top: 4px; min-width: 0; }
+.row-meta .row-sub { margin-top: 0; }
+.row-side { flex: 0 0 auto; color: var(--hint); font-size: 13px; text-align: right;
+            font-variant-numeric: tabular-nums; }
 .row-chevron { flex: 0 0 auto; color: var(--hint); opacity: .5; }
 
+.list-head { display: flex; align-items: baseline; justify-content: space-between;
+             gap: 10px; padding: 2px 4px 8px; font-size: 13px; color: var(--hint); }
+
 .badge {
-  display: inline-block; padding: 2px 7px; border-radius: 6px;
+  display: inline-block; padding: 2px 7px; border-radius: 6px; flex: 0 0 auto;
   font-size: 11px; font-weight: 600; background: var(--secondary); color: var(--hint);
   vertical-align: middle;
 }
@@ -221,6 +363,30 @@ button { font: inherit; color: inherit; }
 .badge-muted { background: color-mix(in srgb, var(--destructive) 14%, transparent);
                color: var(--destructive); }
 .badge-super { background: color-mix(in srgb, #f0a500 22%, transparent); color: #b57c00; }
+
+/* ── alert feed ─────────────────────────────────────────────────────────────── */
+
+/* The tone is set per row from the event type. Without it the feed is one uniform column
+   in which a crash and a phone-use look exactly alike, and the only way to find the
+   crash is to read every line. */
+.alert-row { --tone: var(--link); }
+.alert-row[data-tone="crash"]    { --tone: var(--tone-crash); }
+.alert-row[data-tone="speeding"] { --tone: var(--tone-speeding); }
+.alert-row[data-tone="brake"]    { --tone: var(--tone-brake); }
+.alert-row[data-tone="phone"]    { --tone: var(--tone-phone); }
+.alert-icon {
+  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 10px;
+  display: grid; place-items: center; font-size: 17px; line-height: 1;
+  background: color-mix(in srgb, var(--tone) 16%, transparent);
+}
+.alert-unit { color: var(--tone); font-weight: 600; }
+.alert-row[data-tone="crash"] .row-title { color: var(--tone-crash); font-weight: 600; }
+
+.day-header {
+  position: sticky; top: var(--topbar-h); z-index: 5;
+  font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--hint); background: var(--bg); padding: 12px 2px 6px;
+}
 
 /* ── switch ─────────────────────────────────────────────────────────────────── */
 
@@ -234,6 +400,7 @@ button { font: inherit; color: inherit; }
 }
 .switch.is-on { background: #34c759; }
 .switch.is-on::after { transform: translateX(20px); }
+.switch:disabled { opacity: .5; }
 
 /* ── chips ──────────────────────────────────────────────────────────────────── */
 
@@ -241,12 +408,16 @@ button { font: inherit; color: inherit; }
 .chip {
   appearance: none; border: 1px solid var(--separator); background: var(--secondary);
   color: var(--hint); border-radius: 16px; padding: 7px 12px; font-size: 13px;
-  cursor: pointer; min-height: 34px;
+  cursor: pointer; min-height: 34px; transition: background .14s, color .14s,
+  border-color .14s;
 }
+.chip:active { background: var(--press); }
 .chip.is-on { background: var(--link); border-color: var(--link); color: #fff; font-weight: 600; }
+.chip.is-static { cursor: default; }
 
 .filter-bar { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 10px;
-              margin-bottom: 2px; scrollbar-width: none; }
+              margin-bottom: 2px; scrollbar-width: none;
+              -webkit-overflow-scrolling: touch; }
 .filter-bar::-webkit-scrollbar { display: none; }
 .filter-bar .chip { white-space: nowrap; flex: 0 0 auto; }
 
@@ -258,12 +429,30 @@ button { font: inherit; color: inherit; }
 .field-label { font-size: 15px; }
 .field-value { color: var(--hint); font-size: 14px; text-align: right;
                overflow: hidden; text-overflow: ellipsis; }
+.field-value.is-on { color: #34c759; font-weight: 600; }
+.field-value.is-off { color: var(--destructive); font-weight: 600; }
 
 .input {
   width: 100%; padding: 12px; border-radius: 10px; min-height: 44px;
   border: 1px solid var(--separator); background: var(--bg); color: var(--text);
   font: inherit;
 }
+.input:focus { outline: none; border-color: var(--link); }
+
+/* The search field carries its own icon and a clear button; on a list this long, having
+   to backspace a query out one character at a time is the difference between using the
+   filter and not using it. */
+.search-wrap { position: relative; margin-bottom: 12px; }
+.search-wrap .input { padding-left: 38px; padding-right: 40px; }
+.search-icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+               color: var(--hint); pointer-events: none; display: block; }
+.search-icon svg { width: 17px; height: 17px; display: block; }
+.search-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+                appearance: none; border: 0; background: none; color: var(--hint);
+                width: 32px; height: 32px; border-radius: 50%; cursor: pointer;
+                font-size: 17px; line-height: 1; padding: 0; }
+.search-clear:active { background: var(--press); }
+
 /* appearance:none so the control matches the theme in dark mode, where a native select
    renders its own light chrome on some WebViews. That removes the dropdown arrow too, so
    the wrapper draws one back — without it the field reads as a text box and nobody taps
@@ -275,12 +464,8 @@ button { font: inherit; color: inherit; }
 }
 select.input { appearance: none; padding-right: 34px; }
 
-.day-header {
-  font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
-  color: var(--hint); padding: 14px 2px 6px;
-}
-
 .empty { text-align: center; color: var(--hint); padding: 40px 20px; font-size: 15px; }
+.empty-emoji { font-size: 34px; display: block; margin-bottom: 10px; }
 .note { font-size: 13px; color: var(--hint); margin-top: 8px; line-height: 1.45; }
 .note-warn { color: var(--destructive); }
 .danger-zone { margin-top: 28px; }

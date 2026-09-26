@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+  <!-- Tells the WebView that both palettes are handled, so form controls and scrollbars
+       render dark on a dark theme instead of flashing their light defaults. -->
+  <meta name="color-scheme" content="light dark">
   <title>Admin Panel</title>
   <!-- Telegram's bridge. The one external resource on this page, and it can't be
        vendored: it is how the WebApp object gets wired to the client. -->
@@ -29,8 +32,18 @@
 
 <div id="app" hidden>
   <header class="topbar">
-    <div class="topbar-title" id="screen-title">Dashboard</div>
-    <div class="topbar-sub" id="company-name"></div>
+    <div class="topbar-main">
+      <div class="topbar-title" id="screen-title">Dashboard</div>
+      <div class="topbar-sub" id="company-name"></div>
+    </div>
+    <!-- Also the revalidation indicator: a cached screen paints instantly, and this is
+         what says the numbers on it are still being checked. -->
+    <button class="icon-btn" id="refresh" aria-label="Refresh">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M20.5 12a8.5 8.5 0 1 1-2.5-6"/><path d="M20.5 4v5h-5"/>
+      </svg>
+    </button>
   </header>
 
   <main id="main">
@@ -38,18 +51,40 @@
     <div class="loading" id="loading"><span class="spinner"></span></div>
   </main>
 
+  <!-- Line icons in currentColor rather than emoji, so the selected tab's icon takes the
+       active colour with its label. -->
   <nav class="tabbar" id="tabbar">
-    <button class="tab is-active" data-tab="dashboard">
-      <span class="tab-icon">📊</span><span class="tab-label">Dashboard</span>
+    <button class="tab is-active" data-tab="dashboard" aria-label="Dashboard">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" aria-hidden="true">
+        <path d="M6 20v-6M12 20V5M18 20v-9"/>
+      </svg>
+      <span class="tab-label">Dashboard</span>
     </button>
-    <button class="tab" data-tab="groups">
-      <span class="tab-icon">👥</span><span class="tab-label">Groups</span>
+    <button class="tab" data-tab="groups" aria-label="Groups">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M15 19v-1.4a3.6 3.6 0 0 0-3.6-3.6H6.6A3.6 3.6 0 0 0 3 17.6V19"/>
+        <circle cx="9" cy="8" r="3.2"/>
+        <path d="M21 19v-1.4a3.6 3.6 0 0 0-2.7-3.5M15.6 5.2a3.2 3.2 0 0 1 0 5.6"/>
+      </svg>
+      <span class="tab-label">Groups</span>
     </button>
-    <button class="tab" data-tab="alerts">
-      <span class="tab-icon">🔔</span><span class="tab-label">Alerts</span>
+    <button class="tab" data-tab="alerts" aria-label="Alerts">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 8.6a6 6 0 1 0-12 0c0 5.1-2 6.6-2 6.6h16s-2-1.5-2-6.6Z"/>
+        <path d="M10.3 19a2 2 0 0 0 3.4 0"/>
+      </svg>
+      <span class="tab-label">Alerts</span>
     </button>
-    <button class="tab" data-tab="admins">
-      <span class="tab-icon">⚙️</span><span class="tab-label">Admins</span>
+    <button class="tab" data-tab="admins" aria-label="Admins">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 3 5 6v5.4c0 4 3 7.4 7 8.6 4-1.2 7-4.6 7-8.6V6l-7-3Z"/>
+        <path d="m9.2 12 2 2 3.6-3.9"/>
+      </svg>
+      <span class="tab-label">Admins</span>
     </button>
   </nav>
 </div>
