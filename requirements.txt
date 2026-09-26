@@ -2,7 +2,11 @@ aiogram==2.25.2
 environs~=8.0.0
 marshmallow<4
 asyncpg~=0.29
-aiohttp~=3.9
+# aiogram 2.25.2 requires aiohttp>=3.8.0,<3.9.0, so the ~=3.9 pin that used to sit here
+# contradicted it outright: pip could not resolve this file at all and every build died at
+# install. It went unseen because a working environment already had 3.8.6 from Pipfile.lock
+# — the failure only appears on a clean image, which is to say on every deploy.
+aiohttp~=3.8.6
 # ZoneInfo has no tz database of its own on some slim images; every report and alert
 # timestamp goes through America/New_York, so this is not optional.
 tzdata
