@@ -737,8 +737,12 @@ async function groupsScreen(opts) {
           chips.appendChild(el(`<span class="chip is-static">${esc(u.name)}</span>`));
         });
         card.appendChild(chips);
+        // Adding the bot is the one step that cannot happen here — Telegram has no way
+        // for a bot to put itself in a chat. Everything after it does, so the note used
+        // to send people to /setunit in the group for a job this screen already does.
         card.appendChild(el(`<div class="note">These units have no Telegram group receiving
-          their alerts. Add the bot to that unit's group chat, then run /setunit there.</div>`));
+          their alerts. Add the bot to that unit's group chat — it appears here straight
+          away, and you can set its unit from its page.</div>`));
         listWrap.appendChild(card);
       }
     }
