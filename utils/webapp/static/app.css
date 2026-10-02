@@ -234,6 +234,19 @@ button.card:active { background: var(--press); }
   box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
 }
 
+/* The Groups filter. The count sits above the label because the number is what is being
+   scanned for — "is anything not set up" is the question this control exists to answer
+   without reading a single row. Four labels have to survive a 375px phone, so they are
+   one short word each and the type is small enough to not wrap. */
+.segmented-stack button { padding: 6px 2px; min-height: 48px; line-height: 1.2; }
+.seg-count { display: block; font-size: 16px; font-weight: 600;
+  font-variant-numeric: tabular-nums; }
+.seg-label { display: block; font-size: 10.5px; margin-top: 1px; opacity: .9;
+  white-space: nowrap; }
+/* A count of zero is not news on this screen — every unit paired, nothing waiting — so
+   it recedes instead of competing with the one that isn't. */
+.segmented button:not(.is-active) .seg-count.is-zero { opacity: .45; }
+
 /* Confirmation that does not need dismissing. Telegram's showAlert is a modal with an OK
    button, which is the right weight for a failure and much too much for "Saved". */
 .toast {

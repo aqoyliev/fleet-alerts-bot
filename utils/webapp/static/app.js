@@ -26,6 +26,7 @@ const state = {
   detail: null,        // {type, ...} when a detail view is pushed over a tab
   period: 'today',
   groupsQuery: '',
+  groupsFilter: 'all',   // which of the four Groups sections is showing
   alertFilter: { type: '', unit: '' },
   alertItems: [],
   alertNext: null,
@@ -551,7 +552,14 @@ async function dashboardScreen(opts) {
         <div><b>${n} group${n > 1 ? 's are' : ' is'} muted</b>
           <small>${esc(data.groups.muted_titles.join(', '))}</small></div>
       </button>`);
-    card.onclick = () => { haptic(); state.groupsQuery = ''; selectTab('groups'); };
+    card.onclick = () => {
+      haptic();
+      state.groupsQuery = '';
+      // Muted groups are not in the Active section by definition, so sending someone
+      // there from "3 groups are muted" would show them an empty list.
+      state.groupsFilter = 'all';
+      selectTab('groups');
+    };
     wrap.appendChild(card);
   }
 
@@ -667,9 +675,63 @@ function trendCard(byDay) {
 
 // ── screen 2: groups ────────────────────────────────────────────────────────────
 
+/* The four ways to look at this screen.
+ *
+ * There are two entirely different ways a truck can be uncovered, and the screen used to
+ * show them as the same kind of thing at two ends of one scroll: a group carrying a "no
+ * unit" badge somewhere in the list, and a card of leftover roster units underneath it.
+ * Neither was countable at a glance, which is the only form the question "is my fleet
+ * covered" is ever actually asked in. */
+const GROUP_FILTERS = [
+  ['all', 'All'],
+  ['active', 'Active'],
+  ['unpaired', 'Unpaired'],
+  ['unconnected', 'No group'],
+];
+
+/** Registered because the bot was added to the chat, but nobody has said which truck it
+ *  belongs to — so it receives nothing until someone picks its unit. */
+function isUnpaired(g) { return !g.is_main && !g.vehicle_number; }
+
+/** Receiving alerts right now: pointed at a truck (or the all-fleet group) and not muted.
+ *  A muted group is deliberately not here — it belongs to All, next to the muted count. */
+function isActive(g) { return !isUnpaired(g) && g.enabled; }
+
 async function groupsScreen(opts) {
   const [groups, roster] = await screenData(['/groups', '/units'], opts);
   const wrap = el('<div></div>');
+
+  const strayUnits = roster.available ? roster.units.filter((u) => !u.linked) : [];
+  const counts = {
+    all: groups.length,
+    active: groups.filter(isActive).length,
+    unpaired: groups.filter(isUnpaired).length,
+    unconnected: strayUnits.length,
+  };
+
+  const seg = el('<div class="segmented segmented-stack" role="tablist"></div>');
+  GROUP_FILTERS.forEach(([key, label]) => {
+    const on = key === state.groupsFilter;
+    const b = el(`<button${on ? ' class="is-active"' : ''} role="tab"
+        aria-selected="${on}">
+        <span class="seg-count${counts[key] ? '' : ' is-zero'}">${num(counts[key])}</span>
+        <span class="seg-label">${label}</span></button>`);
+    b.onclick = () => {
+      if (state.groupsFilter === key) return;
+      hapticSelect();
+      state.groupsFilter = key;
+      // Repainting the buttons rather than the screen keeps the search text and the
+      // scroll position, which a re-render would both throw away.
+      [...seg.children].forEach((child, i) => {
+        const active = GROUP_FILTERS[i][0] === key;
+        child.classList.toggle('is-active', active);
+        child.setAttribute('aria-selected', String(active));
+      });
+      renderList(search.value);
+    };
+    seg.appendChild(b);
+  });
+  wrap.appendChild(seg);
 
   const searchWrap = el(`<div class="search-wrap">
       <span class="search-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -689,62 +751,111 @@ async function groupsScreen(opts) {
   const listWrap = el('<div></div>');
   wrap.appendChild(listWrap);
 
+  function rowsOf(list) {
+    const rows = el('<div class="rows"></div>');
+    list.forEach((g) => rows.appendChild(groupRow(g)));
+    return rows;
+  }
+
+  /** The empty state says what is empty. "No groups match" is wrong for a section that is
+   *  empty because everything is fine, and "nothing here" is no use in either case. */
+  function emptyFor(tab, query) {
+    if (query) {
+      return el(`<div class="empty"><span class="empty-emoji">🔍</span>
+        No groups match "${esc(query)}".</div>`);
+    }
+    if (tab === 'active') {
+      return el(`<div class="empty"><span class="empty-emoji">🔕</span>
+        No group is receiving alerts.<br>Give one a unit, or unmute it.</div>`);
+    }
+    if (tab === 'unpaired') {
+      return el(`<div class="empty"><span class="empty-emoji">✅</span>
+        Every group has a unit.</div>`);
+    }
+    return el(`<div class="empty"><span class="empty-emoji">👥</span>
+      No groups registered yet.<br>Add the bot to a truck's group to get started.</div>`);
+  }
+
+  /** Samsara units with no Telegram group at all — the coverage gap no per-group list can
+   *  show, because a missing group has nowhere in one to appear. */
+  function renderUnconnected(query) {
+    if (!roster.available) {
+      head.innerHTML = '';
+      listWrap.appendChild(el(`<div class="empty"><span class="empty-emoji">⚠️</span>
+        ${esc(roster.reason || 'The unit roster is unavailable.')}</div>`));
+      return;
+    }
+    const q = query.trim().toLowerCase();
+    const units = strayUnits.filter((u) => !q || u.name.toLowerCase().includes(q));
+    head.innerHTML = `<span>${num(units.length)} unit${units.length === 1 ? '' : 's'}</span>`;
+    if (!units.length) {
+      listWrap.appendChild(el(`<div class="empty"><span class="empty-emoji">✅</span>
+        ${query ? `No units match "${esc(query)}".` : 'Every unit has a group.'}</div>`));
+      return;
+    }
+    const card = el('<div class="card"></div>');
+    const chips = el('<div class="chips"></div>');
+    units.forEach((u) => {
+      chips.appendChild(el(`<span class="chip is-static">${esc(u.name)}</span>`));
+    });
+    card.appendChild(chips);
+    // Adding the bot is the one step that cannot happen here — Telegram has no way for a
+    // bot to put itself in a chat. Everything after it does.
+    card.appendChild(el(`<div class="note">These units have no Telegram group receiving
+      their alerts. Add the bot to that unit's group chat — it appears here straight
+      away, and you can set its unit from its page.</div>`));
+    listWrap.appendChild(card);
+  }
+
   function renderList(query) {
     listWrap.innerHTML = '';
     clear.hidden = !query;
+    const tab = state.groupsFilter;
+
+    if (tab === 'unconnected') {
+      renderUnconnected(query);
+      return;
+    }
+
     const q = query.trim().toLowerCase();
     const matches = (g) => !q
       || (g.title || '').toLowerCase().includes(q)
       || (g.vehicle_number || '').toLowerCase().includes(q);
-    const filtered = groups.filter(matches);
-    const muted = groups.filter((g) => !g.enabled).length;
+
+    const inTab = groups.filter((g) => (
+      tab === 'active' ? isActive(g) : tab === 'unpaired' ? isUnpaired(g) : true));
+    const filtered = inTab.filter(matches);
+    const muted = inTab.filter((g) => !g.enabled).length;
 
     // The noun agrees with the last number in the phrase — "1 of 6 groups", not
     // "1 of 6 group".
-    const shown = q ? `${num(filtered.length)} of ${num(groups.length)}` : num(filtered.length);
-    const counted = q ? groups.length : filtered.length;
+    const shown = q ? `${num(filtered.length)} of ${num(inTab.length)}` : num(filtered.length);
+    const counted = q ? inTab.length : filtered.length;
     head.innerHTML = `<span>${shown} group${counted === 1 ? '' : 's'}</span>`
       + (muted ? `<span style="color:var(--destructive)">${num(muted)} muted</span>` : '');
 
-    if (!groups.length) {
-      listWrap.appendChild(el(`<div class="empty"><span class="empty-emoji">👥</span>
-        No groups registered yet.<br>Add the bot to a truck's group to get started.</div>`));
-    } else if (!filtered.length) {
-      listWrap.appendChild(el(`<div class="empty"><span class="empty-emoji">🔍</span>
-        No groups match "${esc(query)}".</div>`));
+    if (!filtered.length) {
+      listWrap.appendChild(emptyFor(tab, query));
+    } else if (tab === 'all') {
+      // Two lists, not one. A group with a unit is working and a group without one is a
+      // job someone has to finish, and threading the second kind through the first as a
+      // row with a different badge is how twenty of them go unnoticed.
+      const paired = filtered.filter((g) => !isUnpaired(g));
+      const waiting = filtered.filter(isUnpaired);
+      if (paired.length) listWrap.appendChild(rowsOf(paired));
+      if (waiting.length) {
+        listWrap.appendChild(el(`<div class="list-head" style="margin-top:16px">
+            <span>Needs a unit</span>
+            <span>${num(waiting.length)}</span></div>`));
+        listWrap.appendChild(rowsOf(waiting));
+      }
     } else {
-      const rows = el('<div class="rows"></div>');
-      filtered.forEach((g) => rows.appendChild(groupRow(g)));
-      listWrap.appendChild(rows);
+      listWrap.appendChild(rowsOf(filtered));
     }
 
-    if (state.boot.crash_group_id) {
+    if (tab === 'all' && state.boot.crash_group_id) {
       listWrap.appendChild(el(`<div class="note">💥 Crash alerts go to a dedicated chat
         configured in the deployment settings, not listed here.</div>`));
-    }
-
-    // Samsara units with no group at all — the coverage gap no per-group screen can show,
-    // since a missing group has nowhere in the groups list to appear.
-    if (roster.available) {
-      const unconnected = roster.units.filter((u) => !u.linked
-        && (!q || u.name.toLowerCase().includes(q)));
-      if (unconnected.length) {
-        const card = el(`<div class="card">
-            <div class="card-title">Not connected to a group (${unconnected.length})</div>
-          </div>`);
-        const chips = el('<div class="chips"></div>');
-        unconnected.forEach((u) => {
-          chips.appendChild(el(`<span class="chip is-static">${esc(u.name)}</span>`));
-        });
-        card.appendChild(chips);
-        // Adding the bot is the one step that cannot happen here — Telegram has no way
-        // for a bot to put itself in a chat. Everything after it does, so the note used
-        // to send people to /setunit in the group for a job this screen already does.
-        card.appendChild(el(`<div class="note">These units have no Telegram group receiving
-          their alerts. Add the bot to that unit's group chat — it appears here straight
-          away, and you can set its unit from its page.</div>`));
-        listWrap.appendChild(card);
-      }
     }
   }
 
