@@ -32,14 +32,14 @@ class _Bot:
 
 
 @pytest.fixture
-def muted(monkeypatch):
-    """Records which groups got muted, standing in for the DB write."""
-    calls: list[tuple[int, bool]] = []
+def retired(monkeypatch):
+    """Records which groups were marked as left, standing in for the DB write."""
+    calls: list[int] = []
 
-    async def _set(gid, enabled):
-        calls.append((gid, enabled))
+    async def _mark(gid):
+        calls.append(gid)
 
-    monkeypatch.setattr(wh, "set_group_enabled", _set)
+    monkeypatch.setattr(wh, "mark_group_left", _mark)
     monkeypatch.setattr(wh.asyncio, "sleep", _no_sleep)
     return calls
 
@@ -50,40 +50,40 @@ async def _no_sleep(_seconds):
 
 # ── permanent errors are not retried ───────────────────────────────────────────
 
-async def test_kicked_group_is_not_retried_and_gets_muted(muted):
+async def test_kicked_group_is_not_retried_and_is_retired(retired):
     bot = _Bot(exc=BotKicked("bot was kicked from the group chat"))
     await wh._send_with_retry(bot, -100123, "alert", media=[b"jpg"], is_video=False)
 
     assert bot.photo_calls == [-100123]      # one attempt, not three
     assert bot.message_calls == []           # no pointless text fallback
-    assert muted == [(-100123, False)]       # group muted so it stops being targeted
+    assert retired == [-100123]              # out of routing and out of the panel
 
 
-async def test_chat_not_found_is_not_retried_but_is_left_unmuted(muted):
-    """Nothing would ever un-mute a group silenced by ChatNotFound — there is no
-    re-add event to recover from it — so the send is skipped without muting."""
+async def test_chat_not_found_is_not_retried_but_is_left_alone(retired):
+    """Nothing would ever bring back a group retired on ChatNotFound — there is no re-add
+    event to recover from it — so the send is skipped and the row is left as it is."""
     bot = _Bot(exc=ChatNotFound("chat not found"))
     await wh._send_with_retry(bot, -100777, "alert")
 
     assert bot.message_calls == [-100777]   # one attempt, not three
-    assert muted == []
+    assert retired == []
 
 
-async def test_blocked_dm_is_skipped_without_touching_groups(muted):
-    """A DM (positive id) is never muted — the admin keeps access and can unblock."""
+async def test_blocked_dm_is_skipped_without_touching_groups(retired):
+    """A DM (positive id) is never retired — the admin keeps access and can unblock."""
     bot = _Bot(exc=BotKicked("blocked"))
     await wh._send_with_retry(bot, 555, "alert")
 
     assert bot.message_calls == [555]
-    assert muted == []
+    assert retired == []
 
 
-async def test_transient_error_still_retries(muted):
+async def test_transient_error_still_retries(retired):
     bot = _Bot(exc=NetworkError("boom"))
     await wh._send_with_retry(bot, 555, "alert", retries=3)
 
     assert bot.message_calls == [555, 555, 555]   # transient errors keep their retries
-    assert muted == []
+    assert retired == []
 
 
 # ── one dead chat must not silence the rest ────────────────────────────────────
@@ -103,11 +103,12 @@ async def test_send_all_continues_past_a_failing_chat(monkeypatch):
     assert delivered == [-100111, 555]
 
 
-# ── re-adding the bot restores a muted group ───────────────────────────────────
+# ── re-adding the bot restores a retired group ─────────────────────────────────
 
-async def test_register_group_clears_the_mute(monkeypatch):
-    """The auto-mute is only safe because re-registration undoes it: nobody unmutes a
-    group by hand, so putting the bot back has to set enabled back to TRUE."""
+async def test_register_group_clears_the_mute_and_the_departure(monkeypatch):
+    """Retiring a group is only safe because re-registration undoes it: nobody unmutes a
+    group by hand, so putting the bot back has to set enabled back to TRUE — and clear
+    left_at, or the group would stay invisible in the panel it has to be configured in."""
     import utils.db_api.groups as groups
     captured = {}
 
@@ -120,3 +121,4 @@ async def test_register_group_clears_the_mute(monkeypatch):
     q = " ".join(captured["query"].split())
     assert "ON CONFLICT (telegram_group_id) DO UPDATE" in q
     assert "enabled = TRUE" in q
+    assert "left_at = NULL" in q

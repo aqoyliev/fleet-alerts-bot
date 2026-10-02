@@ -60,6 +60,11 @@ CREATE TABLE IF NOT EXISTS alert_groups (
     vehicle_number    VARCHAR(50),
     is_main           BOOLEAN,
     enabled           BOOLEAN     DEFAULT TRUE,
+    -- When the bot was removed from the chat; NULL while it is still in it. The row is
+    -- kept rather than deleted so that putting the bot back restores the group's unit and
+    -- its event filter instead of asking for them again, but a chat the bot is not in has
+    -- no business in the panel: there is nothing to configure and nothing it can receive.
+    left_at           TIMESTAMPTZ,
     created_at        TIMESTAMPTZ DEFAULT NOW()
 );
 

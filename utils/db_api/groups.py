@@ -99,7 +99,8 @@ async def register_group(telegram_group_id: int, title: str | None,
             SET title = EXCLUDED.title,
                 vehicle_number = EXCLUDED.vehicle_number,
                 is_main = EXCLUDED.is_main,
-                enabled = TRUE
+                enabled = TRUE,
+                left_at = NULL
         """,
         telegram_group_id, title, vehicle_number, is_main,
     )
@@ -125,7 +126,8 @@ async def register_unassigned_group(telegram_group_id: int, title: str | None) -
         VALUES ($1, $2, NULL, FALSE)
         ON CONFLICT (telegram_group_id) DO UPDATE
             SET title = EXCLUDED.title,
-                enabled = TRUE
+                enabled = TRUE,
+                left_at = NULL
         """,
         telegram_group_id, title,
     )
@@ -148,6 +150,26 @@ async def set_group_enabled(telegram_group_id: int, enabled: bool) -> None:
     await db.execute(
         "UPDATE alert_groups SET enabled = $2 WHERE telegram_group_id = $1",
         telegram_group_id, enabled,
+    )
+
+
+async def mark_group_left(telegram_group_id: int) -> None:
+    """Record that the bot is no longer in this chat: hide it from the panel and stop
+    anything being addressed to it.
+
+    Not a delete. The row holds the group's unit and its event filter, and someone who
+    removes the bot for an afternoon and puts it back should not have to set those again —
+    register_group and register_unassigned_group both clear left_at, so re-adding the bot
+    restores the group exactly as it was.
+
+    enabled is set alongside because that is the flag every routing query already reads;
+    left_at is what the panel reads. One says "do not post here", the other says "do not
+    offer this to configure", and a chat the bot has been thrown out of is both.
+    """
+    await db.execute(
+        "UPDATE alert_groups SET left_at = NOW(), enabled = FALSE "
+        "WHERE telegram_group_id = $1",
+        telegram_group_id,
     )
 
 
@@ -197,6 +219,7 @@ async def get_groups_overview() -> list[dict]:
                ARRAY(SELECT t.event_type FROM group_event_types t
                      WHERE t.group_id = g.id ORDER BY t.event_type) AS event_types
         FROM alert_groups g
+        WHERE g.left_at IS NULL
         ORDER BY COALESCE(g.is_main, g.vehicle_number IS NULL) DESC,
                  (g.vehicle_number IS NULL) DESC,
                  NULLIF(regexp_replace(COALESCE(g.vehicle_number, ''), '\D', '', 'g'),

@@ -24,6 +24,9 @@ _MIGRATIONS = [
     # INSERT since then sets the flag explicitly.
     "ALTER TABLE alert_groups ADD COLUMN IF NOT EXISTS is_main BOOLEAN",
     "UPDATE alert_groups SET is_main = (vehicle_number IS NULL) WHERE is_main IS NULL",
+    # Set when the bot is removed from a chat, cleared when it is added back. Hides
+    # the group from the panel without throwing away its unit and filter.
+    "ALTER TABLE alert_groups ADD COLUMN IF NOT EXISTS left_at TIMESTAMPTZ",
     "CREATE UNIQUE INDEX IF NOT EXISTS alert_groups_tgid ON alert_groups (telegram_group_id)",
     "CREATE INDEX IF NOT EXISTS alert_groups_vehicle ON alert_groups (vehicle_number)",
     # Crash DMs are on for every admin unless they turn them off. A column defaulting to

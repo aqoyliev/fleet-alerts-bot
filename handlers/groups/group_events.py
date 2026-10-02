@@ -11,7 +11,7 @@ from loader import dp, bot
 from data import config
 from utils.db_api.groups import (
     group_exists, get_group_event_types, register_group, register_unassigned_group,
-    get_group,
+    mark_group_left, get_group,
     set_group_enabled, remove_group, set_group_event_types, toggle_group_event_type,
 )
 from utils.db_api.admins import get_all_admins, is_admin
@@ -359,6 +359,9 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
 
     elif removed:
         logger.info(f"Bot removed from {chat.type} '{chat.title}' (id={chat.id})")
+        # Out of the panel and off the routing. The row survives, so putting the bot back
+        # brings the group's unit and filter with it — see mark_group_left.
+        await mark_group_left(chat.id)
 
 
 # ── Manual group management ─────────────────────────────────────────────────────────
