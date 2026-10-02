@@ -51,6 +51,26 @@ async def get_all_groups() -> list[int]:
     return [r["telegram_group_id"] for r in rows]
 
 
+async def get_driver_groups() -> list[int]:
+    """Returns the enabled groups bound to a unit — the drivers' own chats, and the exact
+    complement of get_all_groups.
+
+    This is who a pre-trip reminder is for: the person about to walk around the truck.
+    The dispatcher/office group is deliberately not included — it would get the same
+    poster every morning and learn nothing from it.
+
+    A group's event-type filter is not consulted. That filter answers "which ALERTS does
+    this chat want", and a reminder is not an alert about anything that happened; the one
+    switch that does apply is `enabled`, because a muted group means "stop posting here".
+    """
+    rows = await db.fetch(
+        "SELECT telegram_group_id FROM alert_groups "
+        "WHERE vehicle_number IS NOT NULL AND COALESCE(enabled, TRUE) "
+        "ORDER BY telegram_group_id"
+    )
+    return [r["telegram_group_id"] for r in rows]
+
+
 async def register_group(telegram_group_id: int, title: str | None,
                          vehicle_number: str | None) -> None:
     """Insert (or update) a group registration. Called when the bot is added to a group;

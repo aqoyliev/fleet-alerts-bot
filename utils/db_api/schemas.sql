@@ -113,3 +113,28 @@ CREATE TABLE IF NOT EXISTS support_relays (
     created_at       TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (admin_chat_id, admin_msg_id)
 );
+
+-- One row per morning the PTI reminder album was posted (see utils/pti_reminder.py).
+--
+-- The reminder is scheduled by an in-process timer, so a deploy — and this branch serves
+-- four of them, every push is four restarts — can land on top of the slot and either lose
+-- that morning or repeat it. Claiming the day here first makes both impossible: the
+-- INSERT is what decides whether this process sends, so a restart inside the catch-up
+-- window picks the morning up exactly once.
+CREATE TABLE IF NOT EXISTS pti_reminder_runs (
+    sent_on    DATE        PRIMARY KEY,
+    group_count INT        NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- What Telegram calls the PTI posters, so they are uploaded once and then re-sent by id.
+--
+-- A file_id is valid for exactly one bot token, which is why this is a table in each
+-- deployment's own database rather than a setting someone pastes in: the bot earns the
+-- ids itself on its first send and every morning afterwards costs no upload at all.
+-- The fingerprint is over the poster bytes — replace a poster and the cache simply misses.
+CREATE TABLE IF NOT EXISTS pti_poster_cache (
+    fingerprint TEXT        PRIMARY KEY,
+    file_ids    TEXT[]      NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);

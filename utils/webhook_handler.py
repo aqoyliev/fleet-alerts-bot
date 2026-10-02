@@ -1078,30 +1078,44 @@ async def _download_media(video_urls: list[str], image_urls: list[str]) -> tuple
     return downloaded, is_video
 
 
-async def _send_with_retry(bot: Bot, chat_id: int, text: str, media: list[bytes] = None,
+async def _send_with_retry(bot: Bot, chat_id: int, text: str,
+                           media: list[bytes | str] = None,
                            is_video: bool = False, retries: int = 3, delay: float = 5.0):
     """Send one alert to one chat. `media` is bytes already downloaded once for all
-    recipients (see _download_media); falls back to text only if the media send fails."""
+    recipients (see _download_media); falls back to text only if the media send fails.
+
+    An item may also be a Telegram file_id string, which uploads nothing: Telegram already
+    holds that file and re-sends it from its own storage. Alert clips are each seen once,
+    so they stay bytes — it is the recurring posts (see utils/pti_reminder.py) that would
+    otherwise re-upload the same megabytes to every chat, every day.
+
+    Returns the Messages Telegram replied with, which is how a caller learns the file_ids
+    of what it just uploaded; None when the media path was not taken or did not succeed.
+    """
     if media:
         ext = "mp4" if is_video else "jpg"
         MediaType = InputMediaVideo if is_video else InputMediaPhoto
 
+        def _source(i, src):
+            """A file_id goes through as-is; bytes are wrapped in a fresh stream per send."""
+            if isinstance(src, str):
+                return src
+            return InputFile(io.BytesIO(src), filename=f"media_{i+1}.{ext}")
+
         async def _try_send_group(sources):
-            """sources: list of bytes; each is wrapped in a fresh stream per send."""
             if len(sources) == 1:
-                m = InputFile(io.BytesIO(sources[0]), filename=f"media_1.{ext}")
                 send_fn = bot.send_video if is_video else bot.send_photo
-                await send_fn(chat_id, m, caption=text, parse_mode="HTML")
-            else:
-                def _make(i, src):
-                    m = InputFile(io.BytesIO(src), filename=f"media_{i+1}.{ext}")
-                    return MediaType(m, caption=text if i == 0 else None, parse_mode="HTML" if i == 0 else None)
-                await bot.send_media_group(chat_id, [_make(i, s) for i, s in enumerate(sources)])
+                return [await send_fn(chat_id, _source(0, sources[0]),
+                                      caption=text, parse_mode="HTML")]
+            def _make(i, src):
+                return MediaType(_source(i, src), caption=text if i == 0 else None,
+                                 parse_mode="HTML" if i == 0 else None)
+            return await bot.send_media_group(
+                chat_id, [_make(i, s) for i, s in enumerate(sources)])
 
         for attempt in range(3):
             try:
-                await _try_send_group(media)
-                return
+                return await _try_send_group(media)
             except MigrateToChat as e:
                 logger.warning(f"Group {chat_id} migrated to supergroup {e.migrate_to_chat_id} — updating DB and retrying")
                 await _migrate_group(chat_id, e.migrate_to_chat_id)

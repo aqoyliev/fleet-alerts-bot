@@ -23,6 +23,11 @@ _MIGRATIONS = [
     # new admins get TRUE for free, and an admin who opts out stays opted out — seeding
     # subscription rows instead would silently re-enable them on the next startup.
     "ALTER TABLE admins ADD COLUMN IF NOT EXISTS crash_dm BOOLEAN NOT NULL DEFAULT TRUE",
+    # The PTI reminder claims each morning before it posts, so a restart on top of
+    # the slot neither loses the album nor sends it twice.
+    "CREATE TABLE IF NOT EXISTS pti_reminder_runs (sent_on DATE PRIMARY KEY, group_count INT NOT NULL DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW())",
+    # Uploaded once, then re-sent by file_id — see utils/db_api/pti_posters.py.
+    "CREATE TABLE IF NOT EXISTS pti_poster_cache (fingerprint TEXT PRIMARY KEY, file_ids TEXT[] NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW())",
 ]
 
 

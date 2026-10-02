@@ -9,13 +9,15 @@ from utils.db_api import init_pool, close_pool, run_migrations
 from utils.db_api.groups import ensure_main_group
 from utils.db_api.admins import seed_super_admins
 from utils.daily_report import schedule_daily_reports
+from utils.pti_reminder import schedule_pti_reminders
 from data import config
 from data.config import ADMINS
 
-# Holds the daily-report loop for the process's lifetime. asyncio only keeps a weak
+# Hold the scheduled loops for the process's lifetime. asyncio only keeps a weak
 # reference to a running task, so a bare ensure_future can be collected mid-await and
 # the nightly report simply stops happening.
 _daily_report_task = None
+_pti_reminder_task = None
 
 
 def _admin_ids() -> list[int]:
@@ -40,8 +42,10 @@ async def on_startup(dispatcher):
     await resume_pending_crash_confirmations(bot)
 
     import asyncio
-    global _daily_report_task
+    global _daily_report_task, _pti_reminder_task
     _daily_report_task = asyncio.ensure_future(schedule_daily_reports(bot))
+    # Returns straight away unless this company set PTI_REMINDER_TIME.
+    _pti_reminder_task = asyncio.ensure_future(schedule_pti_reminders(bot))
 
 
 async def on_shutdown(_):

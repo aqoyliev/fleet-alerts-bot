@@ -77,6 +77,35 @@ CRASH_GROUP_ID = int(_crash_group_raw) if _crash_group_raw else None
 # Minimum severity a speeding event must reach to be alerted ("low"/"medium"/"high"/"critical").
 SPEEDING_MIN_SEVERITY = env.str("SPEEDING_MIN_SEVERITY", "high")
 
+
+def _parse_hhmm(raw: str) -> tuple[int, int] | None:
+    """Read a "HH:MM" setting into (hour, minute), or None for blank/unusable.
+
+    Blank means "feature off" rather than "use a default", which is what keeps a
+    per-company extra switched off on the deployments that did not ask for it — every
+    company runs this same branch. Garbage is treated the same way and logged nowhere
+    near startup-fatal: a typo'd reminder time must not take a fleet's alerting down.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        hour_s, _, minute_s = raw.partition(":")
+        hour, minute = int(hour_s), int(minute_s or 0)
+    except ValueError:
+        return None
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return hour, minute
+    return None
+
+
+# ── Daily PTI reminder (optional — blank disables it) ───────────────────────────
+# The pre-trip inspection posters in assets/pti/, posted to every driver group as one
+# album at this time each morning, Eastern — the clock the fleet already runs on, and
+# the one the daily report uses. "07:00" is the setting Elegant Express asked for;
+# leaving it blank is what every other deployment on this branch does.
+PTI_REMINDER_AT = _parse_hhmm(env.str("PTI_REMINDER_TIME", ""))
+
 # ── Admin Mini App ──────────────────────────────────────────────────────────────
 
 def _resolve_webapp_url(explicit: str, railway_domain: str) -> str:
