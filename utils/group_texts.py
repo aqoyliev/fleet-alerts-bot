@@ -95,8 +95,11 @@ def joined_crash_group(company: str) -> str:
 def joined_needs_unit() -> str:
     """Posted when no unit number could be parsed from the group name or description.
 
-    The group is NOT registered at this point, which is the thing to lead with — the bot
-    sitting quietly in the chat otherwise looks like it's working.
+    The group is registered but has no unit at this point, so it routes nothing — which
+    is the thing to lead with, since the bot sitting quietly in the chat otherwise looks
+    like it's working. The remedy stays addressed to the people in the group: they are
+    the ones who can rename the chat or run /setunit, and most of them are not admins
+    and have no panel to open.
     """
     return (
         "👋 <b>Almost there — which truck is this group for?</b>\n\n"
