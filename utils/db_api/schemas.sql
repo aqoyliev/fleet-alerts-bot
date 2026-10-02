@@ -39,16 +39,26 @@ CREATE TABLE IF NOT EXISTS admin_subscriptions (
 
 -- Telegram groups that receive this company's alerts.
 --
--- vehicle_number ties a group to a single unit: driver groups (auto-registered when
--- the bot is added, parsed from the group title/description) carry the unit number and
--- receive only that unit's alerts. The main group (config.MAIN_GROUP_ID) has a NULL
--- vehicle_number and receives every unit's alerts.
+-- vehicle_number ties a group to a single unit: driver groups carry the unit number and
+-- receive only that unit's alerts.
+--
+-- is_main, not a NULL unit, is what marks the all-fleet group. The two used to be the
+-- same thing, which left nowhere to record the third state a group is actually in most
+-- often at the start: registered, because the bot was just added to it, but not yet
+-- pointed at a truck. Such a row has a NULL unit and is_main FALSE, matches nothing in
+-- get_groups_for_event, and exists so the admin panel can list it and have its unit
+-- chosen there.
+--
+-- The column is nullable on purpose. NULL means "written before this existed", and every
+-- read COALESCEs it back onto the old rule, so a row from the outgoing container during a
+-- rolling deploy routes the way it always did.
 CREATE TABLE IF NOT EXISTS alert_groups (
     id                SERIAL      PRIMARY KEY,
     telegram_group_id BIGINT      NOT NULL UNIQUE,
     label             VARCHAR(100),
     title             VARCHAR(255),
     vehicle_number    VARCHAR(50),
+    is_main           BOOLEAN,
     enabled           BOOLEAN     DEFAULT TRUE,
     created_at        TIMESTAMPTZ DEFAULT NOW()
 );

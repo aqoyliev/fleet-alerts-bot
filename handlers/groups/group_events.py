@@ -10,7 +10,8 @@ from aiogram.utils.exceptions import MessageNotModified
 from loader import dp, bot
 from data import config
 from utils.db_api.groups import (
-    group_exists, get_group_event_types, register_group, get_group,
+    group_exists, get_group_event_types, register_group, register_unassigned_group,
+    get_group,
     set_group_enabled, remove_group, set_group_event_types, toggle_group_event_type,
 )
 from utils.db_api.admins import get_all_admins, is_admin
@@ -303,10 +304,16 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
             return
 
         if vehicle is None and not is_main:
-            logger.warning(f"No unit number for group '{title}' (id={chat.id}) — not registering")
-            # Say it in the group as well as to the admins: the people who can rename the
-            # chat or run /setunit are the ones sitting in it, and until one of them does,
-            # the bot looks installed while sending nothing.
+            logger.warning(f"No unit number for group '{title}' (id={chat.id}) — "
+                           f"registering it unassigned")
+            # Registered with no unit, so it routes nothing but does appear in the admin
+            # panel, where its truck can be picked off the roster. Most fleets never name
+            # a group in a way the parser can read — this one's units are spelled
+            # "G8PZ-7X5-FF2" — so this is the ordinary path, not the exception.
+            await register_unassigned_group(chat.id, title)
+            # Said in the group as well as to the admins, unchanged: the people who can
+            # rename the chat or run /setunit are the ones sitting in it, and until
+            # somebody acts the bot looks installed while sending nothing.
             await _say(chat.id, group_texts.joined_needs_unit())
             await _notify_admins_parse_failure(chat, title, description)
             return
@@ -314,7 +321,7 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
         # Main group registers with a NULL vehicle (receives all units); driver groups
         # register with their parsed unit number.
         if is_main:
-            await register_group(chat.id, title, None)
+            await register_group(chat.id, title, None, is_main=True)
             logger.info(f"Registered MAIN group (id={chat.id})")
             await _say(chat.id, group_texts.joined_main_group(config.COMPANY_NAME))
             return
@@ -328,12 +335,14 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
             # something the roster does not match, leaving the group silent. Say so and
             # let whoever is in the chat run /setunit once Samsara answers again.
             logger.warning(f"Group '{title}' (id={chat.id}) parsed unit {vehicle}, "
-                           f"but Samsara could not be reached — not registering")
+                           f"but Samsara could not be reached — registering it unassigned")
+            await register_unassigned_group(chat.id, title)
             await _say(chat.id, group_texts.joined_roster_unavailable(vehicle))
             return
         if status == "missing":
             logger.warning(f"Group '{title}' (id={chat.id}) parsed unit {vehicle}, "
-                           f"which is not in Samsara — not registering")
+                           f"which is not in Samsara — registering it unassigned")
+            await register_unassigned_group(chat.id, title)
             # One roster lookup, two audiences: the group is told how to fix it, the
             # admins are told it happened.
             suggestions = await suggest_units(config.SAMSARA_API_KEY, vehicle)

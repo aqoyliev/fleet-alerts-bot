@@ -196,11 +196,18 @@ async def groups(request: web.Request) -> web.Response:
         unit = row["vehicle_number"]
         out.append({
             **row,
-            "is_main": unit is None,
+            # Straight from the row now. Inferring it from a missing unit would label
+            # every just-added group the all-fleet one and hide the unit picker on the
+            # single screen that exists to use it.
+            "is_main": row["is_main"],
             # Zero rows in group_event_types means "every type", not "no types". Naming
             # that here keeps the UI from rendering an empty list as "receives nothing".
             "filter_mode": "all" if not row["event_types"] else "custom",
-            "alerts_7d": counts.get(unit, 0) if unit else sum(counts.values()),
+            # The whole fleet's week for the all-fleet group, this truck's for a driver
+            # group, and zero for one with no unit yet — which receives nothing, and would
+            # otherwise be shown the fleet-wide figure as if it had been getting it.
+            "alerts_7d": (sum(counts.values()) if row["is_main"]
+                          else counts.get(unit, 0) if unit else 0),
         })
     return _ok(out)
 

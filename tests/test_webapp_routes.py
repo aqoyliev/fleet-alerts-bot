@@ -180,7 +180,7 @@ async def test_groups_serializes_datetimes(client, monkeypatch):
 
     async def _overview():
         return [{"id": 1, "telegram_group_id": -100, "title": "Unit 571",
-                 "vehicle_number": "unit571", "enabled": True,
+                 "vehicle_number": "unit571", "is_main": False, "enabled": True,
                  "created_at": datetime.now(timezone.utc), "event_types": []}]
 
     async def _counts(_since):

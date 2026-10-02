@@ -16,6 +16,14 @@ _MIGRATIONS = [
     "ALTER TABLE alert_groups ADD COLUMN IF NOT EXISTS title VARCHAR(255)",
     "ALTER TABLE alert_groups ADD COLUMN IF NOT EXISTS vehicle_number VARCHAR(50)",
     "ALTER TABLE alert_groups ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE",
+    # What marks the all-fleet group, so that a NULL unit can mean "registered but
+    # not yet assigned" instead. Left nullable, and backfilled from the rule it
+    # replaces: every existing NULL-unit row IS a main group, because under the old
+    # code nothing else could be one. The WHERE is what makes that safe to re-run —
+    # it can only ever match rows written before the column existed, since every
+    # INSERT since then sets the flag explicitly.
+    "ALTER TABLE alert_groups ADD COLUMN IF NOT EXISTS is_main BOOLEAN",
+    "UPDATE alert_groups SET is_main = (vehicle_number IS NULL) WHERE is_main IS NULL",
     "CREATE UNIQUE INDEX IF NOT EXISTS alert_groups_tgid ON alert_groups (telegram_group_id)",
     "CREATE INDEX IF NOT EXISTS alert_groups_vehicle ON alert_groups (vehicle_number)",
     # Crash DMs are on for every admin unless they turn them off. A column defaulting to
