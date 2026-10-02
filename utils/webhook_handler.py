@@ -643,6 +643,15 @@ def _parse_samsara(body: dict) -> tuple[str, dict]:
 
         if "harshEvent" in details:
             harsh = details["harshEvent"]
+            # Samsara reduces every camera obstruction to the one label
+            # "obstructedCamera": neither /fleet/safety-events nor the legacy
+            # harsh_event endpoint says which lens was covered, and twenty-one events
+            # over twelve days were identical in that respect. The webhook is the only
+            # place left that might name it — the condition carries the `description`
+            # and `triggerId` the alert was configured with, and nothing reads either
+            # today. So log the condition whole until we know whether the answer is in
+            # there. Harsh events run about five a day, so the volume is nothing.
+            logger.info(f"[samsara] AlertIncident condition: {json.dumps(conditions[0])}")
             vehicle_obj = harsh.get("vehicle") or {}
             vehicle_id = vehicle_obj.get("id") or ""
             event_time = data.get("happenedAtTime") or body.get("eventTime") or ""
