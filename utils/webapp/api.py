@@ -33,8 +33,8 @@ from utils.db_api.admins import (
     is_super_admin, promote_to_super, set_admin_active, visible_admins,
 )
 from utils.db_api.groups import (
-    get_group, get_group_event_types, get_groups_overview, register_unassigned_group,
-    remove_group, set_group_enabled, set_group_event_types, set_group_unit,
+    get_group, get_group_event_types, get_groups_overview, remove_group,
+    set_group_enabled, set_group_event_types, set_group_unit,
 )
 from utils.db_api.users import ensure_user
 from utils import group_texts
@@ -286,79 +286,6 @@ async def admins(request: web.Request) -> web.Response:
 
 
 # ── group mutations ─────────────────────────────────────────────────────────────
-
-@require_admin
-async def attach_group(request: web.Request) -> web.Response:
-    """List a group the bot is already sitting in, given its chat id.
-
-    Telegram gives a bot no way to ask which chats it is in. The only moment it learns
-    about a group is the membership update that arrives while it is running — so a group
-    it was added to by an older build, or while it was redeploying, exists nowhere in
-    this system, and the screen that exists to configure it cannot show what it was never
-    told about. Removing and re-adding the bot fixes that, and is a ridiculous thing to
-    ask of someone with forty driver chats.
-
-    The chat id is the one handle that survives: it is in the "couldn't register a group"
-    DM the admins were sent at the time, as a tappable code block. This turns that id
-    back into a row.
-
-    The bot's own membership is what makes it safe to accept a number typed by hand. An
-    id the bot is not in is refused, so a typo can only fail — it cannot attach somebody
-    else's chat, and it cannot invent a group that then sits in the list forever.
-
-    Registered with no unit, never with one guessed from the title: the admin lands on
-    the group's own screen next, with the roster picker on it, and a guess made here is
-    something they would have to notice and undo there.
-    """
-    raw = str((await _body(request)).get("telegram_group_id", "")).strip()
-    try:
-        tgid = int(raw)
-    except (TypeError, ValueError):
-        return _fail("bad_request", "A chat id is a number, like -1001234567890.")
-
-    if _is_reserved(tgid):
-        return _fail(
-            "reserved_group",
-            "This chat is configured in the deployment settings, not here.", status=403,
-        )
-
-    existing = await get_group(tgid)
-    if existing is not None and existing.get("left_at") is None:
-        # Already listed, so nothing is written. Re-registering would clear a mute, and
-        # a mistyped id that lands on a working group must not silently un-mute it.
-        return _ok({"ok": True, "already": True, "telegram_group_id": tgid,
-                    "title": existing["title"] or ""})
-
-    try:
-        chat = await bot.get_chat(tgid)
-        member = await bot.get_chat_member(tgid, (await bot.me).id)
-        present = member.status not in ("left", "kicked")
-    except Exception as e:
-        # Telegram answers "chat not found" for an id the bot has no access to, which is
-        # also the answer for an id that was mistyped. Both mean the same thing here.
-        logger.info(f"[webapp] attach of {tgid} refused: {e}")
-        return _fail(
-            "chat_unreachable",
-            "I can't see a chat with that id. Check the id, and that I'm still a member "
-            "of that group.", status=404,
-        )
-
-    if not present:
-        return _fail(
-            "not_a_member",
-            "I'm not in that group any more. Add me back to it and it appears here on "
-            "its own.", status=404,
-        )
-
-    if chat.type not in ("group", "supergroup"):
-        return _fail("not_a_group", "That id is a private chat or a channel, not a group.")
-
-    await register_unassigned_group(tgid, chat.title or "")
-    logger.info(f"[webapp] {request['telegram_id']} attached group {tgid} "
-                f"({chat.title!r}){' (was marked left)' if existing else ''}")
-    return _ok({"ok": True, "already": False, "telegram_group_id": tgid,
-                "title": chat.title or ""})
-
 
 async def _load_editable_group(request: web.Request) -> tuple[dict | None, web.Response | None]:
     """Resolve the {tgid} path param to a group the panel may edit, or an error.

@@ -407,18 +407,6 @@ function popDetail() {
   renderCurrent({ restore: state.scroll[state.tab] || 0 });
 }
 
-/** Swap one detail view for another without stacking a second history entry.
- *
- *  For a screen that has finished its job and is handing over — "add a group" to that
- *  group's own page. Back from there should return to the list, not to the form that
- *  would now refuse the id it just used. */
-function replaceDetail(detail) {
-  state.detail = detail;
-  state.epoch++;
-  hideMainButton();
-  renderCurrent();
-}
-
 function selectTab(tab) {
   // Tapping the tab you are already on is a scroll-to-top everywhere else; matching that
   // is free, and it is the fastest way back up a long feed.
@@ -440,10 +428,7 @@ function selectTab(tab) {
   renderCurrent({ restore: state.scroll[tab] || 0 });
 }
 
-const DETAIL_VIEWS = {
-  group: groupDetail, admin: adminDetail,
-  addgroup: addGroupScreen, addadmin: addAdminScreen,
-};
+const DETAIL_VIEWS = { group: groupDetail, admin: adminDetail, addadmin: addAdminScreen };
 const TAB_VIEWS = {
   dashboard: dashboardScreen, groups: groupsScreen,
   alerts: alertsScreen, admins: adminsScreen,
@@ -914,15 +899,6 @@ async function groupsScreen(opts) {
     search.focus();
   };
   renderList(state.groupsQuery);
-
-  // The escape hatch for a group the bot is in that this list has never heard of —
-  // one it was added to while an older build was running. Below the list on every
-  // section, because the section someone is looking at when they notice a group is
-  // missing is whichever one they expected to find it in.
-  const add = el(`<button class="btn btn-secondary btn-block" style="margin-top:14px">
-      + Add a group I'm already in</button>`);
-  add.onclick = () => { haptic(); pushDetail({ type: 'addgroup', title: 'Add a group' }); };
-  wrap.appendChild(add);
 
   render(wrap, opts);
 }
@@ -1450,58 +1426,6 @@ async function mutateAdmin(id, body, done) {
     renderCurrent({ keep: true });
   } catch (e) { hapticResult(false); alertMessage(e.message); }
   finally { busy(false); }
-}
-
-/* Telegram never tells a bot which chats it is in — it only says when it is added to
- * one, and only if it is running at that second. A group the bot joined while it was
- * redeploying, or before the build that started listing unconfigured groups, is
- * therefore recorded nowhere, and the only way to surface it was to remove the bot and
- * add it back. This screen takes its id instead. */
-async function addGroupScreen(opts) {
-  const wrap = el(`<div>
-      <div class="card">
-        <div class="card-title">Chat ID</div>
-        <input class="input" id="new-group-id" inputmode="text" autocomplete="off"
-               spellcheck="false" placeholder="e.g. -1001234567890">
-        <div class="note">I DMed you this id when I joined the group, in the message
-          saying it needed a unit. Tap the id in that message to copy it.</div>
-      </div>
-      <div class="note">For a group I'm in that isn't in the list. I check I'm still a
-        member before adding it, and nothing is sent there until you pick its unit on
-        the next screen.</div>
-    </div>`);
-  const input = wrap.querySelector('#new-group-id');
-
-  const submit = async () => {
-    const value = input.value.trim().replace(/\s+/g, '');
-    // Group ids are negative. A positive one is a person, and sending it would earn a
-    // truthful, useless "I'm not in that chat" from the other end.
-    if (!/^-\d{5,}$/.test(value)) {
-      hapticResult(false);
-      alertMessage('A group id is a number starting with a minus, like -1001234567890.');
-      return;
-    }
-    busy(true);
-    try {
-      const res = await post('/groups', { telegram_group_id: value });
-      invalidate('/groups');
-      hapticResult(true);
-      toast(res.already ? 'Already in the list' : 'Group added');
-      // Straight to the group's own page: giving it a unit is the only reason to have
-      // added it, and it is the next tap.
-      replaceDetail({ type: 'group', id: res.telegram_group_id, title: res.title || 'Group' });
-    } catch (e) { hapticResult(false); alertMessage(e.message); }
-    finally { busy(false); }
-  };
-
-  if (!showMainButton('Add group', submit)) {
-    const save = el('<button class="btn btn-block">Add group</button>');
-    save.onclick = submit;
-    wrap.appendChild(save);
-  }
-
-  render(wrap, opts);
-  input.focus();
 }
 
 async function addAdminScreen(opts) {

@@ -134,16 +134,10 @@ async def register_unassigned_group(telegram_group_id: int, title: str | None) -
 
 
 async def get_group(telegram_group_id: int) -> dict | None:
-    """Return the full registration row for a group, or None if it isn't registered.
-
-    left_at is part of the row because "registered" and "listed in the panel" are two
-    different questions: the row of a group the bot was thrown out of survives so that
-    putting the bot back restores its unit (see mark_group_left), and a caller deciding
-    whether that group still needs attaching has to be able to tell the two apart.
-    """
+    """Return the full registration row for a group, or None if it isn't registered."""
     row = await db.fetchrow(
         """
-        SELECT id, telegram_group_id, title, vehicle_number, left_at,
+        SELECT id, telegram_group_id, title, vehicle_number,
                COALESCE(enabled, TRUE) AS enabled
         FROM alert_groups WHERE telegram_group_id = $1
         """,
