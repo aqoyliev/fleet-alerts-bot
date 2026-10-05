@@ -26,7 +26,7 @@ const state = {
   detail: null,        // {type, ...} when a detail view is pushed over a tab
   period: 'today',
   groupsQuery: '',
-  groupsFilter: 'all',   // which of the four Groups sections is showing
+  groupsFilter: 'active',  // which of the three Groups sections is showing
   alertFilter: { type: '', unit: '' },
   alertItems: [],
   alertNext: null,
@@ -555,9 +555,9 @@ async function dashboardScreen(opts) {
     card.onclick = () => {
       haptic();
       state.groupsQuery = '';
-      // Muted groups are not in the Active section by definition, so sending someone
-      // there from "3 groups are muted" would show them an empty list.
-      state.groupsFilter = 'all';
+      // A muted group has a unit, so it is in Active with its switch off and the muted
+      // count over the list — which is what this card is a shortcut to.
+      state.groupsFilter = 'active';
       selectTab('groups');
     };
     wrap.appendChild(card);
@@ -675,15 +675,20 @@ function trendCard(byDay) {
 
 // ── screen 2: groups ────────────────────────────────────────────────────────────
 
-/* The four ways to look at this screen.
+/* The three questions this screen answers.
  *
  * There are two entirely different ways a truck can be uncovered, and the screen used to
  * show them as the same kind of thing at two ends of one scroll: a group carrying a "no
  * unit" badge somewhere in the list, and a card of leftover roster units underneath it.
  * Neither was countable at a glance, which is the only form the question "is my fleet
- * covered" is ever actually asked in. */
+ * covered" is ever actually asked in.
+ *
+ * The sections are a partition, not a set of views — every registered group is in
+ * exactly one of the first two, and the third holds what has no group at all. An "All"
+ * tab on top of a partition is the same rows a second time, so there isn't one, and
+ * nothing may fall between the sections: a group that belongs to none of them is a
+ * group nobody can reach. */
 const GROUP_FILTERS = [
-  ['all', 'All'],
   ['active', 'Active'],
   ['unpaired', 'Unpaired'],
   ['unconnected', 'No group'],
@@ -693,9 +698,13 @@ const GROUP_FILTERS = [
  *  belongs to — so it receives nothing until someone picks its unit. */
 function isUnpaired(g) { return !g.is_main && !g.vehicle_number; }
 
-/** Receiving alerts right now: pointed at a truck (or the all-fleet group) and not muted.
- *  A muted group is deliberately not here — it belongs to All, next to the muted count. */
-function isActive(g) { return !isUnpaired(g) && g.enabled; }
+/** Set up: pointed at a truck, or the all-fleet group.
+ *
+ *  Mute is not the dividing line. It is a switch on the row, flipped and unflipped from
+ *  the list itself, and excluding a muted group here would leave it in no section at
+ *  all now that "All" is gone — invisible in the one screen that can unmute it. The
+ *  count of muted ones is called out above the list instead. */
+function isActive(g) { return !isUnpaired(g); }
 
 async function groupsScreen(opts) {
   const [groups, roster] = await screenData(['/groups', '/units'], opts);
@@ -703,7 +712,6 @@ async function groupsScreen(opts) {
 
   const strayUnits = roster.available ? roster.units.filter((u) => !u.linked) : [];
   const counts = {
-    all: groups.length,
     active: groups.filter(isActive).length,
     unpaired: groups.filter(isUnpaired).length,
     unconnected: strayUnits.length,
@@ -764,16 +772,13 @@ async function groupsScreen(opts) {
       return el(`<div class="empty"><span class="empty-emoji">🔍</span>
         No groups match "${esc(query)}".</div>`);
     }
-    if (tab === 'active') {
-      return el(`<div class="empty"><span class="empty-emoji">🔕</span>
-        No group is receiving alerts.<br>Give one a unit, or unmute it.</div>`);
-    }
     if (tab === 'unpaired') {
       return el(`<div class="empty"><span class="empty-emoji">✅</span>
         Every group has a unit.</div>`);
     }
     return el(`<div class="empty"><span class="empty-emoji">👥</span>
-      No groups registered yet.<br>Add the bot to a truck's group to get started.</div>`);
+      No group is set up for a truck yet.<br>Add the bot to a truck's group chat, then
+      give it a unit here.</div>`);
   }
 
   /** Samsara units with no Telegram group at all — the coverage gap no per-group list can
@@ -822,8 +827,7 @@ async function groupsScreen(opts) {
       || (g.title || '').toLowerCase().includes(q)
       || (g.vehicle_number || '').toLowerCase().includes(q);
 
-    const inTab = groups.filter((g) => (
-      tab === 'active' ? isActive(g) : tab === 'unpaired' ? isUnpaired(g) : true));
+    const inTab = groups.filter((g) => (tab === 'active' ? isActive(g) : isUnpaired(g)));
     const filtered = inTab.filter(matches);
     const muted = inTab.filter((g) => !g.enabled).length;
 
@@ -836,24 +840,13 @@ async function groupsScreen(opts) {
 
     if (!filtered.length) {
       listWrap.appendChild(emptyFor(tab, query));
-    } else if (tab === 'all') {
-      // Two lists, not one. A group with a unit is working and a group without one is a
-      // job someone has to finish, and threading the second kind through the first as a
-      // row with a different badge is how twenty of them go unnoticed.
-      const paired = filtered.filter((g) => !isUnpaired(g));
-      const waiting = filtered.filter(isUnpaired);
-      if (paired.length) listWrap.appendChild(rowsOf(paired));
-      if (waiting.length) {
-        listWrap.appendChild(el(`<div class="list-head" style="margin-top:16px">
-            <span>Needs a unit</span>
-            <span>${num(waiting.length)}</span></div>`));
-        listWrap.appendChild(rowsOf(waiting));
-      }
     } else {
       listWrap.appendChild(rowsOf(filtered));
     }
 
-    if (tab === 'all' && state.boot.crash_group_id) {
+    // On the section that lists what receives alerts, because that is where someone
+    // counts the chats and wonders which one gets a crash.
+    if (tab === 'active' && state.boot.crash_group_id) {
       listWrap.appendChild(el(`<div class="note">💥 Crash alerts go to a dedicated chat
         configured in the deployment settings, not listed here.</div>`));
     }
