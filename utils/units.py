@@ -17,6 +17,30 @@ from utils.samsara.client import lookup_unit, SamsaraUnavailable
 
 logger = logging.getLogger(__name__)
 
+MAX_UNIT_LEN = 50  # the width of the vehicle_number column
+
+
+def clean_unit(raw: str) -> str | None:
+    """Tidy what a dispatcher typed or picked into something worth asking Samsara about.
+
+    Returns None when there is nothing to look up at all: empty, or longer than the
+    column it would be stored in.
+
+    What is deliberately not checked is whether it contains a digit. It used to be --
+    "unit" sounds like a number, and requiring one caught a stray word before it cost a
+    round trip. But the roster is the authority on how a truck is named, and this fleet
+    names some of them after their driver ("Ruhoallah Assadi") or their VIN tail
+    ("GFXH-ARH-SHW"). The rule was refusing units that the panel's own picker was
+    offering, taken straight off Samsara's list -- a guess about what a unit looks like,
+    overruling the roster it was supposed to protect. resolve_unit below refuses anything
+    Samsara cannot confirm, and that is the check that actually keeps a group from being
+    pointed at a truck that does not exist.
+    """
+    unit = (raw or "").strip().lstrip("#").strip()
+    if not unit or len(unit) > MAX_UNIT_LEN:
+        return None
+    return unit
+
 
 async def resolve_unit(unit: str) -> tuple[str, str]:
     """Check a unit against Samsara's vehicle roster and canonicalize it.

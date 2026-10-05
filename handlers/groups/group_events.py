@@ -20,7 +20,7 @@ from utils.group_parser import extract_vehicle_number
 from utils.tg_text import esc
 from utils import group_texts
 from utils.samsara.client import suggest_units
-from utils.units import resolve_unit
+from utils.units import clean_unit, resolve_unit
 from utils.webhook_handler import EVENT_TYPE_MAP
 from keyboards.inline.group_settings import group_events_keyboard
 
@@ -403,8 +403,8 @@ async def cmd_setunit(message: types.Message):
         await message.reply("This is the main group — it receives every unit and can't be tied to one.")
         return
 
-    unit = (message.get_args() or "").strip().lstrip("#").strip()
-    if not unit or not any(c.isdigit() for c in unit) or len(unit) > 50:
+    unit = clean_unit(message.get_args() or "")
+    if unit is None:
         await message.reply("Usage: <code>/setunit 1234</code>", parse_mode="HTML")
         return
 

@@ -43,7 +43,7 @@ from utils.db_api.violations import (
     get_top_violators, get_type_counts,
 )
 from utils.samsara.client import list_units, suggest_units
-from utils.units import resolve_unit
+from utils.units import clean_unit, resolve_unit
 from utils.webapp.auth import require_admin, require_super
 
 logger = logging.getLogger(__name__)
@@ -334,10 +334,12 @@ async def set_unit(request: web.Request) -> web.Response:
     if err is not None:
         return err
 
-    unit = str((await _body(request)).get("unit", "")).strip().lstrip("#").strip()
-    # Same input rules as /setunit, including the 50-char cap that matches the column.
-    if not unit or not any(c.isdigit() for c in unit) or len(unit) > 50:
-        return _fail("bad_unit", "Enter a unit number, e.g. 1234.")
+    # Same input rules as /setunit -- they share clean_unit so the two surfaces cannot
+    # drift apart on what counts as a unit.
+    unit = clean_unit(str((await _body(request)).get("unit", "")))
+    if unit is None:
+        return _fail("bad_unit", "Pick a unit from the list, or type its name the way "
+                                 "Samsara spells it.")
 
     status, resolved = await resolve_unit(unit)
 

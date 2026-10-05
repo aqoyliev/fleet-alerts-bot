@@ -162,8 +162,10 @@ async def test_changing_a_unit_uses_set_group_unit_not_register_group(panel, mon
     assert panel["enabled"] == [], "the mute state must not be touched at all"
 
 
-@pytest.mark.parametrize("unit", ["", "   ", "no-digits-here", "x" * 51])
+@pytest.mark.parametrize("unit", ["", "   ", "#", "x" * 51])
 async def test_malformed_units_never_reach_samsara(panel, monkeypatch, unit):
+    """Only what cannot be looked up at all: empty, or wider than the column. Anything
+    else is the roster's call, not this endpoint's -- see test_unit_input.py."""
     async def _explode(_unit):
         raise AssertionError("resolve_unit must not be called for invalid input")
 
@@ -172,6 +174,19 @@ async def test_malformed_units_never_reach_samsara(panel, monkeypatch, unit):
 
     assert resp.status == 400
     assert panel["unit"] == []
+
+
+async def test_a_unit_name_with_no_digit_in_it_reaches_samsara(panel, monkeypatch):
+    """Samsara names trucks after their driver as readily as after a number, and the
+    picker offers exactly what the roster says. Screening those out here refused the
+    dispatcher the very option the list had just shown them."""
+    monkeypatch.setattr(api, "resolve_unit", _resolver(("ok", "Ruhoallah Assadi")))
+
+    resp = await api.set_unit(
+        _Request({"unit": "Ruhoallah Assadi"}, {"tgid": str(GROUP_ID)}))
+
+    assert resp.status == 200
+    assert panel["unit"] == [(GROUP_ID, "Ruhoallah Assadi")]
 
 
 # ── the chats configured in .env, not in the database ───────────────────────────
