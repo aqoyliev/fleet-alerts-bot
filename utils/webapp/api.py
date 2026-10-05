@@ -37,6 +37,7 @@ from utils.db_api.groups import (
     remove_group, set_group_enabled, set_group_event_types, set_group_unit,
 )
 from utils.db_api.users import ensure_user
+from utils import group_texts
 from utils.db_api.violations import (
     get_counts_by_vehicle, get_daily_counts, get_recent_events, get_totals,
     get_top_violators, get_type_counts,
@@ -428,6 +429,7 @@ async def set_unit(request: web.Request) -> web.Response:
     await set_group_unit(group["telegram_group_id"], resolved)
     logger.info(f"[webapp] {request['telegram_id']} set group "
                 f"{group['telegram_group_id']} to unit {resolved}")
+    await _tell_group_its_unit(group, resolved)
     return _ok({
         "ok": True,
         "vehicle_number": resolved,
@@ -436,6 +438,32 @@ async def set_unit(request: web.Request) -> web.Response:
         "note": f"Matched Samsara's “{resolved}”." if resolved != unit else None,
         "unverified": status == "no_roster",
     })
+
+
+async def _tell_group_its_unit(group: dict, unit: str) -> None:
+    """Post the change into the driver group, and only there.
+
+    The admins are deliberately not DMed, unlike the /setunit path: the admin who did
+    this is looking at the screen they did it on. The people it is news to are in the
+    chat — the bot told them on the day it joined that nothing would arrive until
+    somebody set a unit, and nothing has told them since.
+
+    Never allowed to fail the request. The unit is stored by the time this runs, and a
+    group that has restricted the bot, or thrown it out without the bot hearing about it,
+    must not turn a successful edit into an error the admin would then retry.
+    """
+    if group["vehicle_number"] == unit:
+        return  # nothing changed; saying so in the chat is noise
+    try:
+        await bot.send_message(
+            group["telegram_group_id"],
+            group_texts.unit_set(unit, previous=group["vehicle_number"],
+                                 muted=not group["enabled"]),
+            parse_mode="HTML", disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.warning(f"[webapp] couldn't tell group {group['telegram_group_id']} "
+                       f"about its unit: {e}")
 
 
 @require_admin

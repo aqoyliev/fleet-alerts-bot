@@ -48,6 +48,36 @@ def joined_registered(unit: str) -> str:
     )
 
 
+def unit_set(unit: str, previous: str | None = None, muted: bool = False) -> str:
+    """Posted in a driver group when its unit is set or changed from the admin panel.
+
+    The group is told; the admins are not. An admin who just tapped a truck in the panel
+    is looking at the result of their own tap, and the people this is actually news to
+    are the ones sitting in the chat — who were last told, when the bot joined, that
+    nothing would arrive until somebody set a unit, and would otherwise have no way of
+    knowing that somebody had.
+
+    A first unit is the same event as a clean registration at join time, so it reuses
+    that wording rather than keeping a second copy of it around to drift.
+    """
+    if previous is None:
+        text = joined_registered(unit)
+    else:
+        text = (
+            f"🔁 <b>Now following {_unit_label(unit)}</b>\n\n"
+            f"This group was set to {_unit_label(previous)}. From now on I'll post "
+            f"{_unit_label(unit)}'s alerts here instead.\n\n"
+            "Wrong truck? Correct it with <code>/setunit 1234</code>."
+        )
+    if muted:
+        # "I'll post this truck's alerts here" is a lie to a muted group, and the only
+        # place /enable is ever advertised is the reply to /disable — which whoever is
+        # reading this may not have been in the chat to see.
+        text += ("\n\n🔕 Alerts are <b>muted</b> in this group right now — "
+                 "send <b>/enable</b> to start receiving them.")
+    return text
+
+
 def joined_roster_unavailable(unit: str) -> str:
     """Posted when the bot joins a driver group but Samsara could not be reached.
 
