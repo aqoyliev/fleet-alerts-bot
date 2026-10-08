@@ -63,20 +63,29 @@ async def get_all_groups() -> list[int]:
 
 
 async def get_driver_groups() -> list[int]:
-    """Returns the enabled groups bound to a unit — the drivers' own chats, and the exact
-    complement of get_all_groups.
+    """Returns every enabled group that is not the office one — the drivers' own chats,
+    and the exact complement of get_all_groups.
 
     This is who a pre-trip reminder is for: the person about to walk around the truck.
     The dispatcher/office group is deliberately not included — it would get the same
     poster every morning and learn nothing from it.
 
+    Having a unit is deliberately not required. It used to be, on the reasoning that a
+    group with no unit is in the panel to be configured rather than to start receiving
+    things — which is right about alerts and wrong about this. An alert has to know which
+    truck it is about, so a group with no unit cannot be sent one; a reminder to walk
+    around the truck is the same message for everybody, and the drivers sitting in a group
+    whose unit nobody has picked yet are the ones already on the road without it. Pairing
+    a group with a truck is dispatch's bookkeeping, and the reminder should not wait on it.
+
     A group's event-type filter is not consulted. That filter answers "which ALERTS does
     this chat want", and a reminder is not an alert about anything that happened; the one
-    switch that does apply is `enabled`, because a muted group means "stop posting here".
+    switch that does apply is `enabled`, because a muted group means "stop posting here" --
+    which is also how a group that kicked the bot stops being posted to.
     """
     rows = await db.fetch(
         "SELECT telegram_group_id FROM alert_groups "
-        "WHERE vehicle_number IS NOT NULL AND COALESCE(enabled, TRUE) "
+        "WHERE NOT COALESCE(is_main, vehicle_number IS NULL) AND COALESCE(enabled, TRUE) "
         "ORDER BY telegram_group_id"
     )
     return [r["telegram_group_id"] for r in rows]

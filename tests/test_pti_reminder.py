@@ -189,10 +189,13 @@ async def test_the_office_group_is_not_on_the_list():
     finally:
         grp.db.fetch = original
 
-    assert "vehicle_number IS NOT NULL" in captured["sql"]
+    assert "NOT COALESCE(is_main, vehicle_number IS NULL)" in captured["sql"]
     # Muting is how a group that kicked the bot stops being posted to (see
     # _drop_unreachable); a daily reminder honours it like every alert does.
     assert "COALESCE(enabled, TRUE)" in captured["sql"]
+    # And having a unit is not a condition: the reminder is the same message for every
+    # truck, so a group nobody has paired yet still gets it.
+    assert "vehicle_number IS NOT NULL" not in captured["sql"]
 
 
 # ── uploaded once, then re-sent by id ──────────────────────────────────────────

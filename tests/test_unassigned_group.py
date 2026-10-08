@@ -226,12 +226,16 @@ async def test_the_daily_digest_asks_for_the_flag_too(sql):
     assert "WHERE vehicle_number IS NULL" not in query
 
 
-async def test_an_unassigned_group_is_not_a_driver_group_either(sql):
-    """The PTI album goes to groups bound to a unit, so a group with none is out of that
-    too — it is in the panel to be configured, not to start receiving things."""
+async def test_an_unassigned_group_is_still_a_driver_group(sql):
+    """An unassigned group receives no alerts -- there is no unit to say which truck they
+    would be about. The PTI album is not an alert: it is the same walk-around for every
+    truck, and the drivers in a group dispatch has not paired yet are exactly the ones
+    going out without it. So this one asks only that the group is not the office."""
     await grp.get_driver_groups()
 
-    assert "vehicle_number IS NOT NULL" in sql["fetch"][0][0]
+    query = sql["fetch"][0][0]
+    assert "NOT COALESCE(is_main, vehicle_number IS NULL)" in query
+    assert "vehicle_number IS NOT NULL" not in query
 
 
 async def test_registering_unassigned_leaves_an_existing_unit_alone(sql):
