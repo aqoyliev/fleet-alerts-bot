@@ -8,7 +8,6 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-MOTIVE_API = "https://api.gomotive.com/v1"
 MOTIVE_API_V2 = "https://api.gomotive.com/v2"
 
 
@@ -113,39 +112,3 @@ async def crash_still_listed(api_key: str, event_id, occurred_at) -> bool | None
         return None
     return status == "found"
 
-
-class MotiveClient:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self._headers = {"X-Api-Key": api_key, "Accept": "application/json"}
-
-    async def get_event_video_url(self, event_id: str) -> str | None:
-        """Fetch safety event by ID and return video clip URL if available."""
-        try:
-            async with aiohttp.ClientSession(headers=self._headers) as s:
-                async with s.get(f"{MOTIVE_API}/safety_events/{event_id}") as r:
-                    if r.status != 200:
-                        logger.warning(f"Safety event {event_id} returned HTTP {r.status}")
-                        return None
-                    data = await r.json()
-                    event = data.get("safety_event", data)
-                    clip = event.get("video_clip") or {}
-                    url = clip.get("url") or clip.get("download_url")
-                    if url:
-                        logger.info(f"Video clip found for event {event_id}")
-                    return url
-        except Exception as e:
-            logger.error(f"get_event_video_url error: {e}")
-            return None
-
-    async def download_video(self, video_url: str) -> bytes | None:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(video_url) as resp:
-                    if resp.status == 200:
-                        return await resp.read()
-                    logger.error(f"Video download failed: HTTP {resp.status}")
-                    return None
-        except Exception as e:
-            logger.error(f"Video download error: {e}")
-            return None
