@@ -21,7 +21,7 @@ async def bot_help(message: types.Message):
         "the people who run this bot, and their answer arrives in this chat.\n",
         "<b>In a driver's group</b>",
         "/help — What the bot posts there, and whether the group is set up (anyone)",
-        "/setunit 1234 — Set this group's unit number (anyone)",
+        "/setunit &lt;truck unit&gt; — Set this group's unit number (anyone)",
         "/events — Choose which event types this group gets (admins)",
         "/disable · /enable — Mute or unmute this group's alerts (anyone in that group)",
         "/removegroup — Unregister this group (admins)\n",

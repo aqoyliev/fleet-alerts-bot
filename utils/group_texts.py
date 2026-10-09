@@ -44,7 +44,7 @@ def joined_registered(unit: str) -> str:
         "Nothing else to set up. Worth knowing:\n"
         "• <b>/disable</b> — mute alerts in this group (<b>/enable</b> brings them back)\n"
         "• <b>/help</b> — show this again\n\n"
-        f"Wrong truck? Correct it with <code>/setunit 1234</code>."
+        f"Wrong truck? Correct it with <code>/setunit &lt;truck unit&gt;</code>."
     )
 
 
@@ -67,7 +67,7 @@ def unit_set(unit: str, previous: str | None = None, muted: bool = False) -> str
             f"🔁 <b>Now following {_unit_label(unit)}</b>\n\n"
             f"This group was set to {_unit_label(previous)}. From now on I'll post "
             f"{_unit_label(unit)}'s alerts here instead.\n\n"
-            "Wrong truck? Correct it with <code>/setunit 1234</code>."
+            "Wrong truck? Correct it with <code>/setunit &lt;truck unit&gt;</code>."
         )
     if muted:
         # "I'll post this truck's alerts here" is a lie to a muted group, and the only
@@ -134,7 +134,7 @@ def joined_needs_unit() -> str:
     return (
         "👋 <b>Almost there — which truck is this group for?</b>\n\n"
         "<b>Nothing will be sent until a unit is set.</b>\n"
-        "<code>/setunit &lt;truck number&gt;</code>\n"
+        "<code>/setunit &lt;truck unit&gt;</code>\n"
         "e.g. <code>/setunit 1234</code>"
     )
 
@@ -151,7 +151,7 @@ def joined_unknown_unit(company: str, unit: str, suggestions: list[str] | None =
         "such truck in Samsara, so I can't route alerts here yet. "
         "<b>Nothing will be sent until that's fixed.</b>\n"
         f"{hint}\n"
-        "Set the right number with <code>/setunit 1234</code>."
+        "Set the right number with <code>/setunit &lt;truck unit&gt;</code>."
     )
 
 
@@ -186,7 +186,7 @@ def help_text(company: str, *, unit: str | None = None, is_main: bool = False,
         lines.append(
             "⚠️ This group isn't set up yet — I don't know which truck it belongs to, so "
             "<b>no alerts are being sent</b>.\n"
-            "Fix it with <code>/setunit 1234</code>.\n"
+            "Fix it with <code>/setunit &lt;truck unit&gt;</code>.\n"
         )
 
     lines.append("<b>Commands</b>")
@@ -197,7 +197,7 @@ def help_text(company: str, *, unit: str | None = None, is_main: bool = False,
         lines.append("/help — this message")
     else:
         if not is_main:
-            lines.append("/setunit 1234 — set or correct this group's unit")
+            lines.append("/setunit &lt;truck unit&gt; — set or correct this group's unit")
         lines += [
             "/disable — mute alerts in this group",
             "/enable — turn them back on",

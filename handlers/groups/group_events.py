@@ -198,7 +198,7 @@ async def _notify_admins_parse_failure(chat: types.Chat, title: str, description
         f"(id <code>{chat.id}</code>) but couldn't find a unit number in its name or "
         "description, so it isn't receiving anything yet.\n\n"
         "It's in the admin panel under <b>Unpaired</b> — open it there and pick its "
-        "truck. Or send <code>/setunit 1234</code> in the group itself."
+        "truck. Or send <code>/setunit &lt;truck unit&gt;</code> in the group itself."
     )
     for admin_id in await _admin_ids():
         try:
@@ -238,7 +238,7 @@ async def _notify_admins_unknown_unit(chat: types.Chat, title: str, unit: str,
         f"unit <code>{esc(unit)}</code> from its name, but no such vehicle exists in Samsara."
         f"{hint}\n\n"
         "It's in the admin panel under <b>Unpaired</b> — pick its truck there, or set "
-        "it in the group with <code>/setunit &lt;unit&gt;</code>."
+        "it in the group with <code>/setunit &lt;truck unit&gt;</code>."
     )
     for admin_id in await _admin_ids():
         try:
@@ -405,7 +405,7 @@ async def cmd_setunit(message: types.Message):
 
     unit = clean_unit(message.get_args() or "")
     if unit is None:
-        await message.reply("Usage: <code>/setunit 1234</code>", parse_mode="HTML")
+        await message.reply("Usage: <code>/setunit &lt;truck unit&gt;</code>", parse_mode="HTML")
         return
 
     # Verify the unit exists before registering. A typo registers a group that looks

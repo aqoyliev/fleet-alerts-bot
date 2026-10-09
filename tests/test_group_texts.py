@@ -61,7 +61,7 @@ def test_missing_unit_escapes_the_placeholder_in_its_example():
     Telegram reject the whole thing -- and the group the bot just joined would be told
     nothing at all, which is the one situation this message exists for."""
     text = gt.joined_needs_unit()
-    assert "&lt;truck number&gt;" in text
+    assert "&lt;truck unit&gt;" in text
     assert "<truck" not in text
     # The placeholder shows the shape; the example shows nobody should send the brackets.
     assert "/setunit 1234" in text
