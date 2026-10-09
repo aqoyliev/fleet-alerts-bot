@@ -7,14 +7,14 @@ durable dedup has already recorded, so that delivery is refused as a duplicate a
 video never arrived at all. The alert went out with no footage and nothing to say about
 why.
 
-So the clip is now fetched rather than waited for, after the alert instead of before it.
-These pin down the three properties that make that worth having:
+So the clip is now fetched, and the alert waits for it: one message with the card and the
+footage in it. Sending the card first and the clip behind it was tried and reads wrong --
+the video is part of the alert, not a second alert about the same thing.
 
-  * only one state is polled -- Motive saying "a clip exists, not ready yet" -- so no
-    alert that was never going to have footage grows a promise of some,
-  * the promise in the first card is always closed, by a clip or by a line saying none
-    arrived, and
-  * the alert itself is never held up for any of it.
+  * Only one state is polled -- Motive saying "a clip exists, not ready yet" -- so an
+    alert that was never going to have footage is not delayed looking for any.
+  * A clip that never turns up costs the wait and nothing else: the same card goes out
+    that would have gone out anyway.
 """
 import pytest
 
@@ -91,19 +91,12 @@ def test_without_an_api_key_there_is_nothing_to_ask(monkeypatch):
 
 @pytest.fixture
 def poll(monkeypatch, api_key):
-    """Runs the follow-up with no real waiting. The test scripts the lookups through
-    state["script"] and reads the sends back out of state["sent"]."""
-    state = {"sent": [], "slept": [], "lookups": 0}
+    """Runs the wait with no real waiting. The test scripts the lookups through
+    state["script"] and reads what was slept out of state["slept"]."""
+    state = {"slept": [], "lookups": 0}
 
     async def _no_sleep(seconds):
         state["slept"].append(seconds)
-
-    async def _send_all(bot, chat_ids, text, media=None, is_video=False):
-        state["sent"].append({"to": list(chat_ids), "text": text,
-                              "media": media, "is_video": is_video})
-
-    async def _download(video_urls, image_urls):
-        return state.get("bytes", [b"clip"]), bool(video_urls)
 
     def _script(results):
         async def _find(key, event_id, occurred_at, event_types):
@@ -113,8 +106,6 @@ def poll(monkeypatch, api_key):
         monkeypatch.setattr(wh, "find_performance_event", _find)
 
     monkeypatch.setattr(wh.asyncio, "sleep", _no_sleep)
-    monkeypatch.setattr(wh, "_send_all", _send_all)
-    monkeypatch.setattr(wh, "_download_media", _download)
     state["script"] = _script
     return state
 
@@ -136,73 +127,48 @@ def _still_transcoding_row():
     }}
 
 
-async def test_a_ready_clip_is_sent_on_to_the_same_recipients(poll):
+async def test_a_ready_clip_comes_back_as_its_urls(poll):
     poll["script"]([("found", _ready_row())])
-    await wh._follow_up_with_motive_video(object(), _event(), "hard_brake", [-100111, 777])
-
-    assert len(poll["sent"]) == 1
-    sent = poll["sent"][0]
-    assert sent["to"] == [-100111, 777]
-    assert sent["is_video"] is True
-    # The details were in the first card; the caption only says which alert this is.
-    assert "HARD BRAKE" in sent["text"]
-    assert "1269" in sent["text"]
+    assert await wh._wait_for_motive_clip(_event()) == (
+        ["https://x/f.mp4", "https://x/d.mp4"], [])
 
 
 async def test_a_row_that_omits_the_available_flag_is_still_a_clip(poll):
     """The flag was already read off the delivery. Requiring the API row to repeat it
-    would make the follow-up depend on two payload shapes agreeing."""
+    would make the wait depend on two payload shapes agreeing."""
     row = _ready_row()
     del row["camera_media"]["available"]
     poll["script"]([("found", row)])
-    await wh._follow_up_with_motive_video(object(), _event(), "hard_brake", [777])
 
-    assert len(poll["sent"]) == 1
-    assert "HARD BRAKE" in poll["sent"][0]["text"]
+    video_urls, _ = await wh._wait_for_motive_clip(_event())
+    assert video_urls == ["https://x/f.mp4", "https://x/d.mp4"]
 
 
 async def test_it_keeps_asking_while_the_clip_transcodes(poll):
     poll["script"]([("found", _still_transcoding_row()),
                     ("found", _still_transcoding_row()),
                     ("found", _ready_row())])
-    await wh._follow_up_with_motive_video(object(), _event(), "hard_brake", [777])
 
+    video_urls, _ = await wh._wait_for_motive_clip(_event())
     assert poll["lookups"] == 3
-    assert len(poll["sent"]) == 1
-    assert "No video available" not in poll["sent"][0]["text"]
+    assert video_urls
 
 
 async def test_a_failed_lookup_is_not_a_verdict(poll):
     """Unlike the crash check, a miss here means Motive's index has not caught up: the
     window is keyed on this event's own day and type. So it asks again."""
     poll["script"]([("error", None), ("absent", None), ("found", _ready_row())])
-    await wh._follow_up_with_motive_video(object(), _event(), "hard_brake", [777])
 
+    video_urls, _ = await wh._wait_for_motive_clip(_event())
     assert poll["lookups"] == 3
-    assert len(poll["sent"]) == 1
-    assert "HARD BRAKE" in poll["sent"][0]["text"]
+    assert video_urls
 
 
-async def test_a_clip_that_never_arrives_still_closes_the_promise(poll):
-    """The first card said a video was pending. Leaving that as the last word is the
-    failure this whole path exists to avoid."""
+async def test_a_clip_that_never_arrives_costs_the_wait_and_nothing_else(poll):
     poll["script"]([("found", _still_transcoding_row())])
-    await wh._follow_up_with_motive_video(object(), _event(), "hard_brake", [777])
 
+    assert await wh._wait_for_motive_clip(_event()) == ([], [])
     assert poll["lookups"] == len(wh._MOTIVE_VIDEO_PROBES)
-    assert len(poll["sent"]) == 1
-    assert "No video available" in poll["sent"][0]["text"]
-    assert "1269" in poll["sent"][0]["text"]
-    assert poll["sent"][0]["media"] is None
-
-
-async def test_a_clip_that_will_not_download_closes_it_too(poll):
-    poll["script"]([("found", _ready_row())])
-    poll["bytes"] = []
-    await wh._follow_up_with_motive_video(object(), _event(), "hard_brake", [777])
-
-    assert len(poll["sent"]) == 1
-    assert "No video available" in poll["sent"][0]["text"]
 
 
 async def test_it_asks_under_the_type_motive_filed_the_event_as(poll):
@@ -212,27 +178,27 @@ async def test_it_asks_under_the_type_motive_filed_the_event_as(poll):
     assert wh._get_event_type(event) == "crash"
 
     poll["script"]([("found", _ready_row())])
-    await wh._follow_up_with_motive_video(object(), event, "crash", [777])
+    await wh._wait_for_motive_clip(event)
 
     assert poll["asked_for"] == "hard_brake"
 
 
 async def test_the_waits_add_up_to_the_probe_marks(poll):
     poll["script"]([("found", _still_transcoding_row())])
-    await wh._follow_up_with_motive_video(object(), _event(), "hard_brake", [777])
+    await wh._wait_for_motive_clip(_event())
 
     # Each sleep is the gap to the next mark, not the mark itself.
     marks = wh._MOTIVE_VIDEO_PROBES
     assert poll["slept"] == [marks[0], *(b - a for a, b in zip(marks, marks[1:]))]
 
 
-# -- the first card, and the alert not waiting for any of it -------------------
+# -- one message, card and clip together ---------------------------------------
 
 @pytest.fixture
 def alerted(monkeypatch, api_key):
-    """Drives _handle_event with the database and Telegram stubbed out, recording the
-    card that went out and whether a follow-up was spawned behind it."""
-    state = {"cards": [], "spawned": []}
+    """Drives _handle_event with the database and Telegram stubbed out, recording every
+    message it sent and whether the clip was waited for."""
+    state = {"sent": [], "waited": 0}
 
     async def _save_violation(**kwargs):
         return True
@@ -244,37 +210,53 @@ def alerted(monkeypatch, api_key):
         return [777]
 
     async def _send_all(bot, chat_ids, text, media=None, is_video=False):
-        state["cards"].append(text)
+        state["sent"].append({"text": text, "media": media, "is_video": is_video})
 
-    def _spawn(coro):
-        state["spawned"].append(coro)
-        coro.close()  # not run here -- the follow-up has its own tests above
+    async def _wait(event):
+        state["waited"] += 1
+        return state.get("urls", (["https://x/f.mp4"], []))
+
+    async def _download(video_urls, image_urls):
+        return ([b"clip"] if video_urls or image_urls else []), bool(video_urls)
 
     monkeypatch.setattr(wh, "save_violation", _save_violation)
     monkeypatch.setattr(wh, "get_groups_for_event", _groups)
     monkeypatch.setattr(wh, "get_subscribed_admins", _admins)
     monkeypatch.setattr(wh, "_send_all", _send_all)
-    monkeypatch.setattr(wh, "_spawn", _spawn)
+    monkeypatch.setattr(wh, "_wait_for_motive_clip", _wait)
+    monkeypatch.setattr(wh, "_download_media", _download)
     return state
 
 
-async def test_the_card_says_a_video_is_coming_and_does_not_wait_for_it(alerted):
+async def test_the_card_and_the_clip_arrive_as_one_message(alerted):
     await wh._handle_event(object(), _event())
 
-    assert len(alerted["cards"]) == 1
-    assert "Video pending" in alerted["cards"][0]
-    # That old line would have been a lie while a clip was on its way.
-    assert "No camera media available" not in alerted["cards"][0]
-    assert len(alerted["spawned"]) == 1
+    assert alerted["waited"] == 1
+    assert len(alerted["sent"]) == 1
+    sent = alerted["sent"][0]
+    assert sent["is_video"] is True
+    assert sent["media"] == [b"clip"]
+    # The whole card, not a bare caption: there is no earlier message to refer back to.
+    assert "HARD BRAKE" in sent["text"]
+    assert "1269" in sent["text"]
 
 
-async def test_an_event_with_no_footage_coming_promises_nothing(alerted):
+async def test_a_clip_that_never_came_still_sends_the_card_once(alerted):
+    alerted["urls"] = ([], [])
+    await wh._handle_event(object(), _event())
+
+    assert len(alerted["sent"]) == 1
+    assert "HARD BRAKE" in alerted["sent"][0]["text"]
+    assert alerted["sent"][0]["media"] == []
+
+
+async def test_an_event_with_no_footage_coming_is_not_delayed(alerted):
     event = _event()
     event["camera_media"]["available"] = False
     await wh._handle_event(object(), event)
 
-    assert "Video pending" not in alerted["cards"][0]
-    assert alerted["spawned"] == []
+    assert alerted["waited"] == 0
+    assert len(alerted["sent"]) == 1
 
 
 # -- tailgating ----------------------------------------------------------------

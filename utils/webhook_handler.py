@@ -454,19 +454,6 @@ def _format_crash_initial(event: dict, company_name: str = "") -> str:
     return _format_event(event, company_name, notes=["📹 <i>Video pending…</i>"])
 
 
-def _format_video_caption(event: dict, event_type: str) -> str:
-    """Caption for a clip that arrives after the alert it belongs to. The details went
-    out in the first card, so this only has to say which alert the clip is for.
-
-    _format_crash_video_caption below is the Samsara crash flow's own version of this
-    and is deliberately left alone: its wording belongs to a two-stage card, where this
-    one labels a follow-up to an ordinary alert of any type.
-    """
-    emoji, title = EVENT_TYPE_MAP.get(
-        event_type, ("🚨", event_type.upper().replace("_", " ")))
-    return f"{emoji} <b>{title}</b> · <code>{esc(_get_vehicle(event))}</code>"
-
-
 def _format_crash_video_caption(event: dict) -> str:
     """Short caption for the crash video follow-up — the full details already went out
     in the first alert, so this just labels the clip."""
@@ -720,12 +707,17 @@ _CRASH_CONFIRM_PROBES = (60, 120)
 # id — which _persist_once has already recorded, so that delivery is correctly refused as
 # a duplicate and the video used never to arrive at all.
 #
-# So the clip is fetched rather than waited for, and the alert itself is not held up for
-# it. These marks are a guess at how long transcoding takes, in the shape of
+# So the clip is fetched, and the alert waits for it: one message carrying the card and
+# the footage, rather than a card now and a clip later. Splitting them was the first
+# attempt here and it reads wrong — the video is part of the alert, not a second alert
+# about the same thing — so the cost is paid on latency instead, up to the last mark
+# below. Crash alerts already wait out their confirmation for a comparable reason.
+#
+# These marks are a guess at how long transcoding takes, in the shape of
 # _CRASH_CONFIRM_PROBES: each attempt logs what it found, so the real timing can be read
-# off a week of logs rather than guessed at twice. A restart loses an in-flight poll —
-# the alert has already gone out, and a table to resume a video from is not worth what it
-# costs.
+# off a week of logs rather than guessed at twice. A restart during the wait loses the
+# alert, the same way it would during a crash confirmation — minus the pending row that
+# buys one back, which is not worth building for a dashcam clip.
 _MOTIVE_VIDEO_PROBES = (120, 300, 600)
 
 
@@ -751,13 +743,11 @@ def _motive_clip_is_coming(event: dict) -> bool:
     return not video_urls and not image_urls
 
 
-async def _follow_up_with_motive_video(bot: Bot, event: dict, event_type: str,
-                                       chat_ids: list[int]) -> None:
-    """Ask Motive for the clip until it has one, then send it to the alert's recipients.
+async def _wait_for_motive_clip(event: dict) -> tuple[list[str], list[str]]:
+    """Ask Motive for the clip until it has one, and hand back its URLs.
 
-    The first card promised a video (see _motive_clip_is_coming), so this always closes
-    that promise one way or the other — a clip, or a line saying none arrived. Leaving
-    "Video pending…" as the last word is the failure this is written to avoid.
+    Returns ([], []) if it never turned up, which is the caller carrying on with a card
+    and no footage — the same card it would have sent anyway, just later.
     """
     event_id = event.get("id", "?")
     raw_type = (event.get("type") or "").strip().lower()
@@ -785,18 +775,11 @@ async def _follow_up_with_motive_video(bot: Bot, event: dict, event_type: str,
             logger.info(f"[motive] clip for {event_id} at +{mark}s: still transcoding "
                         f"(status={camera.get('auto_transcode_status') or '?'})")
             continue
-        logger.info(f"[motive] clip for {event_id} ready at +{mark}s — sending it on")
-        media, is_video = await _download_media(video_urls, image_urls)
-        if not media:
-            logger.error(f"[motive] clip for {event_id} would not download")
-            break
-        await _send_all(bot, chat_ids, _format_video_caption(event, event_type),
-                        media, is_video)
-        return
-    logger.info(f"[motive] no clip for {event_id} after "
-                f"{_MOTIVE_VIDEO_PROBES[-1]}s — telling the recipients so")
-    await _send_all(bot, chat_ids,
-                    f"📹 <i>No video available</i> · <code>{esc(_get_vehicle(event))}</code>")
+        logger.info(f"[motive] clip for {event_id} ready at +{mark}s — alerting with it")
+        return video_urls, image_urls
+    logger.info(f"[motive] no clip for {event_id} after {_MOTIVE_VIDEO_PROBES[-1]}s — "
+                f"alerting without one")
+    return [], []
 
 
 async def _motive_crash_is_real(event: dict, elapsed_before: float = 0.0) -> bool | None:
@@ -1021,7 +1004,8 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
             return
 
         video_urls, image_urls = _get_camera_media_info(event)
-        clip_is_coming = _motive_clip_is_coming(event)
+        if _motive_clip_is_coming(event):
+            video_urls, image_urls = await _wait_for_motive_clip(event)
 
         if crash_card_sent:
             # The full details already went out at first detection (to everyone). The
@@ -1052,10 +1036,8 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
                 )
                 if samsara_details:
                     logger.info(f"[samsara] Speeding enrichment id={event_id}: {samsara_details}")
-            text = _format_event(
-                event, company_display, samsara_details,
-                notes=["📹 <i>Video pending…</i>"] if clip_is_coming else None)
-            if (not clip_is_coming and not video_urls and not image_urls
+            text = _format_event(event, company_display, samsara_details)
+            if (not video_urls and not image_urls
                     and event.get("camera_media") is None
                     and event_type != "speeding"):
                 text += "\n\n📷 <i>No camera media available</i>"
@@ -1064,12 +1046,6 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
         # rather than re-downloading (potentially large crash clips) per chat.
         media, is_video = await _download_media(video_urls, image_urls)
         await _send_all(bot, [*group_ids, *dm_ids], text, media, is_video)
-
-        if clip_is_coming:
-            # Spawned rather than awaited: the clip is worth ten minutes of waiting
-            # only because the alert has already been delivered without it.
-            _spawn(_follow_up_with_motive_video(
-                bot, event, event_type, [*group_ids, *dm_ids]))
 
     except Exception as e:
         logger.error(f"Event handling error: {e}", exc_info=True)
