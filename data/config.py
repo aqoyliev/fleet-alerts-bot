@@ -150,10 +150,13 @@ SAMSARA_WEBHOOK_SECRET = env.str("SAMSARA_WEBHOOK_SECRET", "")
 # ── Motive / KeepTruckin ────────────────────────────────────────────────────────
 # Motive signs each webhook with HMAC-SHA1 over the raw body in X-KT-Webhook-Signature.
 MOTIVE_WEBHOOK_SECRET = env.str("MOTIVE_WEBHOOK_SECRET", "")
-# Read-only API token for this company's Motive org. Used to confirm a crash detection
-# against /v2/driver_performance_events before alerting: Motive withdraws detections its
-# review rejects, so absence there is what tells a false crash from a real one. Leave
-# blank and crashes still alert, but flagged unconfirmed (see _motive_crash_is_real).
+# Read-only API token for this company's Motive org. Two jobs, both through
+# /v2/driver_performance_events:
+#   * confirming a crash detection before alerting -- Motive withdraws the detections its
+#     review rejects, so absence there is what tells a false crash from a real one, and
+#   * fetching the dashcam clip, which is not ready when the webhook fires.
+# Leave blank and alerts still go out: crashes flagged unconfirmed (see
+# _motive_crash_is_real) and every Motive alert without its video.
 MOTIVE_API_KEY = env.str("MOTIVE_API_KEY", "")
 
 # ── Webhook endpoint hardening ──────────────────────────────────────────────────

@@ -27,6 +27,7 @@ GROUP_FILTER_TYPES = [
     (("harsh_acceleration",),        "🚀", "Harsh Acceleration"),
     (("harsh_turn",),                "↩️", "Harsh Turn"),
     (("forward_collision_warning",), "⚠️", "Forward Collision"),
+    (("tailgating",),                "🚗", "Tailgating"),
     (("stop_sign_violation",),       "🛑", "Stop Sign Violation"),
     (("cell_phone",),                "📵", "Cell Phone Usage"),
     (("seat_belt_violation",),       "🔒", "Seat Belt Violation"),
