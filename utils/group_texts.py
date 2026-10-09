@@ -134,7 +134,8 @@ def joined_needs_unit() -> str:
     return (
         "👋 <b>Almost there — which truck is this group for?</b>\n\n"
         "<b>Nothing will be sent until a unit is set.</b>\n"
-        "<code>/setunit 1234</code>  ← the truck number"
+        "<code>/setunit &lt;truck number&gt;</code>\n"
+        "e.g. <code>/setunit 1234</code>"
     )
 
 

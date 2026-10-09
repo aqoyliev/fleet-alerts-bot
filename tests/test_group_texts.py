@@ -56,6 +56,17 @@ def test_missing_unit_says_nothing_will_arrive_and_how_to_fix_it():
     assert "nothing will be sent" in text.lower()
 
 
+def test_missing_unit_escapes_the_placeholder_in_its_example():
+    """The message goes out with parse_mode=HTML, so a raw <truck number> would make
+    Telegram reject the whole thing -- and the group the bot just joined would be told
+    nothing at all, which is the one situation this message exists for."""
+    text = gt.joined_needs_unit()
+    assert "&lt;truck number&gt;" in text
+    assert "<truck" not in text
+    # The placeholder shows the shape; the example shows nobody should send the brackets.
+    assert "/setunit 1234" in text
+
+
 def test_unknown_unit_names_the_unit_and_lists_suggestions():
     text = gt.joined_unknown_unit(COMPANY, "5711", ["unit571", "unit786"])
     assert "5711" in text
