@@ -128,16 +128,15 @@ def joined_needs_unit() -> str:
     The group is registered but has no unit at this point, so it routes nothing — which
     is the thing to lead with, since the bot sitting quietly in the chat otherwise looks
     like it's working. The remedy stays addressed to the people in the group: they are
-    the ones who can rename the chat or run /setunit, and most of them are not admins
-    and have no panel to open.
+    the ones who can run /setunit, and most of them are not admins and have no
+    panel to open.
     """
     return (
         "👋 <b>Almost there — which truck is this group for?</b>\n\n"
         "I couldn't find a unit number in this group's name or description, so I don't "
         "know whose alerts belong here. <b>Nothing will be sent until that's set.</b>\n\n"
         "Send this in the group:\n"
-        "<code>/setunit 1234</code>  ← the truck number\n\n"
-        "Or put it in the group name (e.g. <b>UNIT: 1234 John Smith</b>) and re-add me."
+        "<code>/setunit 1234</code>  ← the truck number"
     )
 
 
