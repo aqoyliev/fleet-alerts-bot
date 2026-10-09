@@ -781,7 +781,7 @@ async function groupsScreen(opts) {
       give it a unit here.</div>`);
   }
 
-  /** Samsara units with no Telegram group at all — the coverage gap no per-group list can
+  /** Roster units with no Telegram group at all — the coverage gap no per-group list can
    *  show, because a missing group has nowhere in one to appear. */
   function renderUnconnected(query) {
     if (!roster.available) {

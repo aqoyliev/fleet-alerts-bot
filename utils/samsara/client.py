@@ -1,9 +1,10 @@
 import asyncio
 import logging
-import re
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
+
+from utils import unit_names
 
 logger = logging.getLogger(__name__)
 
@@ -18,32 +19,10 @@ class SamsaraUnavailable(Exception):
     """
 
 
-def _normalize(name: str) -> str:
-    return " ".join(name.split()).lower()
-
-
-# A leading "UNIT"/"TRUCK" label, with any :#- separator. Fleets spell the same truck as
-# "unit571" in Samsara and "UNIT: 571" on the Telegram group, so the label is dropped
-# before comparing. CPT's roster is literally unit001/unit571/unit2007.
-_UNIT_LABEL_RE = re.compile(r"^(?:unit|truck)\s*[:#\-]*\s*", re.IGNORECASE)
-
-
-def _core(name: str) -> str:
-    """Comparison key for a unit: normalized, with a leading UNIT/TRUCK label removed."""
-    return _UNIT_LABEL_RE.sub("", _normalize(name)).strip()
-
-
-# Last-resort key: the unit's digit run. Rosters decorate names in ways no label rule can
-# anticipate — "unit1234 (lease)", "1234 - Freightliner", "TRK-1234" — and dropping a
-# leading UNIT/TRUCK label does not reach any of those. In a fleet the digits are what
-# actually identify the truck, so they are the final thing compared.
-_DIGITS_RE = re.compile(r"\d{3,7}")
-
-
-def _digits(name: str) -> str:
-    """The unit's identifying digit run, or "" if the name carries none."""
-    m = _DIGITS_RE.search(_normalize(name))
-    return m.group(0) if m else ""
+# Comparing a typed unit against a roster is shared with Motive's roster and lives in
+# utils/unit_names.py — see there for why it cannot belong to either client. Only the
+# roster key is still needed here, to build the cache this client keeps.
+_normalize = unit_names.normalize
 
 
 def _kph_to_mph(kph: float) -> float:
@@ -259,23 +238,7 @@ class SamsaraClient:
             if not answered and self._vehicles_at is None:
                 raise SamsaraUnavailable("could not fetch the vehicle roster")
 
-        if key in self._vehicle_names:
-            return self._vehicle_names[key]
-
-        for key_of in (_core, _digits):
-            wanted = key_of(unit)
-            if not wanted:
-                continue
-            hits = {n for k, n in self._vehicle_names.items() if key_of(k) == wanted}
-            if len(hits) == 1:
-                return hits.pop()
-            if hits:
-                # Two trucks answer to this — guessing would route a group's alerts to
-                # the wrong unit, so stop here rather than fall through to a looser pass
-                # that can only widen the tie.
-                logger.warning(f"Samsara unit '{unit}' is ambiguous: {sorted(hits)}")
-                return None
-        return None
+        return unit_names.match(unit, self._vehicle_names, provider="Samsara")
 
     async def all_vehicle_names(self) -> list[str]:
         """The whole roster, sorted, as Samsara spells it.
@@ -298,11 +261,7 @@ class SamsaraClient:
     async def nearby_units(self, unit: str, limit: int = 5) -> list[str]:
         """Roster names that look like `unit`, for a 'did you mean' hint. Best-effort:
         never refreshes and never raises, since it only decorates an error message."""
-        wanted = _core(unit)
-        if not wanted:
-            return []
-        hits = [n for k, n in self._vehicle_names.items() if wanted in k or _core(k) in wanted]
-        return sorted(hits)[:limit]
+        return unit_names.nearby(unit, self._vehicle_names, limit)
 
     async def get_driver_name(self, driver_id: str) -> str | None:
         data = await self._get(f"/fleet/drivers/{driver_id}")

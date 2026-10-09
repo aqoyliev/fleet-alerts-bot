@@ -121,7 +121,7 @@ async def test_an_unknown_unit_is_refused_and_nothing_is_written(panel, monkeypa
     """The status code matters less than the write that must not happen: a stored guess
     produces a group that looks configured and silently receives nothing."""
     monkeypatch.setattr(api, "resolve_unit", _resolver("missing"))
-    monkeypatch.setattr(api, "suggest_units", _suggest(["unit2007"]))
+    monkeypatch.setattr(api, "suggest_units_any", _suggest(["unit2007"]))
 
     resp = await api.set_unit(_Request({"unit": "007"}, {"tgid": str(GROUP_ID)}))
 
@@ -266,6 +266,6 @@ async def test_an_invented_event_type_is_rejected(panel):
 
 
 def _suggest(names):
-    async def _s(_key, _unit):
+    async def _s(_unit):
         return names
     return _s

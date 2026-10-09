@@ -71,7 +71,8 @@ def test_a_group_setup_message_escapes_the_unit_it_echoes():
 
 
 def test_an_unknown_unit_message_escapes_the_roster_suggestions():
-    text = group_texts.joined_unknown_unit("A & B Trucking", "57<1", ["unit&1"])
+    text = group_texts.joined_unknown_unit("A & B Trucking", "57<1", ["unit&1"],
+                                           roster="Samsara")
 
     assert "A &amp; B Trucking" in text
     assert "57&lt;1" in text

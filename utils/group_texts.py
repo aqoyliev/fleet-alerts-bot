@@ -78,19 +78,23 @@ def unit_set(unit: str, previous: str | None = None, muted: bool = False) -> str
     return text
 
 
-def joined_roster_unavailable(unit: str) -> str:
-    """Posted when the bot joins a driver group but Samsara could not be reached.
+def joined_roster_unavailable(unit: str, roster: str) -> str:
+    """Posted when the bot joins a driver group but the roster could not be reached.
 
     Deliberately not a registration. The roster is the authority on how a unit is
     spelled, and alert routing matches that spelling exactly — so a group registered on
     an unverified guess looks connected and then never posts anything. Better to say
     plainly that setup is unfinished and give the one command that finishes it.
+
+    `roster` names the provider(s) this deployment actually checks — see roster_names in
+    utils/units.py. It is a parameter rather than a constant because naming the wrong
+    system sends a dispatcher looking in a tool their fleet does not use.
     """
     return (
         f"⚠️ <b>Not connected yet — {_unit_label(unit)}</b>\n\n"
-        "I read this group's truck number, but couldn't reach Samsara to check how it's "
-        "spelled there. Saving it unverified would leave this group silent, so I "
-        "haven't saved it.\n\n"
+        f"I read this group's truck number, but couldn't check how {esc(roster)} spells "
+        "it. Saving it unverified would leave this group silent, so I haven't saved "
+        "it.\n\n"
         f"Please run <code>/setunit {esc(unit)}</code> in a few minutes to finish setup."
     )
 
@@ -139,16 +143,27 @@ def joined_needs_unit() -> str:
     )
 
 
-def joined_unknown_unit(company: str, unit: str, suggestions: list[str] | None = None) -> str:
-    """Posted when a unit was parsed from the group name but Samsara has no such vehicle —
-    usually a typo in the title, or a truck not yet added to the Samsara org."""
+def joined_unknown_unit(company: str, unit: str, suggestions: list[str] | None = None,
+                        *, roster: str) -> str:
+    """Posted when a unit was parsed from the group name but no roster has such a vehicle
+    — usually a typo in the title, or a truck not yet added to the provider's org.
+
+    `roster` names the provider(s) actually searched, and is required rather than
+    defaulted: this message's whole job is to say where to go and fix the problem, and a
+    default would eventually name a system the fleet does not use. A deployment running
+    both providers reads "isn't in Samsara or Motive", which is the literal truth — the
+    unit was looked up in both (see resolve_unit).
+    """
     hint = ""
     if suggestions:
-        hint = "\nClosest trucks in Samsara: " + ", ".join(f"<code>{esc(s)}</code>" for s in suggestions) + "\n"
+        # Not "closest trucks in <roster>" — the heading one line up has just named it,
+        # and on a dual-provider fleet that repetition reads as a second, longer label.
+        hint = ("\nClosest trucks: "
+                + ", ".join(f"<code>{esc(s)}</code>" for s in suggestions) + "\n")
     return (
-        f"⚠️ <b>Almost there — unit {esc(unit)} isn't in Samsara</b>\n\n"
+        f"⚠️ <b>Almost there — unit {esc(unit)} isn't in {esc(roster)}</b>\n\n"
         f"I read unit <code>{esc(unit)}</code> from this group's name, but {esc(company)} has no "
-        "such truck in Samsara, so I can't route alerts here yet. "
+        f"such truck in {esc(roster)}, so I can't route alerts here yet. "
         "<b>Nothing will be sent until that's fixed.</b>\n"
         f"{hint}\n"
         "Set the right number with <code>/setunit &lt;truck unit&gt;</code>."

@@ -14,7 +14,7 @@ the bot does, that gap IS the bug.
 
 Values from the browser are bound parameters, never interpolated into SQL, and never
 trusted as validation. The client picking a unit from a roster dropdown is a convenience;
-the server still asks Samsara.
+the server still asks the provider.
 """
 
 import json
@@ -42,8 +42,9 @@ from utils.db_api.violations import (
     get_counts_by_vehicle, get_daily_counts, get_recent_events, get_totals,
     get_top_violators, get_type_counts,
 )
-from utils.samsara.client import list_units, suggest_units
-from utils.units import clean_unit, resolve_unit
+from utils.units import (
+    clean_unit, list_units_any, resolve_unit, roster_names, suggest_units_any,
+)
 from utils.webapp.auth import require_admin, require_super
 
 logger = logging.getLogger(__name__)
@@ -254,21 +255,25 @@ async def alerts(request: web.Request) -> web.Response:
 
 @require_admin
 async def units(request: web.Request) -> web.Response:
-    """The Samsara roster, so changing a unit is a pick rather than a guess.
+    """The fleet roster, so changing a unit is a pick rather than a guess.
 
-    Degrades to an empty list with a reason rather than failing the screen: a Motive-only
-    fleet has no roster at all, and a Samsara outage must not make the group detail
-    unopenable.
+    Every configured provider, merged by list_units_any. That merge is the whole point of
+    this endpoint now: the picker is the only way this screen can set a unit, and while
+    it offered Samsara's vehicles alone, a truck that only Motive knew about could not be
+    paired here at all — nor in the chat, since /setunit refused it too.
+
+    Degrades to an empty list with a reason rather than failing the screen: a deployment
+    with no provider configured has no roster, and one provider's outage must not make
+    the group detail unopenable.
     """
-    if not config.SAMSARA_API_KEY:
+    roster = roster_names()
+    if not roster:
         return _ok({"units": [], "available": False,
-                    "reason": "This deployment has no Samsara fleet."})
-    try:
-        names = await list_units(config.SAMSARA_API_KEY)
-    except Exception as e:
-        logger.warning(f"[webapp] roster unavailable: {e}")
+                    "reason": "This deployment has no vehicle roster configured."})
+    names, available = await list_units_any()
+    if not available:
         return _ok({"units": [], "available": False,
-                    "reason": "Samsara couldn't be reached just now."})
+                    "reason": f"{roster} couldn't be reached just now."})
 
     taken = {g["vehicle_number"] for g in await get_groups_overview() if g["vehicle_number"]}
     return _ok({
@@ -326,7 +331,7 @@ async def set_unit(request: web.Request) -> web.Response:
     """Repoint a group at a different truck.
 
     The roster picker in the UI makes a bad value unlikely; this makes it impossible. A
-    unit that Samsara can't confirm is refused rather than stored, because a stored guess
+    unit no provider can confirm is refused rather than stored, because a stored guess
     produces a group that looks configured and silently receives nothing — see
     utils/units.py for the whole argument.
     """
@@ -336,22 +341,23 @@ async def set_unit(request: web.Request) -> web.Response:
 
     # Same input rules as /setunit -- they share clean_unit so the two surfaces cannot
     # drift apart on what counts as a unit.
+    roster = roster_names()
     unit = clean_unit(str((await _body(request)).get("unit", "")))
     if unit is None:
         return _fail("bad_unit", "Pick a unit from the list, or type its name the way "
-                                 "Samsara spells it.")
+                                 f"{roster} spells it.")
 
     status, resolved = await resolve_unit(unit)
 
     if status == "missing":
-        return _fail("unit_not_found", f"No unit “{unit}” in Samsara.", status=409,
-                     suggestions=await suggest_units(config.SAMSARA_API_KEY, unit))
+        return _fail("unit_not_found", f"No unit “{unit}” in {roster}.", status=409,
+                     suggestions=await suggest_units_any(unit))
     if status == "unavailable":
         return _fail(
             "roster_unavailable",
-            "Samsara couldn't be reached, so the unit wasn't saved — the spelling has to "
-            "match the roster exactly or this group would receive nothing. Try again in a "
-            "few minutes.",
+            f"Couldn't finish checking that unit against {roster}, so it wasn't saved — "
+            "the spelling has to match the roster exactly or this group would receive "
+            "nothing. Try again in a few minutes.",
             status=503,
         )
 
@@ -363,8 +369,10 @@ async def set_unit(request: web.Request) -> web.Response:
         "ok": True,
         "vehicle_number": resolved,
         # Surfaced so the dispatcher sees that "571" became "unit571" rather than
-        # wondering why the field doesn't show what they typed.
-        "note": f"Matched Samsara's “{resolved}”." if resolved != unit else None,
+        # wondering why the field doesn't show what they typed. The provider that matched
+        # is not named, because resolve_unit does not report it and naming the wrong one
+        # would be worse than naming none.
+        "note": f"Matched the roster's “{resolved}”." if resolved != unit else None,
         "unverified": status == "no_roster",
     })
 

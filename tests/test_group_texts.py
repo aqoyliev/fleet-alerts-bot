@@ -68,22 +68,24 @@ def test_missing_unit_escapes_the_placeholder_in_its_example():
 
 
 def test_unknown_unit_names_the_unit_and_lists_suggestions():
-    text = gt.joined_unknown_unit(COMPANY, "5711", ["unit571", "unit786"])
+    text = gt.joined_unknown_unit(COMPANY, "5711", ["unit571", "unit786"],
+                                  roster="Samsara")
     assert "5711" in text
     assert "unit571" in text and "unit786" in text
     assert "/setunit" in text
 
 
 def test_unknown_unit_without_suggestions_has_no_dangling_label():
-    """suggest_units returns [] when Samsara can't be reached, and an empty 'Closest
+    """suggest_units_any returns [] when no roster can be reached, and an empty 'Closest
     trucks in Samsara:' line is worse than no line."""
-    text = gt.joined_unknown_unit(COMPANY, "5711", [])
+    text = gt.joined_unknown_unit(COMPANY, "5711", [], roster="Samsara")
     assert "Closest" not in text
     assert "/setunit" in text
 
 
 def test_unknown_unit_still_says_nothing_will_arrive():
-    assert "nothing will be sent" in gt.joined_unknown_unit(COMPANY, "5711", []).lower()
+    assert "nothing will be sent" in gt.joined_unknown_unit(
+        COMPANY, "5711", [], roster="Samsara").lower()
 
 
 # ── /help in a group ───────────────────────────────────────────────────────────

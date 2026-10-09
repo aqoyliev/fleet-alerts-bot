@@ -183,7 +183,7 @@ async def test_a_refused_unit_is_not_announced(panel, monkeypatch, verdict, stat
 
     async def _suggest(*_a, **_k):
         return []
-    monkeypatch.setattr(api, "suggest_units", _suggest)
+    monkeypatch.setattr(api, "suggest_units_any", _suggest)
 
     resp = await api.set_unit(_Request({"unit": "007"}))
 

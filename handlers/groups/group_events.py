@@ -19,8 +19,7 @@ from utils.db_api.violations import get_violations_by_type, get_top_violators
 from utils.group_parser import extract_vehicle_number
 from utils.tg_text import esc
 from utils import group_texts
-from utils.samsara.client import suggest_units
-from utils.units import clean_unit, resolve_unit
+from utils.units import clean_unit, resolve_unit, roster_names, suggest_units_any
 from utils.webhook_handler import EVENT_TYPE_MAP
 from keyboards.inline.group_settings import group_events_keyboard
 
@@ -228,14 +227,16 @@ async def _say(chat_id: int, text: str):
 
 async def _notify_admins_unknown_unit(chat: types.Chat, title: str, unit: str,
                                       suggestions: list[str]):
-    """DM the admins that a group named a unit Samsara has never heard of — usually a
-    typo in the group title, or a truck not yet added to the Samsara org."""
-    hint = ("\n\nClosest units in Samsara: "
+    """DM the admins that a group named a unit no roster has heard of — usually a typo
+    in the group title, or a truck not yet added to the provider's org."""
+    roster = roster_names()
+    hint = ("\n\nClosest units: "
             + ", ".join(f"<code>{esc(s)}</code>" for s in suggestions)) if suggestions else ""
     text = (
         "⚠️ <b>Group needs a unit</b>\n\n"
         f"I was added to <b>{esc(title) or 'a group'}</b> (id <code>{chat.id}</code>) and read "
-        f"unit <code>{esc(unit)}</code> from its name, but no such vehicle exists in Samsara."
+        f"unit <code>{esc(unit)}</code> from its name, but no such vehicle exists in "
+        f"{roster}."
         f"{hint}\n\n"
         "It's in the admin panel under <b>Unpaired</b> — pick its truck there, or set "
         "it in the group with <code>/setunit &lt;truck unit&gt;</code>."
@@ -342,25 +343,25 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
             # something the roster does not match, leaving the group silent. Say so and
             # let whoever is in the chat run /setunit once Samsara answers again.
             logger.warning(f"Group '{title}' (id={chat.id}) parsed unit {vehicle}, "
-                           f"but Samsara could not be reached — registering it unassigned")
+                           f"but the roster could not be reached — registering it unassigned")
             await register_unassigned_group(chat.id, title)
-            await _say(chat.id, group_texts.joined_roster_unavailable(vehicle))
+            await _say(chat.id, group_texts.joined_roster_unavailable(vehicle, roster_names()))
             return
         if status == "missing":
             logger.warning(f"Group '{title}' (id={chat.id}) parsed unit {vehicle}, "
-                           f"which is not in Samsara — registering it unassigned")
+                           f"which is in no roster — registering it unassigned")
             await register_unassigned_group(chat.id, title)
             # One roster lookup, two audiences: the group is told how to fix it, the
             # admins are told it happened.
-            suggestions = await suggest_units(config.SAMSARA_API_KEY, vehicle)
+            suggestions = await suggest_units_any(vehicle)
             await _say(chat.id, group_texts.joined_unknown_unit(
-                config.COMPANY_NAME, vehicle, suggestions))
+                config.COMPANY_NAME, vehicle, suggestions, roster=roster_names()))
             await _notify_admins_unknown_unit(chat, title, vehicle, suggestions)
             return
 
         await register_group(chat.id, title, resolved)
         logger.info(f"Registered group id={chat.id} → unit {resolved}"
-                    + (" (no Samsara roster to verify against)" if status == "no_roster" else ""))
+                    + (" (no roster to verify against)" if status == "no_roster" else ""))
         await _say(chat.id, group_texts.joined_registered(resolved))
         await _notify_admins_group_registered(chat, title, resolved)
 
@@ -415,30 +416,30 @@ async def cmd_setunit(message: types.Message):
     status, unit = await resolve_unit(unit)
 
     if status == "missing":
-        suggestions = await suggest_units(config.SAMSARA_API_KEY, typed)
+        suggestions = await suggest_units_any(typed)
         hint = ("\n\nDid you mean: "
                 + ", ".join(f"<code>{esc(s)}</code>" for s in suggestions)) if suggestions else ""
         await message.reply(
-            f"❌ No unit <code>{esc(typed)}</code> found in Samsara.{hint}",
+            f"❌ No unit <code>{esc(typed)}</code> in {roster_names()}.{hint}",
             parse_mode="HTML",
         )
-        logger.info(f"Rejected /setunit {typed} in group {message.chat.id} — not in Samsara")
+        logger.info(f"Rejected /setunit {typed} in group {message.chat.id} — in no roster")
         return
 
     if status == "unavailable":
         # The roster is the authority on how this unit is spelled, and storing a guess
         # against it registers a group that silently never receives anything.
         await message.reply(
-            "⚠️ Couldn't reach Samsara to verify that unit, so it wasn't saved — "
-            "the spelling has to match the roster exactly or this group would receive "
-            "nothing. Please try again in a few minutes.",
+            f"⚠️ Couldn't finish checking that unit against {roster_names()}, so it "
+            "wasn't saved — the spelling has to match the roster exactly or this "
+            "group would receive nothing. Please try again in a few minutes.",
         )
-        logger.warning(f"Deferred /setunit {typed} in group {message.chat.id} — Samsara unreachable")
+        logger.warning(f"Deferred /setunit {typed} in group {message.chat.id} — roster unreachable")
         return
 
     note = ""
     if status == "ok" and unit != typed:
-        note = f"\n\n<i>Matched Samsara's <code>{esc(unit)}</code>.</i>"
+        note = f"\n\n<i>Matched the roster's <code>{esc(unit)}</code>.</i>"
 
     await register_group(message.chat.id, message.chat.title or "", unit)
     await message.reply(

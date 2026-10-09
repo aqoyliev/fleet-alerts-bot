@@ -73,7 +73,7 @@ def joined(monkeypatch):
     async def _get_chat(chat_id):
         return _Chat(chat_id, "")
 
-    async def _suggest(api_key, unit):
+    async def _suggest(unit):
         return []
 
     monkeypatch.setattr(ge, "register_unassigned_group", _unassigned)
@@ -82,7 +82,7 @@ def joined(monkeypatch):
     monkeypatch.setattr(ge, "_notify_admins_parse_failure", _notify_parse)
     monkeypatch.setattr(ge, "_notify_admins_unknown_unit", _notify_unknown)
     monkeypatch.setattr(ge, "_notify_admins_group_registered", _notify_registered)
-    monkeypatch.setattr(ge, "suggest_units", _suggest)
+    monkeypatch.setattr(ge, "suggest_units_any", _suggest)
     monkeypatch.setattr(ge.bot, "get_chat", _get_chat)
     monkeypatch.setattr(config, "MAIN_GROUP_ID", None)
     monkeypatch.setattr(config, "CRASH_GROUP_ID", None)

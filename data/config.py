@@ -150,13 +150,18 @@ SAMSARA_WEBHOOK_SECRET = env.str("SAMSARA_WEBHOOK_SECRET", "")
 # ── Motive / KeepTruckin ────────────────────────────────────────────────────────
 # Motive signs each webhook with HMAC-SHA1 over the raw body in X-KT-Webhook-Signature.
 MOTIVE_WEBHOOK_SECRET = env.str("MOTIVE_WEBHOOK_SECRET", "")
-# Read-only API token for this company's Motive org. Two jobs, both through
-# /v2/driver_performance_events:
+# Read-only API token for this company's Motive org. Three jobs:
 #   * confirming a crash detection before alerting -- Motive withdraws the detections its
-#     review rejects, so absence there is what tells a false crash from a real one, and
-#   * fetching the dashcam clip, which is not ready when the webhook fires.
+#     review rejects, so absence there is what tells a false crash from a real one;
+#   * fetching the dashcam clip, which is not ready when the webhook fires; and
+#   * reading the vehicle roster (/v1/vehicles), which is how a unit number typed into
+#     /setunit or picked in the admin panel gets verified. Without this key the only
+#     roster is Samsara's, so a truck that exists only in Motive cannot be paired with
+#     its group on either surface -- while Motive keeps sending that truck's alerts,
+#     which then match no group at all.
 # Leave blank and alerts still go out: crashes flagged unconfirmed (see
-# _motive_crash_is_real) and every Motive alert without its video.
+# _motive_crash_is_real), every Motive alert without its video, and Motive-only trucks
+# unpairable.
 MOTIVE_API_KEY = env.str("MOTIVE_API_KEY", "")
 
 # ── Webhook endpoint hardening ──────────────────────────────────────────────────
