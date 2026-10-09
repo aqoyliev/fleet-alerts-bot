@@ -319,8 +319,8 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
             # "G8PZ-7X5-FF2" — so this is the ordinary path, not the exception.
             await register_unassigned_group(chat.id, title)
             # Said in the group as well as to the admins, unchanged: the people who can
-            # rename the chat or run /setunit are the ones sitting in it, and until
-            # somebody acts the bot looks installed while sending nothing.
+            # run /setunit are the ones sitting in it, and until somebody acts the bot
+            # looks installed while sending nothing.
             await _say(chat.id, group_texts.joined_needs_unit())
             await _notify_admins_parse_failure(chat, title, description)
             return
