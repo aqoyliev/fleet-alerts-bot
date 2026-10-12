@@ -1,25 +1,9 @@
--- Motive Alerts Bot — Database Schema
-
-CREATE TABLE IF NOT EXISTS companies (
-    id         SERIAL PRIMARY KEY,
-    slug       VARCHAR(50)  UNIQUE NOT NULL,
-    name       VARCHAR(255) NOT NULL,
-    created_at TIMESTAMPTZ  DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS company_groups (
-    id                SERIAL PRIMARY KEY,
-    company_id        INT         REFERENCES companies(id) ON DELETE CASCADE,  -- NULL = all companies
-    telegram_group_id BIGINT      NOT NULL,
-    label             VARCHAR(100),
-    created_at        TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS group_event_types (
-    group_id   INT         NOT NULL REFERENCES company_groups(id) ON DELETE CASCADE,
-    event_type VARCHAR(50) NOT NULL,
-    PRIMARY KEY (group_id, event_type)
-);
+-- Fleet Alerts Bot — Database Schema (single-company build)
+--
+-- This deployment serves exactly ONE company; its identity and provider
+-- credentials come from the .env file (see data/config.py), so there is no
+-- `companies` table here. Everything below is scoped implicitly to that one
+-- company.
 
 CREATE TABLE IF NOT EXISTS users (
     telegram_id   BIGINT       PRIMARY KEY,
@@ -30,37 +14,142 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at    TIMESTAMPTZ  DEFAULT NOW()
 );
 
+-- crash_dm is the one notification that is ON by default: crashes never go to a group,
+-- so an admin's DM is the only place a crash is ever reported, and the cost of a missed
+-- one is not symmetric with the cost of an unwanted one. It is a column rather than a
+-- seeded admin_subscriptions row so that turning it off survives a restart.
 CREATE TABLE IF NOT EXISTS admins (
     id          SERIAL      PRIMARY KEY,
     telegram_id BIGINT      UNIQUE NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
     is_super    BOOLEAN     DEFAULT FALSE,
     added_by    BIGINT      REFERENCES users(telegram_id),
     is_active   BOOLEAN     DEFAULT TRUE,
+    crash_dm    BOOLEAN     NOT NULL DEFAULT TRUE,
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS admin_companies (
-    admin_id   INT NOT NULL REFERENCES admins(id)    ON DELETE CASCADE,
-    company_id INT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-    PRIMARY KEY (admin_id, company_id)
-);
-
+-- Per-admin personal DM subscriptions — an ALLOWLIST: a type is delivered only if listed
+-- (event_type = 'all' subscribes to every type). Crash is the exception and is not
+-- represented here at all; it lives in admins.crash_dm because it defaults to ON.
 CREATE TABLE IF NOT EXISTS admin_subscriptions (
     admin_id   INT         NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
     event_type VARCHAR(50) NOT NULL,
     PRIMARY KEY (admin_id, event_type)
 );
 
-CREATE TABLE IF NOT EXISTS violations (
-    id           BIGSERIAL    PRIMARY KEY,
-    company_slug VARCHAR(50)  NOT NULL,
-    vehicle_number VARCHAR(100) NOT NULL,
-    event_type   VARCHAR(50)  NOT NULL,
-    event_id     BIGINT       UNIQUE,
-    severity     VARCHAR(20),
-    occurred_at  TIMESTAMPTZ  NOT NULL,
-    created_at   TIMESTAMPTZ  DEFAULT NOW()
+-- Telegram groups that receive this company's alerts.
+--
+-- vehicle_number ties a group to a single unit: driver groups carry the unit number and
+-- receive only that unit's alerts.
+--
+-- is_main, not a NULL unit, is what marks the all-fleet group. The two used to be the
+-- same thing, which left nowhere to record the third state a group is actually in most
+-- often at the start: registered, because the bot was just added to it, but not yet
+-- pointed at a truck. Such a row has a NULL unit and is_main FALSE, matches nothing in
+-- get_groups_for_event, and exists so the admin panel can list it and have its unit
+-- chosen there.
+--
+-- The column is nullable on purpose. NULL means "written before this existed", and every
+-- read COALESCEs it back onto the old rule, so a row from the outgoing container during a
+-- rolling deploy routes the way it always did.
+CREATE TABLE IF NOT EXISTS alert_groups (
+    id                SERIAL      PRIMARY KEY,
+    telegram_group_id BIGINT      NOT NULL UNIQUE,
+    label             VARCHAR(100),
+    title             VARCHAR(255),
+    vehicle_number    VARCHAR(50),
+    is_main           BOOLEAN,
+    enabled           BOOLEAN     DEFAULT TRUE,
+    -- When the bot was removed from the chat; NULL while it is still in it. The row is
+    -- kept rather than deleted so that putting the bot back restores the group's unit and
+    -- its event filter instead of asking for them again, but a chat the bot is not in has
+    -- no business in the panel: there is nothing to configure and nothing it can receive.
+    left_at           TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS violations_company_occurred ON violations (company_slug, occurred_at);
+CREATE INDEX IF NOT EXISTS alert_groups_vehicle ON alert_groups (vehicle_number);
+
+-- Optional per-group event-type filter. A group with no rows here receives every type.
+CREATE TABLE IF NOT EXISTS group_event_types (
+    group_id   INT         NOT NULL REFERENCES alert_groups(id) ON DELETE CASCADE,
+    event_type VARCHAR(50) NOT NULL,
+    PRIMARY KEY (group_id, event_type)
+);
+
+CREATE TABLE IF NOT EXISTS violations (
+    id             BIGSERIAL    PRIMARY KEY,
+    vehicle_number VARCHAR(50)  NOT NULL,
+    event_type     VARCHAR(50)  NOT NULL,
+    event_id       BIGINT       UNIQUE,
+    severity       VARCHAR(20),
+    occurred_at    TIMESTAMPTZ  NOT NULL,
+    created_at     TIMESTAMPTZ  DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS violations_occurred ON violations (occurred_at);
 CREATE INDEX IF NOT EXISTS violations_vehicle ON violations (vehicle_number);
+
+-- Audit trail for the Motive crash confirmation wait (see utils/db_api/crash_confirmations.py).
+--
+-- A crash detection is held ~3 minutes before Motive's API is asked whether it still
+-- stands. That wait is a fire-and-forget task, so a row is written before it starts and
+-- the verdict filled in after: a row still NULL at startup is a wait a restart cut
+-- short, and gets resumed. The verdict tally is also the only evidence that the gate is
+-- catching false detections rather than sitting idle.
+-- payload is the event as received, so the resume can re-run the normal alert path.
+CREATE TABLE IF NOT EXISTS motive_crash_confirmations (
+    event_id     BIGINT       PRIMARY KEY,
+    payload      JSONB        NOT NULL,
+    -- NULL = still waiting. Otherwise confirmed / withdrawn / unknown / expired.
+    verdict      VARCHAR(20),
+    detected_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    decided_at   TIMESTAMPTZ
+);
+
+-- Startup reads only the undecided rows, which are near-always zero; a partial index
+-- keeps that lookup off the full table.
+CREATE INDEX IF NOT EXISTS motive_crash_confirmations_pending
+    ON motive_crash_confirmations (detected_at) WHERE verdict IS NULL;
+
+-- Support relay: which message in a maintainer's DM belongs to which user.
+--
+-- Written when a message is relayed (header and forwarded copy both get a row), read
+-- when the maintainer replies to one of them. Nothing else can supply the answer — a
+-- forwarded message names its author only when that author allows it, and a reply
+-- otherwise has no sender to route back to.
+--
+-- No foreign key to users: whoever wrote in may never have pressed /start, and a message
+-- reaching a human matters more than the bookkeeping around it.
+CREATE TABLE IF NOT EXISTS support_relays (
+    admin_chat_id    BIGINT      NOT NULL,
+    admin_msg_id     BIGINT      NOT NULL,
+    user_telegram_id BIGINT      NOT NULL,
+    created_at       TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (admin_chat_id, admin_msg_id)
+);
+
+-- One row per morning the PTI reminder album was posted (see utils/pti_reminder.py).
+--
+-- The reminder is scheduled by an in-process timer, so a deploy — and this branch serves
+-- four of them, every push is four restarts — can land on top of the slot and either lose
+-- that morning or repeat it. Claiming the day here first makes both impossible: the
+-- INSERT is what decides whether this process sends, so a restart inside the catch-up
+-- window picks the morning up exactly once.
+CREATE TABLE IF NOT EXISTS pti_reminder_runs (
+    sent_on    DATE        PRIMARY KEY,
+    group_count INT        NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- What Telegram calls the PTI posters, so they are uploaded once and then re-sent by id.
+--
+-- A file_id is valid for exactly one bot token, which is why this is a table in each
+-- deployment's own database rather than a setting someone pastes in: the bot earns the
+-- ids itself on its first send and every morning afterwards costs no upload at all.
+-- The fingerprint is over the poster bytes — replace a poster and the cache simply misses.
+CREATE TABLE IF NOT EXISTS pti_poster_cache (
+    fingerprint TEXT        PRIMARY KEY,
+    file_ids    TEXT[]      NOT NULL,
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);

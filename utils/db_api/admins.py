@@ -1,31 +1,96 @@
+from data import config
 from utils.db_api import db
 
 
-async def is_admin(telegram_id: int, company_id: int | None = None) -> bool:
-    """Returns True if user is a super admin, or an active admin for the given company."""
+def is_maintainer(telegram_id: int | None) -> bool:
+    """Is this id one of the deployment's owner accounts (config.ADMINS)?
+
+    Two things follow from it, and they are separate: the account is hidden from the
+    👥 Admins panel, and it is permanently a super admin. The second is what stops a
+    maintainer from being locked out of their own deployment by the panel — see
+    is_super_admin below.
+
+    Hiding is about visibility only, never permission. Nothing in this module filters a
+    maintainer out of a query: they stay in get_all_admins() so alerts and admin DMs keep
+    reaching them, and the panel is the only place that hides them.
+    """
+    try:
+        return int(telegram_id) in config.HIDDEN_ADMIN_IDS
+    except (TypeError, ValueError):
+        return False
+
+
+def visible_admins(admins: list[dict], viewer_telegram_id: int) -> list[dict]:
+    """The admin rows `viewer_telegram_id` is allowed to see in the panel.
+
+    A maintainer sees the real, unfiltered list — otherwise they could not see their own
+    account or manage the team they are hiding from.
+    """
+    if is_maintainer(viewer_telegram_id):
+        return list(admins)
+    return [a for a in admins if not is_maintainer(a["telegram_id"])]
+
+
+def _concealed_from(admin: dict | None, viewer_id: int) -> bool:
+    """True when this viewer must be told the admin doesn't exist.
+
+    Every caller answers with "Admin not found" for a concealed admin, indistinguishable
+    from one that was actually removed. The panel's whole job is that one account isn't
+    in it, and a mutation that silently worked on it would undo that.
+    """
+    return bool(admin) and is_maintainer(admin["telegram_id"]) and not is_maintainer(viewer_id)
+
+
+async def is_admin(telegram_id: int) -> bool:
+    """Returns True if the user is an active admin (super or regular)."""
+    if is_maintainer(telegram_id):
+        return True
     row = await db.fetchrow(
-        "SELECT id, is_super, is_active FROM admins WHERE telegram_id = $1",
+        "SELECT is_active FROM admins WHERE telegram_id = $1",
         telegram_id,
     )
-    if not row or not row["is_active"]:
-        return False
-    if row["is_super"]:
-        return True
-    if company_id is None:
-        return True
-    exists = await db.fetchval(
-        "SELECT 1 FROM admin_companies WHERE admin_id = $1 AND company_id = $2",
-        row["id"], company_id,
-    )
-    return exists is not None
+    return bool(row and row["is_active"])
 
 
 async def is_super_admin(telegram_id: int) -> bool:
+    """Returns True for an active super admin — and always for a maintainer.
+
+    The config override is not a convenience. Every route out of the super-admin role
+    runs through this panel, and one of them (transfer) demotes whoever uses it: a
+    maintainer who hands the role to a customer loses their own management access, with
+    no way back that doesn't involve a direct DB write. Deriving the answer from
+    config.ADMINS instead of the row makes that unlosable.
+    """
+    if is_maintainer(telegram_id):
+        return True
     row = await db.fetchrow(
         "SELECT is_super, is_active FROM admins WHERE telegram_id = $1",
         telegram_id,
     )
     return bool(row and row["is_active"] and row["is_super"])
+
+
+async def seed_super_admins(telegram_ids: list[int]) -> None:
+    """Ensure every maintainer id from config.ADMINS is an active super admin.
+
+    Runs on startup so a brand-new deployment has a working super admin without any
+    manual DB step, and so an existing one is put back the way config says it should be.
+
+    This used to be ON CONFLICT DO NOTHING, on the reasoning that a super admin who
+    stepped down via transfer shouldn't be re-promoted by a restart. That reasoning
+    belonged to the old meaning of ADMINS, when it was a generic bootstrap list that
+    might name the customer's own people. It now names the maintainer, for whom stepping
+    down is not a thing that should be possible — and leaving the row demoted only made
+    the DB disagree with is_super_admin().
+    """
+    from utils.db_api.users import ensure_user
+    for tid in telegram_ids:
+        await ensure_user(tid)
+        await db.execute(
+            "INSERT INTO admins (telegram_id, is_super, is_active) VALUES ($1, TRUE, TRUE) "
+            "ON CONFLICT (telegram_id) DO UPDATE SET is_super = TRUE, is_active = TRUE",
+            tid,
+        )
 
 
 async def add_admin(telegram_id: int, added_by: int | None = None, is_super: bool = False) -> int:
@@ -41,33 +106,65 @@ async def add_admin(telegram_id: int, added_by: int | None = None, is_super: boo
     )
 
 
-async def assign_company(admin_id: int, company_id: int):
+async def promote_to_super(admin_id: int) -> None:
+    """Make an existing admin a super admin, leaving whoever promoted them super too.
+
+    This is the difference from transfer_super_admin, which hands the role over and
+    demotes the current holder. A company needs a second super admin without its
+    maintainer stepping down, so promotion had to stop costing the promoter their access.
+    """
     await db.execute(
-        "INSERT INTO admin_companies (admin_id, company_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        admin_id, company_id,
+        "UPDATE admins SET is_super = TRUE WHERE id = $1", admin_id
     )
 
 
-async def get_subscribed_admins(event_type: str, company_slug: str) -> list[int]:
-    """Returns telegram_ids of active admins who want a DM for this event type
-    and have access to the given company (super admins get all companies)."""
+async def transfer_super_admin(current_telegram_id: int, target_admin_id: int) -> None:
+    """Move super-admin status from the current holder to another admin, atomically:
+    promote the target (and ensure it's active) and demote the current super to a
+    regular admin. Done in one transaction so there is never a moment with no super."""
+    async with db.pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE admins SET is_super = TRUE, is_active = TRUE WHERE id = $1",
+                target_admin_id,
+            )
+            await conn.execute(
+                "UPDATE admins SET is_super = FALSE WHERE telegram_id = $1",
+                current_telegram_id,
+            )
+
+
+CRASH_EVENT_TYPE = "crash"
+
+
+async def get_subscribed_admins(event_type: str) -> list[int]:
+    """Returns telegram_ids of active admins who want a personal DM for this event type.
+
+    Crash is the one type that is opt-OUT: it is read off admins.crash_dm, which defaults
+    to TRUE, so every admin gets crashes until they turn them off in Settings. Every other
+    type is opt-IN through admin_subscriptions, where an admin with no rows gets nothing.
+
+    The asymmetry is deliberate. A crash is never delivered to a group — a DM is the only
+    place it appears — and an admin who never opened Settings would otherwise be told
+    about a collision by nobody at all. Note that a blanket 'all' subscription does not
+    override crash_dm: the column is the crash switch, and it already starts on.
+    """
+    if event_type == CRASH_EVENT_TYPE:
+        rows = await db.fetch(
+            "SELECT telegram_id FROM admins "
+            "WHERE is_active = TRUE AND COALESCE(crash_dm, TRUE)"
+        )
+        return [r["telegram_id"] for r in rows]
+
     rows = await db.fetch(
         """
         SELECT a.telegram_id
         FROM admin_subscriptions sub
         JOIN admins a ON a.id = sub.admin_id
-        JOIN companies c ON c.slug = $2
         WHERE a.is_active = TRUE
           AND (sub.event_type = $1 OR sub.event_type = 'all')
-          AND (
-              a.is_super = TRUE
-              OR EXISTS (
-                  SELECT 1 FROM admin_companies ac
-                  WHERE ac.admin_id = a.id AND ac.company_id = c.id
-              )
-          )
         """,
-        event_type, company_slug,
+        event_type,
     )
     return [r["telegram_id"] for r in rows]
 
@@ -101,15 +198,6 @@ async def get_admin_by_id(admin_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-async def get_admin_companies(admin_id: int) -> list[int]:
-    """Returns list of company_ids the admin has been explicitly assigned to."""
-    rows = await db.fetch(
-        "SELECT company_id FROM admin_companies WHERE admin_id = $1",
-        admin_id,
-    )
-    return [r["company_id"] for r in rows]
-
-
 async def set_admin_active(admin_id: int, is_active: bool) -> None:
     """Activate or deactivate an admin."""
     await db.execute(
@@ -123,16 +211,12 @@ async def delete_admin(admin_id: int) -> None:
     await db.execute("DELETE FROM admins WHERE id = $1", admin_id)
 
 
-async def revoke_company(admin_id: int, company_id: int) -> None:
-    """Remove an admin's access to a specific company."""
-    await db.execute(
-        "DELETE FROM admin_companies WHERE admin_id = $1 AND company_id = $2",
-        admin_id, company_id,
-    )
-
-
 async def get_admin_subscriptions(telegram_id: int) -> list[str]:
-    """Returns list of event_types the admin is subscribed to for personal DMs."""
+    """Returns list of event_types the admin is subscribed to for personal DMs.
+
+    Includes 'crash' when admins.crash_dm is on, so the Settings toggles render from one
+    list and the crash row shows ✅ by default without the UI knowing it is stored apart.
+    """
     rows = await db.fetch(
         """
         SELECT sub.event_type
@@ -142,11 +226,27 @@ async def get_admin_subscriptions(telegram_id: int) -> list[str]:
         """,
         telegram_id,
     )
-    return [r["event_type"] for r in rows]
+    subscriptions = [r["event_type"] for r in rows]
+
+    crash_dm = await db.fetchval(
+        "SELECT COALESCE(crash_dm, TRUE) FROM admins WHERE telegram_id = $1", telegram_id
+    )
+    if crash_dm and CRASH_EVENT_TYPE not in subscriptions:
+        subscriptions.append(CRASH_EVENT_TYPE)
+    return subscriptions
 
 
 async def toggle_subscription(telegram_id: int, event_type: str) -> None:
     """Toggle a personal DM subscription for an event type. Adds if absent, removes if present."""
+    if event_type == CRASH_EVENT_TYPE:
+        # Crash lives in its own column because it defaults to on; flipping it is the
+        # whole opt-out, and it must not also leave a stale admin_subscriptions row.
+        await db.execute(
+            "UPDATE admins SET crash_dm = NOT COALESCE(crash_dm, TRUE) WHERE telegram_id = $1",
+            telegram_id,
+        )
+        return
+
     admin_id = await db.fetchval("SELECT id FROM admins WHERE telegram_id = $1", telegram_id)
     exists = await db.fetchval(
         "SELECT 1 FROM admin_subscriptions WHERE admin_id = $1 AND event_type = $2",

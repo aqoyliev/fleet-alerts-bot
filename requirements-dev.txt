@@ -1,0 +1,9 @@
+# Test-only dependencies: pip install -r requirements-dev.txt
+#
+# pytest-asyncio is what makes the suite run at all. Nearly every test here is an
+# `async def`, and without the plugin pytest reports each one as a failure ("async def
+# functions are not natively supported") — a full red suite that says nothing about the
+# code. pytest.ini sets asyncio_mode = auto, which is this plugin's setting.
+-r requirements.txt
+pytest~=8.4
+pytest-asyncio~=0.24
