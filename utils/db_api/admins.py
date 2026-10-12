@@ -118,6 +118,21 @@ async def promote_to_super(admin_id: int) -> None:
     )
 
 
+async def demote_from_super(admin_id: int) -> None:
+    """Take the super-admin role off an admin, leaving them a regular admin.
+
+    The inverse of promote_to_super, and the one route out of the role that does not
+    also change who holds it (transfer_super_admin does). It exists because promotion
+    without demotion is a one-way door: a company that made the wrong person a super
+    admin had no way back that was not a hand-written UPDATE.
+
+    Harmless against a maintainer's row, but pointless: is_super_admin reads
+    config.ADMINS for them and seed_super_admins puts the column back on the next
+    restart. The panel refuses it for that reason rather than this function.
+    """
+    await db.execute("UPDATE admins SET is_super = FALSE WHERE id = $1", admin_id)
+
+
 async def transfer_super_admin(current_telegram_id: int, target_admin_id: int) -> None:
     """Move super-admin status from the current holder to another admin, atomically:
     promote the target (and ensure it's active) and demote the current super to a
@@ -236,8 +251,48 @@ async def get_admin_subscriptions(telegram_id: int) -> list[str]:
     return subscriptions
 
 
+async def set_subscription(telegram_id: int, event_type: str, on: bool,
+                           *, _admin_id: int | None = None) -> None:
+    """Turn a personal DM subscription for one event type on or off.
+
+    The panel sends the state its switch is now in, not "flip it": two taps racing each
+    other through a toggle leave the switch showing the opposite of the truth, and a
+    silenced crash DM is not a thing to discover by accident.
+    """
+    if event_type == CRASH_EVENT_TYPE:
+        # Crash lives in its own column because it defaults to on; flipping it is the
+        # whole opt-out, and it must not also leave a stale admin_subscriptions row.
+        await db.execute(
+            "UPDATE admins SET crash_dm = $2 WHERE telegram_id = $1", telegram_id, on)
+        return
+
+    if _admin_id is None:
+        _admin_id = await db.fetchval(
+            "SELECT id FROM admins WHERE telegram_id = $1", telegram_id)
+    if _admin_id is None:
+        return
+    admin_id = _admin_id
+    if on:
+        await db.execute(
+            "INSERT INTO admin_subscriptions (admin_id, event_type) VALUES ($1, $2) "
+            "ON CONFLICT DO NOTHING",
+            admin_id, event_type,
+        )
+    else:
+        await db.execute(
+            "DELETE FROM admin_subscriptions WHERE admin_id = $1 AND event_type = $2",
+            admin_id, event_type,
+        )
+
+
 async def toggle_subscription(telegram_id: int, event_type: str) -> None:
-    """Toggle a personal DM subscription for an event type. Adds if absent, removes if present."""
+    """Flip a personal DM subscription. What the inline keyboard in the DM sends, since
+    a callback button carries no state of its own.
+
+    Deliberately not a read-then-set_subscription: crash is flipped in one statement,
+    with no lookup of the current value and none of the admin id, so two taps racing
+    each other cannot leave crash DMs off while the keyboard shows them on.
+    """
     if event_type == CRASH_EVENT_TYPE:
         # Crash lives in its own column because it defaults to on; flipping it is the
         # whole opt-out, and it must not also leave a stale admin_subscriptions row.
@@ -252,13 +307,4 @@ async def toggle_subscription(telegram_id: int, event_type: str) -> None:
         "SELECT 1 FROM admin_subscriptions WHERE admin_id = $1 AND event_type = $2",
         admin_id, event_type,
     )
-    if exists:
-        await db.execute(
-            "DELETE FROM admin_subscriptions WHERE admin_id = $1 AND event_type = $2",
-            admin_id, event_type,
-        )
-    else:
-        await db.execute(
-            "INSERT INTO admin_subscriptions (admin_id, event_type) VALUES ($1, $2)",
-            admin_id, event_type,
-        )
+    await set_subscription(telegram_id, event_type, not exists, _admin_id=admin_id)

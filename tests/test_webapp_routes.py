@@ -149,7 +149,10 @@ async def test_bootstrap_returns_the_shape_the_frontend_reads(client, monkeypatc
     assert resp.status == 200
     data = await resp.json()
 
-    assert data["me"] == {"telegram_id": 42, "is_super": True}
+    # is_owner is the maintainer tier, and 42 is not in config.ADMINS here. It is the
+    # panel's whole basis for showing the controls that take a super admin's role away,
+    # so it is asserted rather than left to the exact-shape comparison alone.
+    assert data["me"] == {"telegram_id": 42, "is_super": True, "is_owner": False}
     assert data["company"]["name"]
     assert data["event_types"] and {"type", "emoji", "label"} <= set(data["event_types"][0])
 

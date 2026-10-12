@@ -17,6 +17,7 @@ trusted as validation. The client picking a unit from a roster dropdown is a con
 the server still asks the provider.
 """
 
+import io
 import json
 import logging
 from datetime import date, datetime, timedelta
@@ -29,8 +30,9 @@ from data import config
 from data.event_catalog import GROUP_FILTER_TYPES, next_event_filter
 from loader import bot
 from utils.db_api.admins import (
-    add_admin, delete_admin, get_admin_by_id, get_all_admins, is_maintainer,
-    is_super_admin, promote_to_super, set_admin_active, visible_admins,
+    add_admin, delete_admin, demote_from_super, get_admin_by_id, get_admin_subscriptions,
+    get_all_admins, is_maintainer, is_super_admin, promote_to_super, set_admin_active,
+    set_subscription, visible_admins,
 )
 from utils.db_api.groups import (
     get_group, get_group_event_types, get_groups_overview, remove_group,
@@ -45,6 +47,10 @@ from utils.db_api.violations import (
 from utils.units import (
     clean_unit, list_units_any, resolve_unit, roster_names, suggest_units_any,
 )
+from utils.violation_report import (
+    EVENT_SCOPES, PERIOD_LABELS, build_report_file, date_range_label, period_label,
+    period_range, report_filename, top_units,
+)
 from utils.webapp.auth import require_admin, require_super
 
 logger = logging.getLogger(__name__)
@@ -54,6 +60,13 @@ logger = logging.getLogger(__name__)
 # panel on a different clock than the group messages it describes is worse than a panel
 # on the wrong clock.
 ET = ZoneInfo("America/New_York")
+
+# Said whenever a mutation lands on an account named in the deployment's ADMINS. That
+# list is the floor under this whole panel: seed_super_admins re-asserts it on every
+# boot, so a change made here would be undone by the next restart and the panel would
+# have lied about it.
+_OWNER_ROW = ("That account is set in the deployment's own config. Change it there, "
+              "not here.")
 
 
 # ── plumbing ────────────────────────────────────────────────────────────────────
@@ -148,6 +161,11 @@ async def bootstrap(request: web.Request) -> web.Response:
         "me": {
             "telegram_id": telegram_id,
             "is_super": await is_super_admin(telegram_id),
+            # The deployment's own account (config.ADMINS), which outranks a super admin
+            # the company promoted: only it may take the super-admin role back off
+            # someone. Says nothing about anyone else -- a viewer learns their own tier
+            # and no one else's, which is what HIDDEN_ADMIN_IDS exists to protect.
+            "is_owner": is_maintainer(telegram_id),
         },
         "company": {"name": config.COMPANY_NAME, "slug": config.COMPANY_SLUG},
         "event_types": [
@@ -282,12 +300,81 @@ async def units(request: web.Request) -> web.Response:
     })
 
 
+def _subscription_group(token: str) -> tuple[str, ...]:
+    """Every event type one notification switch covers.
+
+    The same rule the group filter follows (data/event_catalog.py): a row like "Camera
+    Obstructed" is three provider spellings, and get_subscribed_admins matches the stored
+    type exactly. Subscribing to the token alone would silence whichever provider spells
+    it differently -- which is the bug that made Motive's drowsiness alerts vanish from
+    group filters, and it must not be reintroduced here.
+    """
+    if token == "crash":
+        return ("crash",)
+    for types_, _, _ in GROUP_FILTER_TYPES:
+        if types_[0] == token:
+            return types_
+    return ()
+
+
+@require_admin
+async def settings(request: web.Request) -> web.Response:
+    """Which alerts this admin gets in their own DM.
+
+    The same switches as the bot's Settings menu, over the curated catalog rather than
+    the raw EVENT_TYPE_MAP the inline keyboard walks -- that map carries provider
+    aliases, so it offered the same behaviour twice under two names.
+    """
+    subscribed = set(await get_admin_subscriptions(request["telegram_id"]))
+    rows = [{
+        "type": "crash", "emoji": "\U0001f4a5", "label": "Crash",
+        "on": "crash" in subscribed,
+        # The one opt-OUT switch, and the only alert that reaches no group at all unless
+        # the deployment has a CRASH_GROUP_ID. Worth saying on the row.
+        "note": "On unless you turn it off",
+    }]
+    for types_, emoji, label in GROUP_FILTER_TYPES:
+        rows.append({"type": types_[0], "emoji": emoji, "label": label,
+                     "on": any(t in subscribed for t in types_)})
+    return _ok({"notifications": rows})
+
+
+@require_admin
+async def report(request: web.Request) -> web.Response:
+    """The ranked units behind the DM report, for the panel's Report screen."""
+    period = request.query.get("period", "last_week")
+    if period not in PERIOD_LABELS:
+        period = "last_week"
+    scope = request.query.get("type", "")
+    if scope not in EVENT_SCOPES:
+        scope = ""
+
+    rows = await top_units(period, scope, limit=10)
+    since, until = period_range(period)
+    return _ok({
+        "period": {"key": period, "label": period_label(period),
+                   "range": date_range_label(since, until)},
+        "type": scope,
+        "scope_label": EVENT_SCOPES[scope],
+        "rows": rows,
+        "total": sum(r["total"] for r in rows),
+    })
+
+
 @require_admin
 async def admins(request: web.Request) -> web.Response:
     """Maintainers are filtered out server-side. The panel must not become the place that
-    leaks what the bot deliberately hides (see data/config.py on HIDDEN_ADMIN_IDS)."""
+    leaks what the bot deliberately hides (see data/config.py on HIDDEN_ADMIN_IDS).
+
+    is_owner is added after that filter, never before it: for anyone but a maintainer
+    every surviving row is False, because the rows it would be True for are already gone.
+    A maintainer sees it on the rows only they can see, which is what lets the panel grey
+    out the controls that config.ADMINS would override on the next restart instead of
+    offering them and failing.
+    """
     everyone = await get_all_admins()
-    return _ok(visible_admins(everyone, request["telegram_id"]))
+    rows = visible_admins(everyone, request["telegram_id"])
+    return _ok([{**row, "is_owner": is_maintainer(row["telegram_id"])} for row in rows])
 
 
 # ── group mutations ─────────────────────────────────────────────────────────────
@@ -499,30 +586,115 @@ async def update_admin(request: web.Request) -> web.Response:
 
     body = await _body(request)
     actor = request["telegram_id"]
+    # Promotion is a super admin's to give; taking it back is not. A company's own super
+    # admins are peers -- letting one strip another is a coin-flip over who clicks first,
+    # and the loser has no way back. The deployment's account (config.ADMINS) is not a
+    # peer: it is the only one that can be locked out of nothing, because is_super_admin
+    # derives its answer from config rather than from the row.
+    owner = is_maintainer(actor)
 
     if "is_active" in body:
         active = bool(body["is_active"])
-        if target["is_super"]:
-            return _fail("is_super", "Super admins can't be deactivated here.", status=403)
         # A guard the bot's flow can't easily reach but a panel can: is_admin requires
-        # is_active, so a super admin who deactivates their own row is locked out of both
+        # is_active, so an admin who deactivates their own row is locked out of both
         # surfaces with no way back that isn't a hand-written SQL statement.
         if target["telegram_id"] == actor and not active:
             return _fail("self_action", "You can't deactivate yourself.", status=403)
+        if is_maintainer(target["telegram_id"]):
+            return _fail("is_owner", _OWNER_ROW, status=403)
+        if target["is_super"] and not owner:
+            return _fail("is_super", "Only the deployment's own account can deactivate "
+                                     "a super admin.", status=403)
         await set_admin_active(target["id"], active)
         logger.info(f"[webapp] {actor} set admin {target['id']} active={active}")
         return _ok({"ok": True, "is_active": active})
 
-    if body.get("is_super"):
-        if target["is_super"]:
-            return _fail("already_super", "That admin is already a super admin.")
-        if not target["is_active"]:
-            return _fail("inactive", "Activate this admin before promoting them.")
-        await promote_to_super(target["id"])
-        logger.info(f"[webapp] {actor} promoted admin {target['id']} to super")
-        return _ok({"ok": True, "is_super": True})
+    if "is_super" in body:
+        if body["is_super"]:
+            if target["is_super"]:
+                return _fail("already_super", "That admin is already a super admin.")
+            if not target["is_active"]:
+                return _fail("inactive", "Activate this admin before promoting them.")
+            await promote_to_super(target["id"])
+            logger.info(f"[webapp] {actor} promoted admin {target['id']} to super")
+            return _ok({"ok": True, "is_super": True})
+
+        if not target["is_super"]:
+            return _fail("not_super", "That admin isn't a super admin.")
+        if target["telegram_id"] == actor:
+            # Not a safety rail that can be argued with: for the deployment's account the
+            # write wouldn't even hold -- is_super_admin reads config.ADMINS and
+            # seed_super_admins puts the column back on the next restart.
+            return _fail("self_action", "You can't take away your own super-admin role.",
+                         status=403)
+        if is_maintainer(target["telegram_id"]):
+            return _fail("is_owner", _OWNER_ROW, status=403)
+        if not owner:
+            return _fail("is_super", "Only the deployment's own account can take the "
+                                     "super-admin role back.", status=403)
+        await demote_from_super(target["id"])
+        logger.info(f"[webapp] {actor} demoted admin {target['id']} to plain admin")
+        return _ok({"ok": True, "is_super": False})
 
     return _fail("bad_request", "Nothing to change.")
+
+
+@require_admin
+async def set_notification(request: web.Request) -> web.Response:
+    """Flip one of the caller's own DM switches. Nobody can change anybody else's: the
+    row written is request["telegram_id"], never an id from the body."""
+    body = await _body(request)
+    group = _subscription_group(str(body.get("type", "")))
+    if not group:
+        return _fail("unknown_type", "That isn't an event type this bot reports.")
+
+    on = bool(body.get("on"))
+    for event_type in group:
+        await set_subscription(request["telegram_id"], event_type, on)
+    return _ok({"ok": True, "on": on})
+
+
+@require_admin
+async def send_report(request: web.Request) -> web.Response:
+    """Build the full report and send it to the caller's own chat as a document.
+
+    Not a download. A Mini App WebView has nowhere to put a file -- and the person
+    asking for it is, by definition, sitting in a Telegram chat with this bot, where the
+    file is searchable and forwardable afterwards. It goes to request["telegram_id"] and
+    to no other chat: an id in the body would make this an endpoint for mailing the
+    company's violations to a stranger.
+    """
+    body = await _body(request)
+    period = body.get("period", "last_week")
+    if period not in PERIOD_LABELS:
+        return _fail("bad_period", "That isn't a report period.")
+    scope = body.get("type", "") or ""
+    if scope not in EVENT_SCOPES:
+        return _fail("bad_type", "That isn't a report filter.")
+
+    telegram_id = request["telegram_id"]
+    content = await build_report_file(
+        period, scope, config.COMPANY_NAME,
+        show_severity=await is_super_admin(telegram_id),
+    )
+
+    from aiogram.types import InputFile
+    try:
+        await bot.send_document(
+            telegram_id,
+            InputFile(io.BytesIO(content),
+                      filename=report_filename(config.COMPANY_SLUG, period)),
+            caption=f"\U0001f4ca {config.COMPANY_NAME} \u2014 {period_label(period)}",
+        )
+    except Exception as e:
+        # Almost always the same cause: the admin has never pressed /start, so the bot
+        # cannot open a chat with them. Say the thing they can act on.
+        logger.warning(f"[webapp] report to {telegram_id} failed: {e}")
+        return _fail("send_failed",
+                     "Couldn't send the file to your chat. Open the bot and press "
+                     "/start, then try again.", status=502)
+    logger.info(f"[webapp] sent {period}/{scope or 'all'} report to {telegram_id}")
+    return _ok({"ok": True})
 
 
 @require_super
@@ -534,8 +706,11 @@ async def delete_admin_route(request: web.Request) -> web.Response:
         return _fail("confirm_required", "This needs to be confirmed.")
     if target["telegram_id"] == request["telegram_id"]:
         return _fail("self_action", "You can't remove yourself.", status=403)
-    if target["is_super"]:
-        return _fail("is_super", "Super admins can't be removed here.", status=403)
+    if is_maintainer(target["telegram_id"]):
+        return _fail("is_owner", _OWNER_ROW, status=403)
+    if target["is_super"] and not is_maintainer(request["telegram_id"]):
+        return _fail("is_super", "Only the deployment's own account can remove a super "
+                                 "admin.", status=403)
     await delete_admin(target["id"])
     logger.info(f"[webapp] {request['telegram_id']} removed admin {target['id']}")
     return _ok({"ok": True})

@@ -1,9 +1,14 @@
 """Admin management through the panel refuses the same things the old in-chat flow did.
 
-Self-removal, touching a super admin, and mutating a concealed maintainer are all
-refused. Those rules exist because losing them costs someone their access with no way
-back that isn't a hand-written SQL statement — the panel is now the only surface that
-mutates admins, so it carries every one of them itself.
+Self-removal, mutating a concealed maintainer, and a company's super admins touching
+each other are all refused. Those rules exist because losing them costs someone their
+access with no way back that isn't a hand-written SQL statement — the panel is now the
+only surface that mutates admins, so it carries every one of them itself.
+
+The one account they do not apply to is the deployment's own (config.ADMINS): it cannot
+be locked out, because is_super_admin answers for it from config rather than from the
+row. The second half of this file is what that account may do that a company super admin
+may not, and the line between the two tiers.
 """
 
 import hashlib
@@ -69,7 +74,7 @@ ADMINS = {
 
 @pytest.fixture
 def panel(monkeypatch):
-    writes = {"active": [], "promoted": [], "deleted": [], "added": []}
+    writes = {"active": [], "promoted": [], "demoted": [], "deleted": [], "added": []}
 
     monkeypatch.setattr(auth, "is_admin", _always(True))
     monkeypatch.setattr(auth, "is_super_admin", _always(True))
@@ -86,6 +91,9 @@ def panel(monkeypatch):
     async def _promote(admin_id):
         writes["promoted"].append(admin_id)
 
+    async def _demote(admin_id):
+        writes["demoted"].append(admin_id)
+
     async def _delete(admin_id):
         writes["deleted"].append(admin_id)
 
@@ -99,6 +107,7 @@ def panel(monkeypatch):
     monkeypatch.setattr(api, "get_admin_by_id", _by_id)
     monkeypatch.setattr(api, "set_admin_active", _set_active)
     monkeypatch.setattr(api, "promote_to_super", _promote)
+    monkeypatch.setattr(api, "demote_from_super", _demote)
     monkeypatch.setattr(api, "delete_admin", _delete)
     monkeypatch.setattr(api, "add_admin", _add)
     monkeypatch.setattr(api, "ensure_user", _ensure_user)
@@ -244,3 +253,71 @@ async def test_a_plain_admin_cannot_add_anyone(panel, monkeypatch):
     resp = await api.create_admin(_Request({"telegram_id": 555}))
     assert resp.status == 403
     assert panel["added"] == []
+
+
+# ── the deployment's own account outranks a company super admin ────────────────
+#
+# ACTOR is an ordinary super admin here; MAINTAINER is the account named in the
+# deployment's ADMINS. Every test below is the same request from both, because the
+# difference between the answers IS the rule.
+
+
+async def test_a_company_super_admin_cannot_demote_a_peer(panel):
+    """Peers stripping each other is a race decided by who clicks first, and the loser
+    has no way back into the panel."""
+    resp = await api.update_admin(_Request({"is_super": False}, {"admin_id": "3"}))
+    assert resp.status == 403
+    assert json.loads(resp.body)["error"] == "is_super"
+    assert panel["demoted"] == []
+
+
+async def test_the_deployment_account_can_demote_a_super_admin(panel):
+    resp = await api.update_admin(
+        _Request({"is_super": False}, {"admin_id": "3"}, user_id=MAINTAINER))
+    assert resp.status == 200
+    assert json.loads(resp.body)["is_super"] is False
+    assert panel["demoted"] == [3]
+
+
+async def test_demoting_is_not_removing(panel):
+    """The admin stays an admin. Nothing about this route touches the row's existence or
+    its active flag — the panel says so in words, and this is the part that has to be
+    true for those words to be honest."""
+    await api.update_admin(
+        _Request({"is_super": False}, {"admin_id": "3"}, user_id=MAINTAINER))
+    assert panel["deleted"] == [] and panel["active"] == []
+
+
+async def test_an_admin_who_is_not_super_cannot_be_demoted(panel):
+    resp = await api.update_admin(
+        _Request({"is_super": False}, {"admin_id": "2"}, user_id=MAINTAINER))
+    assert resp.status == 400
+    assert json.loads(resp.body)["error"] == "not_super"
+    assert panel["demoted"] == []
+
+
+async def test_nobody_demotes_themselves(panel):
+    """Row 5 is the maintainer's own. The write would not even hold: is_super_admin reads
+    config.ADMINS for them, and seed_super_admins puts the column back on the next boot —
+    so the panel would be reporting a change that un-happens."""
+    resp = await api.update_admin(
+        _Request({"is_super": False}, {"admin_id": "5"}, user_id=MAINTAINER))
+    assert resp.status == 403
+    assert json.loads(resp.body)["error"] == "self_action"
+    assert panel["demoted"] == []
+
+
+async def test_the_deployment_account_can_deactivate_and_remove_a_super_admin(panel):
+    assert (await api.update_admin(
+        _Request({"is_active": False}, {"admin_id": "3"}, user_id=MAINTAINER))).status == 200
+    assert (await api.delete_admin_route(
+        _Request({"confirm": True}, {"admin_id": "3"}, user_id=MAINTAINER))).status == 200
+    assert panel["active"] == [(3, False)] and panel["deleted"] == [3]
+
+
+async def test_promotion_is_still_any_super_admins_to_give(panel):
+    """Only taking the role back moved up a tier. A company that needs a second super
+    admin must not have to come back to us for it."""
+    resp = await api.update_admin(_Request({"is_super": True}, {"admin_id": "2"}))
+    assert resp.status == 200
+    assert panel["promoted"] == [2]

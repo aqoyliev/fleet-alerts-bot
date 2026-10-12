@@ -28,6 +28,11 @@ const state = {
   groupsQuery: '',
   groupsFilter: 'active',  // which of the three Groups sections is showing
   alertFilter: { type: '', unit: '' },
+  // The feed has more event types than fit on a phone in one row. Collapsed, the bar
+  // shows the handful that are actually used plus whatever is selected; this is the
+  // "show the rest" switch.
+  alertChipsOpen: false,
+  report: { period: 'last_week', type: '' },
   alertItems: [],
   alertNext: null,
   alertLoaded: false,  // the feed is paged, so it caches itself rather than by URL
@@ -428,7 +433,17 @@ function selectTab(tab) {
   renderCurrent({ restore: state.scroll[tab] || 0 });
 }
 
-const DETAIL_VIEWS = { group: groupDetail, admin: adminDetail, addadmin: addAdminScreen };
+const DETAIL_VIEWS = {
+  group: groupDetail, admin: adminDetail, addadmin: addAdminScreen,
+  report: reportScreen, settings: settingsScreen,
+};
+
+/** What a detail view reads, where it is one of the cached endpoints. Keeps the skeleton
+ *  honest: a screen whose data is not in the cache yet must show one. */
+const DETAIL_PATHS = {
+  report: () => [reportPath()],
+  settings: () => ['/settings'],
+};
 const TAB_VIEWS = {
   dashboard: dashboardScreen, groups: groupsScreen,
   alerts: alertsScreen, admins: adminsScreen,
@@ -453,7 +468,11 @@ function renderCurrent(opts) {
 
 /** Whether the current screen can paint without waiting for the network. */
 function hasCachedScreen() {
-  if (state.detail) return cache.has('/groups') || cache.has('/admins');
+  if (state.detail) {
+    const paths = DETAIL_PATHS[state.detail.type];
+    if (paths) return paths().every((path) => cache.has(path));
+    return cache.has('/groups') || cache.has('/admins');
+  }
   if (state.tab === 'alerts') return state.alertLoaded;
   return screenPaths().every((p) => cache.has(p));
 }
@@ -628,6 +647,26 @@ async function dashboardScreen(opts) {
     wrap.appendChild(el(`<div class="empty"><span class="empty-emoji">✅</span>
       No alerts in this period.</div>`));
   }
+
+  // The two buttons from the bot's chat keyboard. They are the last things in this app
+  // that could only be reached by closing it — and an admin who has the panel open is
+  // not going to guess that the fleet's report lives somewhere else entirely.
+  const menu = el('<div class="rows" style="margin-top:16px"></div>');
+  [
+    ['report', '📊 Violations Report', 'Ranked units, by period', 'Violations Report'],
+    ['settings', '⚙️ Settings', 'Which alerts reach your own chat', 'Settings'],
+  ].forEach(([type, title, sub_, screenTitle]) => {
+    const row = el(`<button class="row">
+        <div class="row-main">
+          <div class="row-title">${title}</div>
+          <div class="row-sub">${sub_}</div>
+        </div>
+        <span class="row-chevron">›</span></button>`);
+    row.onclick = () => { haptic(); pushDetail({ type, title: screenTitle }); };
+    menu.appendChild(row);
+  });
+  wrap.appendChild(menu);
+
   render(wrap, opts);
 }
 
@@ -640,6 +679,9 @@ function trendCard(byDay) {
   const card = el('<div class="card"><div class="card-title">Per day</div></div>');
   const trend = el('<div class="trend"></div>');
   const readout = el('<div class="trend-read"></div>');
+  // What the readout says when nothing is hovered: the busiest day until a column is
+  // tapped, that column afterwards.
+  let pinned = () => { };
 
   // 30 columns cannot each carry a legible label, and "M T W T F S S M T W…" repeated
   // four times says nothing anyway. Roughly six markers, evenly spaced.
@@ -652,25 +694,184 @@ function trendCard(byDay) {
     const label = byDay.length <= 10 ? narrow
       : (i % every === 0 || i === byDay.length - 1 ? String(when.getDate()) : '');
 
+    // Three ways to the same number, because this panel runs on three kinds of
+    // client: the tooltip for a mouse, the tap for a phone, and aria-label for a
+    // screen reader. The tooltip is CSS-only and sits inside the column, so nothing
+    // has to be positioned in JavaScript as the chart resizes.
     const col = el(`<button class="trend-col" aria-label="${esc(short)}: ${d.total}">
+        <span class="trend-tip">${esc(short)} · ${num(d.total)}</span>
         <div class="trend-bar" style="height:${Math.round((d.total / peak) * 100)}%"></div>
         <div class="trend-day">${esc(label)}</div></button>`);
+    const say = () => {
+      readout.textContent = `${short} · ${num(d.total)} alert${d.total === 1 ? '' : 's'}`;
+    };
     col.onclick = () => {
       hapticSelect();
       trend.querySelectorAll('.trend-col').forEach((c) => c.classList.remove('is-on'));
       col.classList.add('is-on');
-      readout.textContent = `${short} · ${num(d.total)} alert${d.total === 1 ? '' : 's'}`;
+      pinned = say;
+      say();
     };
+    // The readout follows the pointer too, and falls back to whatever was last pinned
+    // when it leaves — so moving across the chart with a mouse never leaves the line
+    // under it describing a column the pointer is no longer on.
+    col.onmouseenter = say;
+    col.onmouseleave = () => pinned();
     trend.appendChild(col);
   });
 
   const busiest = byDay.reduce((a, b) => (b.total > a.total ? b : a), byDay[0]);
-  readout.textContent = `Busiest: ${new Date(busiest.day + 'T12:00:00')
-    .toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} · ${num(busiest.total)}`;
+  pinned = () => {
+    readout.textContent = `Busiest: ${new Date(busiest.day + 'T12:00:00')
+      .toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} · ${num(busiest.total)}`;
+  };
+  pinned();
 
   card.appendChild(trend);
   card.appendChild(readout);
   return card;
+}
+
+// ── the two screens that came over from the chat keyboard ───────────────────────
+
+/* Calendar windows, not the dashboard's rolling ones, and the same three the DM report
+ * offers — utils/violation_report.py owns both sets. A number that changes depending on
+ * which surface asked for it is the one thing a report cannot do. */
+const REPORT_PERIODS = [['today', 'Today'], ['last_week', 'Last week'],
+                        ['last_month', 'Last month']];
+const REPORT_SCOPES = [['', 'All'], ['speeding', 'Speeding'], ['other', 'Other']];
+
+function reportPath() {
+  return `/report?period=${encodeURIComponent(state.report.period)}`
+       + `&type=${encodeURIComponent(state.report.type)}`;
+}
+
+/** A segmented control that re-renders the screen when it changes. */
+function segmented(options, current, pick) {
+  const bar = el('<div class="segmented" role="tablist"></div>');
+  options.forEach(([key, label]) => {
+    const on = key === current;
+    const b = el(`<button${on ? ' class="is-active"' : ''} aria-selected="${on}"
+        >${esc(label)}</button>`);
+    b.onclick = () => { hapticSelect(); pick(key); state.epoch++; renderCurrent(); };
+    bar.appendChild(b);
+  });
+  return bar;
+}
+
+async function reportScreen(opts) {
+  const [data] = await screenData([reportPath()], opts);
+  const wrap = el('<div></div>');
+
+  wrap.appendChild(segmented(REPORT_SCOPES, state.report.type,
+                             (k) => { state.report.type = k; }));
+  wrap.appendChild(segmented(REPORT_PERIODS, state.report.period,
+                             (k) => { state.report.period = k; }));
+
+  const card = el(`<div class="card"><div class="card-head">
+      <div class="card-title">${esc(data.scope_label)}</div>
+      <span class="card-head-note">${esc(data.period.range)}</span></div></div>`);
+
+  if (!data.rows.length) {
+    card.appendChild(el(`<div class="empty" style="padding:24px 8px">
+      <span class="empty-emoji">✅</span>No violations in this period.</div>`));
+  } else {
+    const peak = data.rows[0].total || 1;
+    data.rows.forEach((r, i) => {
+      const row = el(`<button class="bar-row">
+          <span class="bar-name">${i + 1}. 🚛 ${esc(r.vehicle_number)}</span>
+          <span class="bar-track"><span class="bar-fill"
+                style="width:${Math.round((r.total / peak) * 100)}%"></span></span>
+          <span class="bar-count">${num(r.total)}</span></button>`);
+      // The feed is not period-filtered, so this narrows by unit and nothing else —
+      // same as tapping a unit on the dashboard, and the same place it lands you.
+      row.onclick = () => { haptic(); openAlerts({ unit: r.vehicle_number }); };
+      card.appendChild(row);
+    });
+  }
+  wrap.appendChild(card);
+
+  const send = el(`<button class="btn btn-block" style="margin-top:14px"
+      >📥 Send full report to my chat</button>`);
+  if (!data.rows.length) {
+    disable(send, 'There is nothing to put in a report for this period.');
+  } else {
+    send.onclick = async () => {
+      busy(true);
+      send.textContent = 'Sending…';
+      try {
+        await post('/report/send', { period: state.report.period, type: state.report.type });
+        hapticResult(true);
+        toast('Report sent to your chat');
+      } catch (e) {
+        hapticResult(false);
+        if (e.message !== 'unauthenticated') alertMessage(e.message);
+      } finally {
+        send.textContent = '📥 Send full report to my chat';
+        busy(false);
+      }
+    };
+  }
+  wrap.appendChild(send);
+  // Said before it is tapped, not after: a file that silently appears in another chat
+  // while you are looking at this screen reads as nothing having happened.
+  wrap.appendChild(el(`<div class="note">The full report lists every event under every
+    unit, so it arrives as a file in your chat with the bot rather than on this
+    screen.</div>`));
+
+  render(wrap, opts);
+}
+
+/** The admin's own DM switches — the bot's ⚙️ Settings menu, in the panel.
+ *
+ *  Deliberately only this. "Settings" in a fleet tool sounds like it should hold the
+ *  group filters and the company's configuration; the group filters are per group and
+ *  live on that group's screen, and the configuration is environment variables on the
+ *  deployment, which no panel should be able to edit. */
+async function settingsScreen(opts) {
+  const [data] = await screenData(['/settings'], opts);
+  const wrap = el('<div></div>');
+
+  const card = el(`<div class="card">
+      <div class="card-head"><div class="card-title">My notifications</div></div></div>`);
+  data.notifications.forEach((n) => {
+    const field = el(`<div class="field">
+        <div><span class="field-label">${esc(n.emoji)} ${esc(n.label)}</span>
+        ${n.note ? `<div class="row-sub">${esc(n.note)}</div>` : ''}</div></div>`);
+    const sw = el(`<button class="switch${n.on ? ' is-on' : ''}" role="switch"
+        aria-checked="${!!n.on}" aria-label="${esc(n.label)}"></button>`);
+    sw.onclick = async () => {
+      const next = !sw.classList.contains('is-on');
+      // Flipped first and put back on failure. A switch that waits for a round trip
+      // before moving feels broken on a phone, and this one is idempotent server-side:
+      // it sends the state it is now in, not "toggle".
+      sw.classList.toggle('is-on', next);
+      sw.setAttribute('aria-checked', String(next));
+      sw.disabled = true;
+      busy(true);
+      try {
+        await post('/settings/notifications', { type: n.type, on: next });
+        invalidate('/settings');
+        hapticResult(true);
+      } catch (e) {
+        sw.classList.toggle('is-on', !next);
+        sw.setAttribute('aria-checked', String(!next));
+        hapticResult(false);
+        if (e.message !== 'unauthenticated') alertMessage(e.message);
+      } finally {
+        sw.disabled = false;
+        busy(false);
+      }
+    };
+    field.appendChild(sw);
+    card.appendChild(field);
+  });
+  wrap.appendChild(card);
+  wrap.appendChild(el(`<div class="note">These are your personal alerts and nobody
+    else's. What a driver group receives is set on that group's screen, under
+    <b>Groups</b>.</div>`));
+
+  render(wrap, opts);
 }
 
 // ── screen 2: groups ────────────────────────────────────────────────────────────
@@ -1120,7 +1321,9 @@ function openAlerts(filter) {
 /** "All", then the four types that account for nearly every alert, then the rest of the
  *  catalog. Crash is named literally because it is deliberately absent from
  *  GROUP_FILTER_TYPES — a crash is never a per-group filter — but it is the one alert
- *  anybody opens this feed to find. */
+ *  anybody opens this feed to find.
+ *
+ *  The first PRIMARY_CHIPS of them are the ones the bar shows closed; see alertsScreen. */
 function alertFilterChips() {
   const catalog = (state.boot && state.boot.event_types) || [];
   const byType = new Map(catalog.map((t) => [t.type, t]));
@@ -1133,6 +1336,11 @@ function alertFilterChips() {
   catalog.forEach((t) => { if (!seen.has(t.type)) out.push(t); });
   return out;
 }
+
+/* How many chips the bar shows before "More". Four, because five put "Cell Phone Usage"
+ * on a third row on a 375px phone -- and a filter bar that costs three rows of the feed
+ * to avoid a sideways scroll has not improved anything. */
+const PRIMARY_CHIPS = 4;
 
 /** Four tones over sixteen event types. The point is not to encode the type in colour —
  *  the label already does that — it is that a crash cannot look like a phone call in a
@@ -1191,16 +1399,26 @@ async function alertsScreen(opts) {
 
   const wrap = el('<div></div>');
 
+  // The bar used to be one row that scrolled sideways, with its scrollbar hidden. On a
+  // phone that is a swipe; on the desktop client it is a row of chips with no visible
+  // way to reach the ones past the edge. So it wraps, and the long tail of the catalog
+  // is behind "More" rather than behind a gesture.
   const bar = el('<div class="filter-bar"></div>');
-  // First, not last: the bar scrolls, and appended after sixteen type chips the one
-  // filter the user set themselves was off the right edge — invisible, and with no way
-  // to clear it without knowing to scroll for it.
+  // First, not last: appended after sixteen type chips, the one filter the user set
+  // themselves ended up on a line of its own at the bottom, read as part of the tail.
   if (state.alertFilter.unit) {
     const chip = el(`<button class="chip is-on">🚛 ${esc(state.alertFilter.unit)} ✕</button>`);
     chip.onclick = () => { haptic(); openAlerts({ type: state.alertFilter.type }); };
     bar.appendChild(chip);
   }
-  alertFilterChips().forEach((f) => {
+
+  const all = alertFilterChips();
+  // Whatever is selected is always drawn, wherever it sits in the catalog: a collapsed
+  // bar that hides the active filter is a feed showing a subset for no visible reason.
+  const shown = state.alertChipsOpen ? all
+    : all.filter((f, i) => i < PRIMARY_CHIPS || state.alertFilter.type === f.type);
+
+  shown.forEach((f) => {
     const on = state.alertFilter.type === f.type;
     const label = f.emoji ? `${esc(f.emoji)} ${esc(f.label)}` : esc(f.label);
     const chip = el(`<button class="chip${on ? ' is-on' : ''}" aria-pressed="${on}">${label}</button>`);
@@ -1210,6 +1428,19 @@ async function alertsScreen(opts) {
     };
     bar.appendChild(chip);
   });
+
+  if (all.length > shown.length || state.alertChipsOpen) {
+    const hidden = all.length - shown.length;
+    const more = el(`<button class="chip chip-more">${state.alertChipsOpen
+      ? 'Less ▴' : `More ${hidden} ▾`}</button>`);
+    more.onclick = () => {
+      hapticSelect();
+      state.alertChipsOpen = !state.alertChipsOpen;
+      // keep: the feed below must not jump while the bar above it grows.
+      renderCurrent({ keep: true });
+    };
+    bar.appendChild(more);
+  }
   wrap.appendChild(bar);
 
   if (!state.alertItems.length) {
@@ -1298,7 +1529,8 @@ async function adminsScreen(opts) {
 
   const rows = el('<div class="rows"></div>');
   admins.forEach((a) => {
-    const badges = (a.is_super ? '<span class="badge badge-super">SUPER</span>' : '')
+    const badges = (a.is_owner ? '<span class="badge badge-owner">OWNER</span>' : '')
+      + (a.is_super && !a.is_owner ? '<span class="badge badge-super">SUPER</span>' : '')
       + (a.is_active ? '' : '<span class="badge badge-muted">INACTIVE</span>');
     const handle = a.username ? `@${esc(a.username)}` : `ID ${esc(String(a.telegram_id))}`;
     const row = el(`<button class="row">
@@ -1333,6 +1565,18 @@ async function adminDetail(opts) {
 
   const isSuper = state.boot.me.is_super;
   const isSelf = a.telegram_id === state.boot.me.telegram_id;
+  /* Two tiers, not one. Any super admin can hand the role out; only the deployment's
+   * own account — the one named in the deployment config — can take it back, deactivate
+   * a super admin or remove one. Peers stripping each other is a race nobody wins, and
+   * the loser has no way back into the panel that isn't a hand-written SQL statement.
+   *
+   * The rules are the server's (update_admin in utils/webapp/api.py). These are the
+   * same rules stated in buttons, so the panel refuses before the request rather than
+   * after it. */
+  const owner = !!state.boot.me.is_owner;
+  const ownerRow = "This account is named in the deployment's own config — change it "
+    + 'there, not here.';
+  const ownerOnly = (verb) => `Only the deployment's own account can ${verb} a super admin.`;
   const wrap = el('<div></div>');
 
   wrap.appendChild(el(`<div class="card">
@@ -1343,7 +1587,8 @@ async function adminDetail(opts) {
       <div class="field"><span class="field-label">Telegram ID</span>
         <span class="field-value">${esc(String(a.telegram_id))}</span></div>
       <div class="field"><span class="field-label">Role</span>
-        <span class="field-value">${a.is_super ? 'Super admin' : 'Admin'}</span></div>
+        <span class="field-value">${a.is_owner ? 'Deployment owner'
+          : a.is_super ? 'Super admin' : 'Admin'}</span></div>
       <div class="field"><span class="field-label">Status</span>
         <span class="field-value ${a.is_active ? 'is-on' : 'is-off'}"
           >${a.is_active ? 'Active' : 'Inactive'}</span></div>
@@ -1362,8 +1607,9 @@ async function adminDetail(opts) {
 
   const activeBtn = el(`<button class="btn btn-secondary btn-block"
       style="margin-bottom:10px">${a.is_active ? 'Deactivate' : 'Activate'}</button>`);
-  if (a.is_super) disable(activeBtn, "Super admins can't be deactivated here.");
-  else if (isSelf && a.is_active) disable(activeBtn, "You can't deactivate yourself.");
+  if (isSelf && a.is_active) disable(activeBtn, "You can't deactivate yourself.");
+  else if (a.is_owner) disable(activeBtn, ownerRow);
+  else if (a.is_super && !owner) disable(activeBtn, ownerOnly('deactivate'));
   else activeBtn.onclick = () => mutateAdmin(a.id, { is_active: !a.is_active },
                                              a.is_active ? 'Deactivated' : 'Activated');
   actions.appendChild(activeBtn);
@@ -1377,12 +1623,29 @@ async function adminDetail(opts) {
       }
     };
     actions.appendChild(promote);
+  } else {
+    const demote = el(`<button class="btn btn-secondary btn-block"
+        style="margin-bottom:10px">⬇️ Remove super admin</button>`);
+    if (isSelf) disable(demote, "You can't take away your own super-admin role.");
+    else if (a.is_owner) disable(demote, ownerRow);
+    else if (!owner) disable(demote, ownerOnly('demote'));
+    else demote.onclick = async () => {
+      // Named as what it leaves behind, not as what it takes: the usual reason to press
+      // this is that somebody was promoted by mistake, and the question in their head is
+      // whether it also throws the person out of the panel. It does not.
+      if (await confirmAction(`${a.full_name || 'This admin'} stays an admin but loses `
+          + 'super-admin rights — no managing admins, groups or units. Continue?')) {
+        mutateAdmin(a.id, { is_super: false }, 'Super admin removed');
+      }
+    };
+    actions.appendChild(demote);
   }
   wrap.appendChild(actions);
 
   const remove = el('<button class="btn btn-danger btn-block">Remove admin</button>');
   if (isSelf) disable(remove, "You can't remove yourself.");
-  else if (a.is_super) disable(remove, "Super admins can't be removed here.");
+  else if (a.is_owner) disable(remove, ownerRow);
+  else if (a.is_super && !owner) disable(remove, ownerOnly('remove'));
   else remove.onclick = async () => {
     if (!await confirmAction(`Remove ${a.full_name || 'this admin'}?`)) return;
     try {

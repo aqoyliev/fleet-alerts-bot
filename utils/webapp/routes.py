@@ -55,6 +55,8 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/panel/api/alerts", api.alerts)
     app.router.add_get("/panel/api/units", api.units)
     app.router.add_get("/panel/api/admins", api.admins)
+    app.router.add_get("/panel/api/report", api.report)
+    app.router.add_get("/panel/api/settings", api.settings)
 
     # Mutations are POST even where PATCH/DELETE would read better. Telegram's WebView
     # and the proxies in front of it are reliably fine with GET and POST; the others are
@@ -63,6 +65,11 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_post("/panel/api/groups/{tgid}/unit", api.set_unit)
     app.router.add_post("/panel/api/groups/{tgid}/events", api.toggle_event)
     app.router.add_post("/panel/api/groups/{tgid}/remove", api.delete_group)
+
+    # Sends a document to the caller's own chat rather than answering with one: see
+    # send_report. POST because it has an effect, even though it reads nothing but.
+    app.router.add_post("/panel/api/report/send", api.send_report)
+    app.router.add_post("/panel/api/settings/notifications", api.set_notification)
 
     app.router.add_post("/panel/api/admins", api.create_admin)
     app.router.add_post("/panel/api/admins/{admin_id}/update", api.update_admin)
