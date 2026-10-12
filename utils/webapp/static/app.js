@@ -364,6 +364,21 @@ function setSkeleton(kind) {
   $('#main').innerHTML = html;
 }
 
+/** Whether the navigation a render belongs to has since been superseded.
+ *
+ *  Every screen is an async function that awaits the network before it builds any DOM,
+ *  and the user can tap a tab during that await. Without this check the slow screen
+ *  still painted when its data arrived — and painted over whatever the user had moved
+ *  to, leaving the Groups list sitting under the title "Dashboard". /units goes out to
+ *  the provider's API, so on the Groups tab that await is seconds long and the race is
+ *  not theoretical.
+ *
+ *  Compared against state.epoch, which every navigation bumps. An opts without an epoch
+ *  is never stale: in-place redraws pass their own options straight through. */
+function stale(opts) {
+  return !!opts && opts.epoch !== undefined && opts.epoch !== state.epoch;
+}
+
 /** Put a screen on the page.
  *
  *  `keep` is what makes a toggle feel like a toggle: the node is rebuilt from new data
@@ -371,6 +386,7 @@ function setSkeleton(kind) {
  *  back to a tab or out of a detail view, to where that tab was left. */
 function render(node, opts) {
   opts = opts || {};
+  if (stale(opts)) return;
   const y = opts.keep ? window.scrollY : (opts.restore || 0);
   if (!opts.keep) node.classList.add('screen-enter');
 
@@ -460,9 +476,13 @@ function renderCurrent(opts) {
   // toggle, or restoring a cached tab, must not flash one.
   if (!opts.keep && !hasCachedScreen()) setSkeleton(state.detail ? 'detail' : state.tab);
 
-  view(opts).catch((e) => {
+  // Stamped with the navigation this render belongs to, so everything downstream of the
+  // await — the screen itself, and the error screen if it throws — can tell whether the
+  // user is still on it. See stale().
+  const current = Object.assign({}, opts, { epoch: state.epoch });
+  view(current).catch((e) => {
     if (e.message === 'unauthenticated') return;
-    render(errorScreen(e.message), opts);
+    render(errorScreen(e.message), current);
   });
 }
 
@@ -1128,6 +1148,10 @@ async function toggleGroupEnabled(g, sw, after) {
 async function groupDetail(opts) {
   const id = state.detail.id;
   const [groups, roster] = await screenData(['/groups', '/units'], opts);
+  // Checked before the row is looked up, not just before the paint: this screen answers
+  // a missing row by navigating, and a stale instance doing that would throw the user
+  // out of whatever they had opened in the meantime.
+  if (stale(opts)) return;
   const g = groups.find((x) => x.telegram_group_id === id);
   if (!g) { popDetail(); return; }
 
@@ -1450,6 +1474,11 @@ async function alertsScreen(opts) {
     return;
   }
 
+  // Before the module-level feed nodes are touched, not just before the paint: a stale
+  // instance that reassigned them would leave "Load more" appending rows into a node
+  // that is no longer on the page.
+  if (stale(opts)) return;
+
   feedNode = el('<div></div>');
   feedMore = el('<div></div>');
   feedDay = null;
@@ -1560,6 +1589,7 @@ async function adminsScreen(opts) {
 
 async function adminDetail(opts) {
   const [admins] = await screenData(['/admins'], opts);
+  if (stale(opts)) return;
   const a = admins.find((x) => x.id === state.detail.id);
   if (!a) { popDetail(); return; }
 
