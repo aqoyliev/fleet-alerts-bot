@@ -16,7 +16,7 @@ What `hf` deliberately does differently — keep these when resolving a merge:
 |---|---|---|
 | Groups | one driver group per truck, registered when the bot is added, paired by `/setunit` | **one alerts group**, a single row; adding the bot to a chat registers nothing |
 | Crash alerts | DMs + a dedicated `CRASH_GROUP_ID`, never the other groups | the alerts group (if its filter lists crash) + DMs |
-| Mute | anyone in a driver group; a kicked group is muted automatically | **bot admins only**; nothing is ever muted automatically |
+| Mute | `/disable` · `/enable` by anyone in a driver group; a kicked group is muted automatically | **the panel's switch only** — no group commands, nothing is ever muted automatically, nobody is DMed when the bot joins or leaves a chat |
 | Event types | adds tailgating, camera obstruction, near miss, … | HF's shorter list (`EVENT_TYPE_MAP`); the rest are recognised and dropped |
 | Alert card | ruled into blocks | plain rows, title + blank line (`_format_event`) |
 | Speeding threshold | `high` | `medium` |
@@ -69,7 +69,7 @@ The webhook always answers 200 immediately; `_handle_event()` runs as a backgrou
 - `utils/db_api/admins.py` — admins, hidden maintainer accounts, DM subscriptions
 - `utils/db_api/violations.py` — save + every report/panel query
 - `utils/daily_report.py` — midnight ET report; `handlers/users/report.py` — `/report`, `/top`
-- `handlers/groups/group_events.py` — `/help`, `/disable`, `/enable` in the group; removal notices
+- `handlers/groups/group_events.py` — `/help` in the group; logs the bot joining/leaving a chat (nothing else)
 - `handlers/users/support.py` — ✉️ Contact Support relay to the maintainer
 - `utils/webapp/` — the admin Mini App (`api.py` endpoints, `auth.py` initData check, `static/` frontend)
 - `utils/samsara/client.py` — speeding enrichment

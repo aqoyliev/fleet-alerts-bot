@@ -6,9 +6,8 @@ commands it actually uses. Telegram resolves the most specific scope first, so t
 list below is what the alerts group is offered and the private list is what an admin
 sees in a DM.
 
-Hiding a command does NOT disable it. /disable and /enable work when a bot admin types
-them in the group — they are kept out of the picker so that everyone else in the chat is
-not offered a switch they cannot use.
+The group list is all there is to do in the group: there are no mute commands, hidden
+or otherwise. Pausing the group's alerts is a switch in the admin panel.
 """
 from aiogram import types
 

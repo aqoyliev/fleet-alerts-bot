@@ -1,14 +1,14 @@
 """What the bot does in a group chat: the alerts group, and every other one.
 
 Only one group means anything on this branch, and it cannot be made to by anything typed
-or done in Telegram — adding the bot to a chat registers nothing. So the tests here are
-mostly about refusals: a chat that is not the alerts group is not answered, somebody who
-is not a bot admin cannot silence the fleet, and the bot being put into a chat never
-changes where alerts go.
+or done in Telegram — adding the bot to a chat registers nothing. Nor is the group
+controlled from inside it: there is no /disable or /enable, and nobody is messaged when
+the bot is added to or removed from a chat. So the tests here are mostly about things
+not happening — a chat that is not the alerts group is not answered, and the bot coming
+and going changes nothing and tells nobody.
 """
 import pytest
 
-from data import config
 import handlers.groups.group_events as ge
 import handlers.users.report as report
 
@@ -61,21 +61,12 @@ class _Update:
         self.new_chat_member = _Member(new)
 
 
-class _Bot:
-    def __init__(self, unreachable=()):
-        self.sent: list[tuple[int, str]] = []
-        self.unreachable = set(unreachable)
-
-    async def send_message(self, chat_id, text, **kwargs):
-        if chat_id in self.unreachable:
-            raise RuntimeError("bot was blocked by the user")
-        self.sent.append((chat_id, text))
-
-
 @pytest.fixture
 def world(monkeypatch):
-    """The alerts group is THE_GROUP, ADMIN is a bot admin, and the maintainer is id 1."""
-    state = {"enabled_writes": [], "bot": _Bot()}
+    """The alerts group is THE_GROUP and ADMIN is a bot admin. Every write to the group
+    row and every message the bot could send is recorded, because the claim in most of
+    these tests is that there are none."""
+    state = {"db_writes": [], "sent": []}
 
     async def _is_the_group(chat_id):
         return chat_id == THE_GROUP
@@ -83,148 +74,94 @@ def world(monkeypatch):
     async def _is_admin(telegram_id):
         return telegram_id == ADMIN
 
-    async def _set_enabled(enabled):
-        state["enabled_writes"].append(enabled)
+    async def _execute(query, *args):
+        state["db_writes"].append(" ".join(query.split()))
 
-    async def _all_admins():
-        return [{"telegram_id": ADMIN, "is_active": True},
-                {"telegram_id": 43, "is_active": False}]
+    class _Bot:
+        async def send_message(self, chat_id, text, **kwargs):
+            state["sent"].append((chat_id, text))
 
-    for module in (ge, report):
-        monkeypatch.setattr(module, "is_the_group", _is_the_group)
-        monkeypatch.setattr(module, "is_admin", _is_admin)
-    monkeypatch.setattr(ge, "set_group_enabled", _set_enabled)
-    monkeypatch.setattr(ge, "get_all_admins", _all_admins)
-    monkeypatch.setattr(ge, "bot", state["bot"])
-    monkeypatch.setattr(config, "HIDDEN_ADMIN_IDS", {1})
+    import loader
+    import utils.db_api.groups as groups
+
+    monkeypatch.setattr(ge, "is_the_group", _is_the_group)
+    monkeypatch.setattr(report, "is_the_group", _is_the_group)
+    monkeypatch.setattr(report, "is_admin", _is_admin)
+    monkeypatch.setattr(groups.db, "execute", _execute)
+    monkeypatch.setattr(loader, "bot", _Bot())
     return state
 
 
-# ── muting is a bot admin's decision ───────────────────────────────────────────
+# ── the group is not controlled from the group ─────────────────────────────────
 
-async def test_a_bot_admin_can_pause_the_group(world):
-    message = _Message(THE_GROUP, user_id=ADMIN)
-    await ge.cmd_disable(message)
+@pytest.mark.parametrize("command", ["disable", "enable", "mute", "unmute", "setunit",
+                                     "events", "removegroup"])
+def test_no_group_command_changes_what_the_group_receives(command):
+    """single-company has /disable and /enable in every driver group, and /setunit,
+    /events and /removegroup beside them. None of them exists here: the alerts group's
+    mute and its event filter are in the admin panel and nowhere else, so a merge that
+    brought one of these handlers back would be handing the switch to a chat."""
+    from loader import dp
 
-    assert world["enabled_writes"] == [False]
-    assert "paused" in message.replies[0]
+    registered = set()
+    for handler in dp.message_handlers.handlers:
+        for flt in handler.filters or []:
+            registered.update(getattr(flt.filter, "commands", None) or [])
 
-
-async def test_somebody_else_in_the_group_cannot(world):
-    """On single-company anyone in a driver's group may mute it: that silences one
-    truck's chat for the people in it. Here it would silence the whole fleet."""
-    message = _Message(THE_GROUP, user_id=STRANGER)
-    await ge.cmd_disable(message)
-
-    assert world["enabled_writes"] == []
-    assert "Only the bot's admins" in message.replies[0]
-
-
-async def test_nor_can_they_turn_it_back_on(world):
-    message = _Message(THE_GROUP, user_id=STRANGER)
-    await ge.cmd_enable(message)
-
-    assert world["enabled_writes"] == []
+    assert command not in registered
+    # And the commands that are meant to be there, are — so this is not passing only
+    # because the handlers could not be read.
+    assert {"help", "report", "top"} <= registered
 
 
-async def test_a_bot_admin_can_resume_the_group(world):
-    message = _Message(THE_GROUP, user_id=ADMIN)
-    await ge.cmd_enable(message)
-
-    assert world["enabled_writes"] == [True]
-    assert "resumed" in message.replies[0]
-
-
-async def test_pausing_tells_every_active_admin_and_the_maintainer_who_did_it(world):
-    """A muted group is a fleet nobody is being warned about. That must not be something
-    one person knows."""
-    await ge.cmd_disable(_Message(THE_GROUP, user_id=ADMIN))
-
-    recipients = [chat_id for chat_id, _ in world["bot"].sent]
-    assert recipients == [1, ADMIN]          # the maintainer and the active admin
-    assert 43 not in recipients              # a deactivated admin is not told
-    assert all("Dana Dispatcher" in text for _, text in world["bot"].sent)
-
-
-async def test_one_unreachable_admin_does_not_cost_the_others_the_notice(world):
-    world["bot"].unreachable = {1}
-    await ge.cmd_disable(_Message(THE_GROUP, user_id=ADMIN))
-
-    assert [chat_id for chat_id, _ in world["bot"].sent] == [ADMIN]
-
-
-@pytest.mark.parametrize("command", ["cmd_disable", "cmd_enable"])
-async def test_the_mute_commands_do_nothing_in_any_other_group(world, command):
-    """Even for a bot admin. The command says "this group", and this is not the group."""
-    message = _Message(OTHER_GROUP, user_id=ADMIN)
-    await getattr(ge, command)(message)
-
-    assert world["enabled_writes"] == []
-    assert message.replies == []
+def test_the_group_module_has_no_way_to_mute():
+    assert not hasattr(ge, "cmd_disable")
+    assert not hasattr(ge, "cmd_enable")
+    assert not hasattr(ge, "set_group_enabled")
 
 
 # ── being added and removed ────────────────────────────────────────────────────
 
-async def test_being_added_to_some_chat_changes_nothing_and_tells_nobody(world):
-    """No registration, no pairing prompt, no DM. The log line carrying the chat id is
-    the whole effect."""
-    await ge.on_bot_chat_member_update(_Update(OTHER_GROUP, "left", "member"))
+@pytest.mark.parametrize("chat_id", [THE_GROUP, OTHER_GROUP])
+@pytest.mark.parametrize("old, new", [("left", "member"), ("kicked", "administrator"),
+                                      ("member", "kicked"), ("administrator", "left")])
+async def test_the_bot_coming_or_going_changes_nothing_and_tells_nobody(world, chat_id,
+                                                                        old, new):
+    """Not for the alerts group either. No registration, no mute, no DM to the admins:
+    the log line with the chat's id is the whole effect. A group the bot was removed
+    from is tried again on the next alert, so putting it back is the entire fix."""
+    await ge.on_bot_chat_member_update(_Update(chat_id, old, new))
 
-    assert world["bot"].sent == []
-    assert world["enabled_writes"] == []
-
-
-async def test_being_removed_from_the_alerts_group_is_reported_to_the_admins(world):
-    await ge.on_bot_chat_member_update(_Update(THE_GROUP, "member", "kicked"))
-
-    assert [chat_id for chat_id, _ in world["bot"].sent] == [1, ADMIN]
-    assert "removed from the alerts group" in world["bot"].sent[0][1]
+    assert world["db_writes"] == []
+    assert world["sent"] == []
 
 
-async def test_removal_does_not_mute_the_group(world):
-    """The mute is an admin's switch and only an admin's. If leaving muted the group,
-    coming back would have to un-mute it — and that update is skipped whenever the bot
-    is re-added while it is restarting, which would leave the group silent for good."""
-    await ge.on_bot_chat_member_update(_Update(THE_GROUP, "administrator", "left"))
+async def test_the_chat_id_is_logged_so_a_group_can_be_configured(world, caplog):
+    with caplog.at_level("INFO"):
+        await ge.on_bot_chat_member_update(_Update(OTHER_GROUP, "left", "member"))
 
-    assert world["enabled_writes"] == []
-
-
-async def test_coming_back_is_reported_and_does_not_override_a_deliberate_mute(world):
-    await ge.on_bot_chat_member_update(_Update(THE_GROUP, "kicked", "member"))
-
-    assert "back in the alerts group" in world["bot"].sent[0][1]
-    assert world["enabled_writes"] == []
+    assert f"id={OTHER_GROUP}" in caplog.text
+    assert "added to" in caplog.text
 
 
-async def test_a_promotion_within_the_group_is_not_an_arrival(world):
-    await ge.on_bot_chat_member_update(_Update(THE_GROUP, "member", "administrator"))
+async def test_a_private_chat_blocking_the_bot_is_not_a_group_event(world, caplog):
+    with caplog.at_level("INFO"):
+        await ge.on_bot_chat_member_update(_Update(STRANGER, "member", "kicked", "private"))
 
-    assert world["bot"].sent == []
-
-
-async def test_a_private_chat_blocking_the_bot_is_not_a_group_event(world):
-    await ge.on_bot_chat_member_update(_Update(STRANGER, "member", "kicked", "private"))
-
-    assert world["bot"].sent == []
+    assert caplog.text == ""
 
 
 # ── /help in a group ───────────────────────────────────────────────────────────
 
-async def test_help_in_the_alerts_group_explains_the_group(world):
-    message = _Message(THE_GROUP, user_id=STRANGER)
+@pytest.mark.parametrize("user_id", [STRANGER, ADMIN])
+async def test_help_in_the_alerts_group_explains_the_group(world, user_id):
+    """The same text for everyone: there is nothing an admin can do here that anybody
+    else in the chat cannot."""
+    message = _Message(THE_GROUP, user_id=user_id)
     await ge.cmd_group_help(message)
 
     assert "/report" in message.replies[0] and "/top" in message.replies[0]
-    # The switch is not advertised to somebody who cannot use it.
-    assert "/disable" not in message.replies[0]
-
-
-async def test_help_tells_a_bot_admin_about_the_switch(world):
-    message = _Message(THE_GROUP, user_id=ADMIN)
-    await ge.cmd_group_help(message)
-
-    assert "/disable" in message.replies[0]
+    assert "/disable" not in message.replies[0] and "/enable" not in message.replies[0]
 
 
 async def test_help_is_silent_in_any_other_group(world):

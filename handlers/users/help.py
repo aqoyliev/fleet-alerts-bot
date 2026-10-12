@@ -30,8 +30,7 @@ async def bot_help(message: types.Message):
         "<b>⚙️ Settings</b>",
         "Choose which event types are also sent to you personally, here in this chat.\n",
         "<b>In the alerts group</b>",
-        "/report and /top work there too, for everyone in the group.",
-        "/disable · /enable — Pause or resume the group's alerts (bot admins only)\n",
+        "/report and /top work there too, for everyone in the group.\n",
         "<b>✉️ Contact Support</b>",
         "Tap it on the keyboard and send anything — text, a photo, a video. It reaches "
         "the people who run this bot, and their answer arrives in this chat.",

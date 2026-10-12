@@ -3,7 +3,8 @@
 There is no table of groups on this branch and nothing is registered by adding the bot
 to a chat: the group is a single row, seeded once, and every vehicle's alerts go to it.
 What an admin can change about it is whether it is muted and which event types it
-receives — both from the panel, the first also by command in the group itself.
+receives — both from the panel, and from nowhere else: no command in the group does
+either, and nothing mutes it automatically.
 """
 import logging
 
