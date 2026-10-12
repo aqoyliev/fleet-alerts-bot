@@ -1,9 +1,13 @@
 from aiogram import types
 
-PERIOD_LABELS = {
-    "last_week": "Last Week",
-    "last_month": "Last Month",
-}
+# Labels come from the report module, which is what actually builds the periods. Keeping
+# a second copy here is how the chat and the Mini App end up disagreeing about what
+# "Last Week" means. Re-exported, because handlers import the name from this module.
+from utils.violation_report import PERIOD_LABELS  # noqa: F401
+
+# The two windows this toggle row offers. PERIOD_LABELS also carries "today", which the
+# panel shows as a third segment -- there is no room for a third button here.
+PERIOD_TOGGLE = ("last_week", "last_month")
 
 
 def event_type_keyboard() -> types.InlineKeyboardMarkup:
@@ -19,7 +23,8 @@ def top10_keyboard(rows: list[dict], period: str, event_type: str) -> types.Inli
     kb = types.InlineKeyboardMarkup(row_width=2)
     # Period toggle row — checkmark on the active period
     period_buttons = []
-    for key, label in PERIOD_LABELS.items():
+    for key in PERIOD_TOGGLE:
+        label = PERIOD_LABELS[key]
         mark = "✅ " if key == period else ""
         period_buttons.append(types.InlineKeyboardButton(
             f"{mark}{label}",
