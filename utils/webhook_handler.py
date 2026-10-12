@@ -63,7 +63,7 @@ SEVERITY_EMOJI = {
 
 # Exact Motive event type names → (emoji, display title)
 EVENT_TYPE_MAP = {
-    "hard_brake":                   ("🛑", "HARD BRAKE"),
+    "hard_brake":                   ("🛑", "HARSH BRAKE"),
     "crash":                        ("💥", "CRASH DETECTED"),
     "cell_phone":                   ("📵", "CELL PHONE USAGE"),
     "stop_sign_violation":          ("🛑", "ROLLING STOP"),
