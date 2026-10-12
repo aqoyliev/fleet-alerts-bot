@@ -1,9 +1,15 @@
--- Fleet Alerts Bot — Database Schema (single-company build)
+-- HF Alerts Bot — Database Schema (one company, one alerts group)
 --
--- This deployment serves exactly ONE company; its identity and provider
--- credentials come from the .env file (see data/config.py), so there is no
--- `companies` table here. Everything below is scoped implicitly to that one
--- company.
+-- This deployment serves exactly ONE company and posts to ONE Telegram group; the
+-- company's identity and provider credentials come from the environment (see
+-- data/config.py), so there is no `companies` table and no table of groups here.
+--
+-- Every statement is CREATE ... IF NOT EXISTS, and the whole file runs on every boot.
+-- A database that predates this schema — HF's ran the multi-company one — still holds
+-- `companies`, `company_groups`, `group_event_types` and `admin_companies`. Nothing here
+-- drops or rewrites them: the group and its event filter are copied out once (see
+-- utils/db_api/legacy.py) and the old tables are left exactly as they were, so the
+-- previous build still runs against this database if a deploy has to be rolled back.
 
 CREATE TABLE IF NOT EXISTS users (
     telegram_id   BIGINT       PRIMARY KEY,
@@ -14,10 +20,10 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at    TIMESTAMPTZ  DEFAULT NOW()
 );
 
--- crash_dm is the one notification that is ON by default: crashes never go to a group,
--- so an admin's DM is the only place a crash is ever reported, and the cost of a missed
--- one is not symmetric with the cost of an unwanted one. It is a column rather than a
--- seeded admin_subscriptions row so that turning it off survives a restart.
+-- crash_dm is the one DM that is ON by default: an admin who never opened Settings is
+-- still told about a collision, in a chat it cannot scroll out of sight in. It is a
+-- column rather than a seeded admin_subscriptions row so that turning it off survives a
+-- restart.
 CREATE TABLE IF NOT EXISTS admins (
     id          SERIAL      PRIMARY KEY,
     telegram_id BIGINT      UNIQUE NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
@@ -37,44 +43,28 @@ CREATE TABLE IF NOT EXISTS admin_subscriptions (
     PRIMARY KEY (admin_id, event_type)
 );
 
--- Telegram groups that receive this company's alerts.
+-- The single Telegram group this deployment sends its alerts to.
 --
--- vehicle_number ties a group to a single unit: driver groups carry the unit number and
--- receive only that unit's alerts.
---
--- is_main, not a NULL unit, is what marks the all-fleet group. The two used to be the
--- same thing, which left nowhere to record the third state a group is actually in most
--- often at the start: registered, because the bot was just added to it, but not yet
--- pointed at a truck. Such a row has a NULL unit and is_main FALSE, matches nothing in
--- get_groups_for_event, and exists so the admin panel can list it and have its unit
--- chosen there.
---
--- The column is nullable on purpose. NULL means "written before this existed", and every
--- read COALESCEs it back onto the old rule, so a row from the outgoing container during a
--- rolling deploy routes the way it always did.
-CREATE TABLE IF NOT EXISTS alert_groups (
-    id                SERIAL      PRIMARY KEY,
-    telegram_group_id BIGINT      NOT NULL UNIQUE,
-    label             VARCHAR(100),
-    title             VARCHAR(255),
-    vehicle_number    VARCHAR(50),
-    is_main           BOOLEAN,
-    enabled           BOOLEAN     DEFAULT TRUE,
-    -- When the bot was removed from the chat; NULL while it is still in it. The row is
-    -- kept rather than deleted so that putting the bot back restores the group's unit and
-    -- its event filter instead of asking for them again, but a chat the bot is not in has
-    -- no business in the panel: there is nothing to configure and nothing it can receive.
-    left_at           TIMESTAMPTZ,
-    created_at        TIMESTAMPTZ DEFAULT NOW()
+-- A true singleton, not a table of groups: id is pinned to 1 by the CHECK constraint, so
+-- there is exactly one row, ever. It is seeded on first boot (ensure_group) from the old
+-- schema's company_groups row where there is one, else from GROUP_CHAT_ID, and from then
+-- on the row — not the env var — is authoritative. That is what lets migrate_group()
+-- repoint it when Telegram upgrades a basic group to a supergroup without the seed
+-- re-inserting a stale duplicate.
+CREATE TABLE IF NOT EXISTS alert_group (
+    id                INT     PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    telegram_group_id BIGINT  NOT NULL,
+    enabled           BOOLEAN NOT NULL DEFAULT TRUE
 );
 
-CREATE INDEX IF NOT EXISTS alert_groups_vehicle ON alert_groups (vehicle_number);
-
--- Optional per-group event-type filter. A group with no rows here receives every type.
-CREATE TABLE IF NOT EXISTS group_event_types (
-    group_id   INT         NOT NULL REFERENCES alert_groups(id) ON DELETE CASCADE,
-    event_type VARCHAR(50) NOT NULL,
-    PRIMARY KEY (group_id, event_type)
+-- Which event types that group receives — an ALLOWLIST: no rows means every type.
+--
+-- Its own table rather than the old group_event_types, which a legacy database already
+-- has under that name with a foreign key into company_groups. Reusing the name would
+-- mean either writing rows the old key rejects or rewiring a table the previous build
+-- still reads.
+CREATE TABLE IF NOT EXISTS alert_group_event_types (
+    event_type VARCHAR(50) PRIMARY KEY
 );
 
 CREATE TABLE IF NOT EXISTS violations (
@@ -127,29 +117,4 @@ CREATE TABLE IF NOT EXISTS support_relays (
     user_telegram_id BIGINT      NOT NULL,
     created_at       TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (admin_chat_id, admin_msg_id)
-);
-
--- One row per morning the PTI reminder album was posted (see utils/pti_reminder.py).
---
--- The reminder is scheduled by an in-process timer, so a deploy — and this branch serves
--- four of them, every push is four restarts — can land on top of the slot and either lose
--- that morning or repeat it. Claiming the day here first makes both impossible: the
--- INSERT is what decides whether this process sends, so a restart inside the catch-up
--- window picks the morning up exactly once.
-CREATE TABLE IF NOT EXISTS pti_reminder_runs (
-    sent_on    DATE        PRIMARY KEY,
-    group_count INT        NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- What Telegram calls the PTI posters, so they are uploaded once and then re-sent by id.
---
--- A file_id is valid for exactly one bot token, which is why this is a table in each
--- deployment's own database rather than a setting someone pastes in: the bot earns the
--- ids itself on its first send and every morning afterwards costs no upload at all.
--- The fingerprint is over the poster bytes — replace a poster and the cache simply misses.
-CREATE TABLE IF NOT EXISTS pti_poster_cache (
-    fingerprint TEXT        PRIMARY KEY,
-    file_ids    TEXT[]      NOT NULL,
-    created_at  TIMESTAMPTZ DEFAULT NOW()
 );

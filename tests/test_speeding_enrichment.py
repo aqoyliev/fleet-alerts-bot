@@ -44,8 +44,7 @@ def test_enriched_interval():
     assert "Duration:</b> 82s" in out
     assert "I 10, Eminence" in out
     # payload severity wins over interval severity
-    assert "🆘 <b>Severity:</b> Critical" in out
-    assert "via Samsara" in out
+    assert "📊 <b>Severity:</b> 🆘 Critical" in out
 
 
 def test_enriched_gps_only():
@@ -61,13 +60,12 @@ def test_no_enrichment_unchanged():
     out = _format_event(SAMSARA_SPEEDING, "Gurman", None)
     assert "Max Speed" not in out
     assert "Location" not in out
-    assert "via Samsara" in out
 
 
 def test_severity_fallback_from_interval():
     event = {k: v for k, v in SAMSARA_SPEEDING.items() if k != "severity"}
     out = _format_event(event, "Gurman", DETAILS)
-    assert "🆘 <b>Severity:</b> Severe" in out
+    assert "📊 <b>Severity:</b> 🆘 Severe" in out
 
 
 def test_driver_fallback_from_interval():
@@ -92,7 +90,6 @@ def test_motive_speeding_untouched():
     assert "Average Speed:</b> 70.8 mph" in out
     assert out.count("Duration") == 1
     assert "Max Speed" not in out
-    assert "via Samsara" not in out
 
 
 def test_client_helpers():

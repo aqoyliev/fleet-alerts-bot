@@ -4,17 +4,21 @@ Every handler here is wrapped in @require_admin or @require_super, so by the tim
 runs the caller is a verified Telegram user who is an active admin, and their id is at
 request["telegram_id"].
 
+There is one alerts group on this branch, so there is no list of groups and no group id
+in any path: the Group screen reads and edits the single row utils/db_api/groups.py
+keeps. What is left of single-company's group endpoints is the two things an admin can
+still decide about that chat — whether it is muted, and which event types it receives.
+
 Two rules the whole file follows:
 
-Reuse the bot's decisions, don't restate them. A unit is checked by the same resolve_unit
-the /setunit command uses; an event filter is toggled by the same next_event_filter the
-inline keyboard uses; admins are hidden by the same visible_admins the 👥 panel uses. The
-panel must not become a softer path to the same tables — wherever it enforces less than
-the bot does, that gap IS the bug.
+Reuse the bot's decisions, don't restate them. The event filter is toggled by
+next_event_filter, the same function that defines what an allowlist means; admins are
+hidden by the same visible_admins every other surface uses. The panel must not become a
+softer path to the same tables — wherever it enforces less than the bot does, that gap
+IS the bug.
 
 Values from the browser are bound parameters, never interpolated into SQL, and never
-trusted as validation. The client picking a unit from a roster dropdown is a convenience;
-the server still asks the provider.
+trusted as validation.
 """
 
 import json
@@ -27,23 +31,16 @@ from aiohttp import web
 
 from data import config
 from data.event_catalog import GROUP_FILTER_TYPES, next_event_filter
-from loader import bot
 from utils.db_api.admins import (
     add_admin, delete_admin, get_admin_by_id, get_all_admins, is_maintainer,
     is_super_admin, promote_to_super, set_admin_active, visible_admins,
 )
 from utils.db_api.groups import (
-    get_group, get_group_event_types, get_groups_overview, remove_group,
-    set_group_enabled, set_group_event_types, set_group_unit,
+    get_group_event_types, get_group_status, set_group_enabled, set_group_event_types,
 )
 from utils.db_api.users import ensure_user
-from utils import group_texts
 from utils.db_api.violations import (
-    get_counts_by_vehicle, get_daily_counts, get_recent_events, get_totals,
-    get_top_violators, get_type_counts,
-)
-from utils.units import (
-    clean_unit, list_units_any, resolve_unit, roster_names, suggest_units_any,
+    get_daily_counts, get_recent_events, get_totals, get_top_violators, get_type_counts,
 )
 from utils.webapp.auth import require_admin, require_super
 
@@ -122,17 +119,6 @@ def _event_label(event_type: str) -> tuple[str, str]:
     return EVENT_TYPE_MAP.get(event_type, ("⚠️", event_type.replace("_", " ").title()))
 
 
-def _is_reserved(telegram_group_id: int) -> bool:
-    """The two chats configured in .env rather than registered in alert_groups.
-
-    The main group is recreated by ensure_main_group on every boot, so removing it from
-    the panel would be a lie with a deploy-shaped expiry. The crash group is deliberately
-    absent from the table entirely (data/config.py) — a row there with a NULL unit *is*
-    the main group in this schema. Neither is the panel's to edit.
-    """
-    return telegram_group_id in {config.MAIN_GROUP_ID, config.CRASH_GROUP_ID}
-
-
 # ── reads ───────────────────────────────────────────────────────────────────────
 
 @require_admin
@@ -154,8 +140,6 @@ async def bootstrap(request: web.Request) -> web.Response:
             {"type": types[0], "emoji": emoji, "label": label}
             for types, emoji, label in GROUP_FILTER_TYPES
         ],
-        "main_group_id": config.MAIN_GROUP_ID,
-        "crash_group_id": config.CRASH_GROUP_ID,
         "samsara_enabled": bool(config.SAMSARA_API_KEY),
     })
 
@@ -168,8 +152,7 @@ async def stats(request: web.Request) -> web.Response:
     top_units = await get_top_violators(since=since, until=until, limit=5)
     by_day = await get_daily_counts(since, until) if since.date() != until.date() else []
 
-    groups = await get_groups_overview()
-    muted = [g for g in groups if not g["enabled"]]
+    status = await get_group_status()
 
     return _ok({
         "period": {"key": request.query.get("period", "today"), "label": label},
@@ -181,38 +164,42 @@ async def stats(request: web.Request) -> web.Response:
         ],
         "by_day": by_day,
         "top_units": top_units,
-        "groups": {"total": len(groups), "muted": len(muted),
-                   "muted_titles": [g["title"] or str(g["telegram_group_id"]) for g in muted[:5]]},
+        # The two states in which the numbers above are being collected and shown to
+        # nobody in the group. They ride along with the stats so the dashboard can say
+        # so without a second request.
+        "group": {"configured": status is not None,
+                  "muted": bool(status) and not status["enabled"]},
     })
 
 
-@require_admin
-async def groups(request: web.Request) -> web.Response:
-    """The Groups tab. Alert counts are attached in Python — see get_counts_by_vehicle
-    for why they aren't joined."""
-    since = datetime.now(tz=ET).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
-    rows = await get_groups_overview()
-    counts = await get_counts_by_vehicle(since)
+def _group_payload(status: dict, alerts_7d: int) -> dict:
+    return {
+        "configured": True,
+        "telegram_group_id": status["telegram_group_id"],
+        "enabled": status["enabled"],
+        "event_types": list(status["event_types"]),
+        # Zero rows in the filter means "every type", not "no types". Naming that here
+        # keeps the UI from rendering an empty list as "receives nothing".
+        "filter_mode": "all" if not status["event_types"] else "custom",
+        "alerts_7d": alerts_7d,
+    }
 
-    out = []
-    for row in rows:
-        unit = row["vehicle_number"]
-        out.append({
-            **row,
-            # Straight from the row now. Inferring it from a missing unit would label
-            # every just-added group the all-fleet one and hide the unit picker on the
-            # single screen that exists to use it.
-            "is_main": row["is_main"],
-            # Zero rows in group_event_types means "every type", not "no types". Naming
-            # that here keeps the UI from rendering an empty list as "receives nothing".
-            "filter_mode": "all" if not row["event_types"] else "custom",
-            # The whole fleet's week for the all-fleet group, this truck's for a driver
-            # group, and zero for one with no unit yet — which receives nothing, and would
-            # otherwise be shown the fleet-wide figure as if it had been getting it.
-            "alerts_7d": (sum(counts.values()) if row["is_main"]
-                          else counts.get(unit, 0) if unit else 0),
-        })
-    return _ok(out)
+
+@require_admin
+async def group(request: web.Request) -> web.Response:
+    """The Group screen: the one chat this deployment posts to.
+
+    An unconfigured deployment answers 200 with configured=false rather than 404. It is
+    a state the screen has to explain — no group is set, here is what that means — not a
+    failed request for it to apologise for.
+    """
+    status = await get_group_status()
+    if status is None:
+        return _ok({"configured": False})
+    now = datetime.now(tz=ET)
+    since = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
+    totals = await get_totals(since, now)
+    return _ok(_group_payload(status, totals["total"]))
 
 
 @require_admin
@@ -254,35 +241,6 @@ async def alerts(request: web.Request) -> web.Response:
 
 
 @require_admin
-async def units(request: web.Request) -> web.Response:
-    """The fleet roster, so changing a unit is a pick rather than a guess.
-
-    Every configured provider, merged by list_units_any. That merge is the whole point of
-    this endpoint now: the picker is the only way this screen can set a unit, and while
-    it offered Samsara's vehicles alone, a truck that only Motive knew about could not be
-    paired here at all — nor in the chat, since /setunit refused it too.
-
-    Degrades to an empty list with a reason rather than failing the screen: a deployment
-    with no provider configured has no roster, and one provider's outage must not make
-    the group detail unopenable.
-    """
-    roster = roster_names()
-    if not roster:
-        return _ok({"units": [], "available": False,
-                    "reason": "This deployment has no vehicle roster configured."})
-    names, available = await list_units_any()
-    if not available:
-        return _ok({"units": [], "available": False,
-                    "reason": f"{roster} couldn't be reached just now."})
-
-    taken = {g["vehicle_number"] for g in await get_groups_overview() if g["vehicle_number"]}
-    return _ok({
-        "units": [{"name": n, "linked": n in taken} for n in names],
-        "available": True,
-    })
-
-
-@require_admin
 async def admins(request: web.Request) -> web.Response:
     """Maintainers are filtered out server-side. The panel must not become the place that
     leaks what the bot deliberately hides (see data/config.py on HIDDEN_ADMIN_IDS)."""
@@ -292,162 +250,51 @@ async def admins(request: web.Request) -> web.Response:
 
 # ── group mutations ─────────────────────────────────────────────────────────────
 
-async def _load_editable_group(request: web.Request) -> tuple[dict | None, web.Response | None]:
-    """Resolve the {tgid} path param to a group the panel may edit, or an error.
-
-    Callers must test the error with `is not None`, never for truthiness: aiohttp's
-    Response defines __len__, and an empty-body response is therefore falsy — so a
-    plain `if err:` skipped every refusal this function returns and let the handler
-    run on a group of None.
-    """
-    tgid = _int_param(request, "tgid")
-    if tgid is None:
-        return None, _fail("bad_request", "That group id isn't valid.")
-    if _is_reserved(tgid):
-        return None, _fail(
-            "reserved_group",
-            "This chat is configured in the deployment settings, not here.", status=403,
-        )
-    group = await get_group(tgid)
-    if group is None:
-        return None, _fail("not_found", "That group isn't registered.", status=404)
-    return group, None
+_NO_GROUP = ("no_group", "No alerts group is configured for this deployment yet.")
 
 
 @require_admin
 async def set_enabled(request: web.Request) -> web.Response:
-    group, err = await _load_editable_group(request)
-    if err is not None:
-        return err
+    if await get_group_status() is None:
+        return _fail(*_NO_GROUP, status=404)
     enabled = bool((await _body(request)).get("enabled"))
-    await set_group_enabled(group["telegram_group_id"], enabled)
+    await set_group_enabled(enabled)
     logger.info(f"[webapp] {request['telegram_id']} "
-                f"{'unmuted' if enabled else 'muted'} group {group['telegram_group_id']}")
+                f"{'unmuted' if enabled else 'muted'} the alerts group")
     return _ok({"ok": True, "enabled": enabled})
 
 
 @require_admin
-async def set_unit(request: web.Request) -> web.Response:
-    """Repoint a group at a different truck.
-
-    The roster picker in the UI makes a bad value unlikely; this makes it impossible. A
-    unit no provider can confirm is refused rather than stored, because a stored guess
-    produces a group that looks configured and silently receives nothing — see
-    utils/units.py for the whole argument.
-    """
-    group, err = await _load_editable_group(request)
-    if err is not None:
-        return err
-
-    # Same input rules as /setunit -- they share clean_unit so the two surfaces cannot
-    # drift apart on what counts as a unit.
-    roster = roster_names()
-    unit = clean_unit(str((await _body(request)).get("unit", "")))
-    if unit is None:
-        return _fail("bad_unit", "Pick a unit from the list, or type its name the way "
-                                 f"{roster} spells it.")
-
-    status, resolved = await resolve_unit(unit)
-
-    if status == "missing":
-        return _fail("unit_not_found", f"No unit “{unit}” in {roster}.", status=409,
-                     suggestions=await suggest_units_any(unit))
-    if status == "unavailable":
-        return _fail(
-            "roster_unavailable",
-            f"Couldn't finish checking that unit against {roster}, so it wasn't saved — "
-            "the spelling has to match the roster exactly or this group would receive "
-            "nothing. Try again in a few minutes.",
-            status=503,
-        )
-
-    await set_group_unit(group["telegram_group_id"], resolved)
-    logger.info(f"[webapp] {request['telegram_id']} set group "
-                f"{group['telegram_group_id']} to unit {resolved}")
-    await _tell_group_its_unit(group, resolved)
-    return _ok({
-        "ok": True,
-        "vehicle_number": resolved,
-        # Surfaced so the dispatcher sees that "571" became "unit571" rather than
-        # wondering why the field doesn't show what they typed. The provider that matched
-        # is not named, because resolve_unit does not report it and naming the wrong one
-        # would be worse than naming none.
-        "note": f"Matched the roster's “{resolved}”." if resolved != unit else None,
-        "unverified": status == "no_roster",
-    })
-
-
-async def _tell_group_its_unit(group: dict, unit: str) -> None:
-    """Post the change into the driver group, and only there.
-
-    The admins are deliberately not DMed, unlike the /setunit path: the admin who did
-    this is looking at the screen they did it on. The people it is news to are in the
-    chat — the bot told them on the day it joined that nothing would arrive until
-    somebody set a unit, and nothing has told them since.
-
-    Never allowed to fail the request. The unit is stored by the time this runs, and a
-    group that has restricted the bot, or thrown it out without the bot hearing about it,
-    must not turn a successful edit into an error the admin would then retry.
-    """
-    if group["vehicle_number"] == unit:
-        return  # nothing changed; saying so in the chat is noise
-    try:
-        await bot.send_message(
-            group["telegram_group_id"],
-            group_texts.unit_set(unit, previous=group["vehicle_number"],
-                                 muted=not group["enabled"]),
-            parse_mode="HTML", disable_web_page_preview=True,
-        )
-    except Exception as e:
-        logger.warning(f"[webapp] couldn't tell group {group['telegram_group_id']} "
-                       f"about its unit: {e}")
-
-
-@require_admin
 async def toggle_event(request: web.Request) -> web.Response:
-    """Flip one event type in a group's filter, or reset it to "all".
+    """Flip one event type in the group's filter, or reset it to "all".
 
     The toggle rule lives in next_event_filter and stays there. Batching the changes in
     the browser and saving once would mean reimplementing its collapse rule — "an
     allowlist covering every type becomes the empty all-types state" — in JavaScript,
-    and when the two drifted, a group would quietly stop receiving newly added event
+    and when the two drifted, the group would quietly stop receiving newly added event
     types with nothing in the UI to show for it. So each tap is a round trip and the
     response carries the authoritative list the client re-renders from.
     """
-    group, err = await _load_editable_group(request)
-    if err is not None:
-        return err
+    if await get_group_status() is None:
+        return _fail(*_NO_GROUP, status=404)
 
     body = await _body(request)
-    tgid = group["telegram_group_id"]
 
     if body.get("action") == "all":
-        await set_group_event_types(tgid, set())
+        await set_group_event_types(set())
         selected: list[str] = []
     else:
         event_type = body.get("event_type")
         if event_type not in {types[0] for types, _, _ in GROUP_FILTER_TYPES}:
             return _fail("bad_event_type", "That isn't an event type this bot sends.")
-        current = set(await get_group_event_types(tgid))
+        current = set(await get_group_event_types())
         updated = next_event_filter(current, event_type)
-        await set_group_event_types(tgid, updated)
+        await set_group_event_types(updated)
         selected = sorted(updated)
 
-    logger.info(f"[webapp] {request['telegram_id']} changed the event filter on group {tgid}")
+    logger.info(f"[webapp] {request['telegram_id']} changed the alerts group's event filter")
     return _ok({"ok": True, "event_types": selected,
                 "filter_mode": "all" if not selected else "custom"})
-
-
-@require_super
-async def delete_group(request: web.Request) -> web.Response:
-    group, err = await _load_editable_group(request)
-    if err is not None:
-        return err
-    if not (await _body(request)).get("confirm"):
-        return _fail("confirm_required", "This needs to be confirmed.")
-    await remove_group(group["telegram_group_id"])
-    logger.info(f"[webapp] {request['telegram_id']} removed group {group['telegram_group_id']}")
-    return _ok({"ok": True})
 
 
 # ── admin mutations ─────────────────────────────────────────────────────────────

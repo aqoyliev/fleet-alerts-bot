@@ -4,6 +4,7 @@ import hmac
 import io
 import json
 import logging
+import re
 import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
@@ -19,7 +20,7 @@ from aiogram.utils.exceptions import (
 )
 
 from data import config
-from utils.db_api.groups import get_groups_for_event, mark_group_left, migrate_group
+from utils.db_api.groups import get_alert_target, migrate_group
 from utils.db_api.violations import save_violation
 from utils.db_api.admins import get_subscribed_admins
 from utils.db_api.crash_confirmations import (
@@ -122,12 +123,6 @@ async def _download(url: str) -> bytes | None:
     return None
 
 
-# Divider between an alert card's blocks. This build's event cards are deliberately
-# laid out differently from the other deployments' — same fields and wording, but
-# ruled into title / unit / event / notes blocks — so an alert is recognizable as this
-# fleet's at a glance. Keep it short: Telegram wraps a long rule on a narrow phone.
-_RULE = "─" * 18
-
 SEVERITY_EMOJI = {
     "low": "🟢",
     "medium": "🟡",
@@ -141,33 +136,27 @@ SEVERITY_EMOJI = {
     "severe": "🆘",
 }
 
-# Exact Motive event type names → (emoji, display title)
+# Event type → (emoji, display title). This is HF's list, and it is shorter than
+# single-company's on purpose: a type that is not here is not alerted on at all (see
+# ALLOWED_TYPES below), and HF does not want camera obstructions or tailgating in its
+# group. The Samsara alias table further down still names those types — that is how an
+# event of one of them is recognised and dropped, rather than reported as a generic
+# harsh event.
 EVENT_TYPE_MAP = {
-    "hard_brake":                   ("🛑", "HARD BRAKE"),
+    "hard_brake":                   ("🛑", "HARSH BRAKE"),
     "crash":                        ("💥", "CRASH DETECTED"),
     "cell_phone":                   ("📵", "CELL PHONE USAGE"),
-    "stop_sign_violation":          ("🛑", "STOP SIGN VIOLATION"),
-    "road_facing_cam_obstruction":  ("📷", "ROAD CAMERA OBSTRUCTED"),
-    "driver_facing_cam_obstruction":("📷", "DRIVER CAMERA OBSTRUCTED"),
+    "stop_sign_violation":          ("🛑", "ROLLING STOP"),
     "forward_collision_warning":    ("⚠️", "FORWARD COLLISION WARNING"),
-    # Motive sends this one as type='tailgating' and Samsara as "Tailgating" (the alias
-    # table below has mapped it all along). Leaving it out of this map meant both were
-    # dropped by the ALLOWED_TYPES gate with nothing but a debug line to show for it.
-    "tailgating":                   ("🚗", "TAILGATING"),
     "unsafe_parking":               ("🅿️", "UNSAFE PARKING"),
     "speeding":                     ("🚨", "SPEEDING OVER POSTED"),
-    "seat_belt_violation":          ("🔒", "SEAT BELT VIOLATION"),
-    "near_miss":                    ("⚠️", "NEAR MISS"),
-    "drowsiness":                   ("😴", "DROWSINESS"),
-    # Samsara harsh-event types (Motive never sends these names)
     "harsh_event":                  ("⚠️", "HARSH EVENT"),
+    "inattentive_driving":          ("😵", "INATTENTIVE DRIVING"),
+    "drowsy_driving":               ("😴", "POSSIBLE DROWSINESS"),
     "harsh_acceleration":           ("🚀", "HARSH ACCELERATION"),
     "harsh_turn":                   ("↩️", "HARSH TURN"),
     "hard_cornering":               ("↩️", "HARSH TURN"),
-    "inattentive_driving":          ("😵", "INATTENTIVE DRIVING"),
-    "drowsy_driving":               ("😴", "POSSIBLE DROWSINESS"),
     "no_seat_belt":                 ("🚫", "NO SEAT BELT"),
-    "obstructed_camera":            ("📷", "CAMERA OBSTRUCTED"),
 }
 
 # Only process these event types — everything else is ignored
@@ -195,6 +184,9 @@ _SAMSARA_HARSH_TYPE_MAP: dict[str, str] = {
     "Generic Distraction": "inattentive_driving",
     "Tailgating":          "tailgating",
     "Harsh Turn":          "harsh_turn",
+    "Rolling Stop":        "stop_sign_violation",
+    "Did Not Stop":        "stop_sign_violation",
+    "Near Collision":      "forward_collision_warning",
 }
 
 # Captured by the inward (driver-facing) camera only — there is never a forward clip,
@@ -265,6 +257,45 @@ def _get_vehicle(event: dict) -> str:
     )
 
 
+_UNIT_PREFIX_RE = re.compile(r'^unit[\s:#-]+', re.IGNORECASE)
+
+
+def _clean_vehicle(event: dict) -> str:
+    """The vehicle as it is stored and counted: without a leading "unit" label, and no
+    longer than the column.
+
+    Samsara's roster spells the same truck "1196", "Unit 1196" and "unit #1196" depending
+    on who typed it in, and a report groups by this string — so the label has to come off
+    before the row is written or one truck shows up as three.
+    """
+    v = _get_vehicle(event).strip()
+    return _UNIT_PREFIX_RE.sub('', v).strip()[:50]
+
+
+def _get_unit_num(event: dict) -> str:
+    """Just the unit's number, for a log line."""
+    v = _clean_vehicle(event)
+    return v.split()[0] if v else "?"
+
+
+def _vehicle_markup(event: dict) -> str:
+    """The vehicle as an alert card shows it.
+
+    The number and whatever follows it are separate <code> spans, so a tap copies the
+    number alone — which is what gets pasted into Samsara — instead of the number with
+    the driver's name trailing behind it.
+    """
+    v = _clean_vehicle(event)
+    # _get_vehicle answers "—" for a payload that names no vehicle; that is a
+    # placeholder, not a unit number, and there is nothing in it to copy.
+    if not v or v == "—":
+        return "—"
+    num, _, rest = v.partition(" ")
+    if rest:
+        return f"<code>{esc(num)}</code> <code>{esc(rest)}</code>"
+    return f"<code>{esc(num)}</code>"
+
+
 def _format_event(
     event: dict,
     company_name: str = "",
@@ -274,20 +305,17 @@ def _format_event(
 ) -> str:
     """Render one alert card.
 
-    Four blocks separated by _RULE: the title, who/what/when (unit, driver, time),
-    what happened (severity and the type's own measurements), and any footer notes.
-    A block that comes out empty takes its rule with it, so a card never ends on a
-    dangling divider — an obstructed-camera event, for instance, carries no severity
-    and often no location at all.
+    The title on its own line, then who and when, then what the event measured. This is
+    HF's layout; single-company rules its cards into blocks so the two fleets' alerts
+    are told apart at a glance, and that difference is deliberate.
 
-    `notes` appends extra footer lines (the crash card's "video pending") into that
-    last block rather than after it, so the notes stay under one rule.
+    `notes` are footer lines — "video pending", "no camera media" — set off from the
+    body by one blank line however many there are.
     """
     event_type = _get_event_type(event)
     emoji, title = EVENT_TYPE_MAP.get(event_type, ("🚨", event_type.upper().replace("_", " ")))
 
     samsara = samsara or {}
-    vehicle = _get_vehicle(event)
     driver_info = event.get("driver") or event.get("current_driver") or {}
     driver = (
         driver_info.get("name")
@@ -295,7 +323,7 @@ def _format_event(
            f"{driver_info.get('last_name', '') or driver_info.get('LastName', '')}".strip()
         or driver_info.get("username")
         or samsara.get("driver_name")
-        or "Unidentified"
+        or ""
     )
 
     start_time = _to_et(event.get("start_time", ""))
@@ -310,57 +338,52 @@ def _format_event(
     # Everything below is escaped as it goes in: a driver named "A & B" or an address
     # with a "<" in it would otherwise make Telegram reject the whole card, and a
     # rejected alert is a dropped alert.
-    head = [f"{emoji} <b>{title}</b>"]
+    lines = [f"{emoji} <b>{title}</b>\n"]
     if company_name and event_type == "crash":
-        head.append(f"<i>{esc(company_name)}</i>")
-
-    # Who and when — steady across every event type, so it reads the same every time.
-    who = [
-        f"🚛 <b>Vehicle:</b> <code>{esc(vehicle)}</code>",
-        f"👤 <b>Driver:</b> {esc(driver)}",
-    ]
-    if start_time:
-        who.append(f"🕐 <b>Time:</b> {esc(start_time)}")
-
-    # What happened — severity leads, then whatever this type measures.
-    what: list[str] = []
-    if sev_display and event_type not in {"driver_facing_cam_obstruction", "road_facing_cam_obstruction"}:
+        lines.append(esc(company_name))
+    lines.append(f"🚛 <b>Vehicle:</b> {_vehicle_markup(event)}")
+    # No line at all for an unidentified driver. Samsara's webhooks never name one, so
+    # "Driver: Unidentified" would be on nearly every card and say nothing on any.
+    if driver:
+        lines.append(f"👤 <b>Driver:</b> {esc(driver)}")
+    if sev_display:
         sev_emoji = SEVERITY_EMOJI.get(sev_display.lower(), "⚠️")
-        what.append(f"{sev_emoji} <b>Severity:</b> {esc(sev_display.title())}")
+        lines.append(f"📊 <b>Severity:</b> {sev_emoji} {esc(sev_display.title())}")
+    lines.append(f"🕐 <b>Time:</b> {esc(start_time)}")
 
     if event_type == "speeding":
         avg = event.get("avg_vehicle_speed")
         limit = event.get("min_posted_speed_limit_in_kph")
         over = event.get("max_over_speed_in_kph")
         if avg:
-            what.append(f"💨 <b>Average Speed:</b> {_kph_to_mph(avg):.1f} mph")
+            lines.append(f"💨 <b>Average Speed:</b> {_kph_to_mph(avg):.1f} mph")
         if limit:
-            what.append(f"🚦 <b>Speed Limit:</b> {_kph_to_mph(limit):.1f} mph")
+            lines.append(f"🚦 <b>Speed Limit:</b> {_kph_to_mph(limit):.1f} mph")
         if over:
-            what.append(f"📈 <b>Max Over Posted:</b> {_kph_to_mph(over):.1f} mph")
+            lines.append(f"📈 <b>Max Over Posted:</b> {_kph_to_mph(over):.1f} mph")
         if duration:
-            what.append(f"⏱ <b>Duration:</b> {duration}s")
+            lines.append(f"⏱ <b>Duration:</b> {duration}s")
         # Samsara enrichment — fetched only when the webhook payload had no speed data
         max_mph = samsara.get("max_speed_mph")
         limit_mph = samsara.get("posted_limit_mph")
         if max_mph:
-            what.append(f"💨 <b>Max Speed:</b> {max_mph:.1f} mph")
+            lines.append(f"💨 <b>Max Speed:</b> {max_mph:.1f} mph")
         if limit_mph:
-            what.append(f"🚦 <b>Speed Limit:</b> {limit_mph:.1f} mph")
+            lines.append(f"🚦 <b>Speed Limit:</b> {limit_mph:.1f} mph")
         if max_mph and limit_mph:
-            what.append(f"📈 <b>Over Posted:</b> {max_mph - limit_mph:.1f} mph")
+            lines.append(f"📈 <b>Over Posted:</b> {max_mph - limit_mph:.1f} mph")
         if not duration and samsara.get("duration_seconds"):
-            what.append(f"⏱ <b>Duration:</b> {samsara['duration_seconds']}s")
+            lines.append(f"⏱ <b>Duration:</b> {samsara['duration_seconds']}s")
         nominatim = event.get("nominatim_location", "") or samsara.get("location", "")
         if nominatim:
-            what.append(f"📍 <b>Location:</b> {esc(nominatim)}")
+            lines.append(f"📍 <b>Location:</b> {esc(nominatim)}")
     else:
         if location:
-            what.append(f"📍 <b>Location:</b> {esc(location)}")
+            lines.append(f"📍 <b>Location:</b> {esc(location)}")
         if event_type == "hard_brake" and intensity:
-            what.append(f"💥 <b>Intensity:</b> {esc(intensity)}")
+            lines.append(f"💥 <b>Intensity:</b> {esc(intensity)}")
         if duration:
-            what.append(f"⏱ <b>Duration:</b> {duration}s")
+            lines.append(f"⏱ <b>Duration:</b> {duration}s")
 
     foot: list[str] = []
     # Say so when a crash alert went out without Motive's confirmation, so an
@@ -368,15 +391,11 @@ def _format_event(
     if event_type == "crash" and event.get("_crash_unconfirmed"):
         foot.append("⚠️ <i>Unconfirmed — Motive's review could not be reached.</i>")
     foot.extend(notes or [])
-    # Tag the source only for Samsara so existing Motive alerts are unchanged.
-    if event.get("_source") == "samsara":
-        foot.append("<i>via Samsara</i>")
+    if foot:
+        lines.append("")
+        lines.extend(foot)
 
-    card = [*head, _RULE, *who]
-    for block in (what, foot):
-        if block:
-            card.extend([_RULE, *block])
-    return "\n".join(card)
+    return "\n".join(lines)
 
 
 def _get_camera_media_info(event: dict) -> tuple[list[str], list[str]]:
@@ -421,7 +440,7 @@ async def _persist_once(event: dict, event_type: str) -> bool:
     """
     try:
         return await save_violation(
-            vehicle_number=_get_vehicle(event),
+            vehicle_number=_clean_vehicle(event),
             event_type=event_type,
             event_id=_event_id_to_bigint(event.get("id")),
             occurred_at=_parse_occurred(event),
@@ -457,7 +476,7 @@ def _format_crash_initial(event: dict, company_name: str = "") -> str:
 def _format_crash_video_caption(event: dict) -> str:
     """Short caption for the crash video follow-up — the full details already went out
     in the first alert, so this just labels the clip."""
-    return f"💥 <b>CRASH</b> · <code>{esc(_get_vehicle(event))}</code>"
+    return f"💥 <b>CRASH</b> · {_vehicle_markup(event)}"
 
 
 # ── Samsara webhook auth ───────────────────────────────────────────────────────
@@ -536,6 +555,8 @@ async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int, api_key
     Crashes: once detected, the window extends to 15 attempts (~5 min) with no early
     bail — crash clips are large and take a few minutes to upload.
     Inward-only types short-circuit as soon as the inward clip is ready.
+    A type this deployment does not alert on ends the poll at once, with None: there is
+    no card to attach a clip to, so nothing is gained by waiting for one.
 
     `api_key` is the company's own Samsara bearer token (each company is a separate
     Samsara org). `on_first`, if given, is an async callback awaited once with the
@@ -563,6 +584,12 @@ async def _fetch_samsara_harsh_event(vehicle_id: str, timestamp_ms: int, api_key
                 data = await r.json()
                 last_data = data
                 harsh_type = data.get("harshEventType") or ""
+                # Named, and named as something outside EVENT_TYPE_MAP — an obstructed
+                # camera, for one. An unnamed type is a different thing: Samsara has not
+                # filled the record in yet, and that still has to be waited out.
+                if harsh_type and _SAMSARA_HARSH_TYPE_MAP.get(harsh_type, "harsh_event") not in ALLOWED_TYPES:
+                    logger.info(f"[samsara] {harsh_type} is not alerted on — skipping event")
+                    return None
                 if harsh_type == "Crash" and not is_crash:
                     is_crash = True
                     max_attempts = 15  # ~5 min total at 20s intervals
@@ -647,15 +674,6 @@ def _parse_samsara(body: dict) -> tuple[str, dict]:
 
         if "harshEvent" in details:
             harsh = details["harshEvent"]
-            # Samsara reduces every camera obstruction to the one label
-            # "obstructedCamera": neither /fleet/safety-events nor the legacy
-            # harsh_event endpoint says which lens was covered, and twenty-one events
-            # over twelve days were identical in that respect. The webhook is the only
-            # place left that might name it — the condition carries the `description`
-            # and `triggerId` the alert was configured with, and nothing reads either
-            # today. So log the condition whole until we know whether the answer is in
-            # there. Harsh events run about five a day, so the volume is nothing.
-            logger.info(f"[samsara] AlertIncident condition: {json.dumps(conditions[0])}")
             vehicle_obj = harsh.get("vehicle") or {}
             vehicle_id = vehicle_obj.get("id") or ""
             event_time = data.get("happenedAtTime") or body.get("eventTime") or ""
@@ -838,6 +856,20 @@ async def _note_crash(coro, event_id) -> None:
         logger.error(f"[motive] Could not record crash confirmation {event_id}: {e}")
 
 
+async def _group_targets(event_type: str, event: dict) -> list[int]:
+    """The alerts group, if it is to get this event — as the list the senders take.
+
+    Empty when no group is configured, when it is muted, or when its event filter leaves
+    this type out (get_alert_target folds all three into one answer), and for an event
+    Samsara never finished describing, which is kept out of the group whatever its
+    filter says.
+    """
+    if event.get("_incomplete"):
+        return []
+    group_id = await get_alert_target(event_type)
+    return [group_id] if group_id else []
+
+
 async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = None,
                         crash_resume_elapsed: float | None = None):
     """Filter → format → send to Telegram (URLs sent directly, no download).
@@ -886,13 +918,12 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
                 persisted_type = rtype
                 logger.info(f"[samsara] Persisted {rtype} early (id={event.get('id')}) before media resolved")
                 if rtype == "crash":
-                    # Crash alerts never reach a driver group or the main group: subscribed
-                    # admin DMs plus the dedicated crash group, and that is all. The same
-                    # target list is rebuilt for the video follow-up below, so both halves
-                    # of a crash land in the same chats.
-                    targets = await get_subscribed_admins("crash")
-                    if config.CRASH_GROUP_ID:
-                        targets = [config.CRASH_GROUP_ID, *targets]
+                    # A crash takes the same route as every other type here — the group,
+                    # if its filter lists crashes, and the admins' DMs — only sooner. The
+                    # same target list is rebuilt for the video follow-up below, so both
+                    # halves of a crash land in the same chats.
+                    targets = [*await _group_targets("crash", first_event),
+                               *await get_subscribed_admins("crash")]
                     text = _format_crash_initial(first_event, company_display)
                     # _send_all, not a bare loop: one unreachable chat must not cost the
                     # recipients behind it the one alert that matters most.
@@ -906,41 +937,49 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
                 samsara_api_key, on_first=_on_first,
             )
             if harsh_data is None:
-                logger.info(f"[samsara] API returned no data — skipping event id={event.get('id')}")
+                logger.info(f"[samsara] Nothing to alert on — skipping event id={event.get('id')}")
                 return
-            harsh_type = harsh_data.get("harshEventType") or ""
-            resolved_type = _SAMSARA_HARSH_TYPE_MAP.get(harsh_type, "harsh_event")
-            loc = harsh_data.get("location") or {}
-            fwd_url = harsh_data.get("downloadForwardVideoUrl") or ""
-            inward_url = harsh_data.get("downloadInwardVideoUrl") or ""
-            fwd_img = harsh_data.get("downloadForwardImageUrl") or ""
-            inward_img = harsh_data.get("downloadInwardImageUrl") or ""
-            if fwd_url or inward_url:
-                camera_media = {
-                    "available": True,
-                    "downloadable_videos": {
-                        "front_facing_plain_url": fwd_url,
-                        "driver_facing_plain_url": inward_url,
-                    },
-                    "downloadable_images": {},
-                }
-            elif fwd_img or inward_img:
-                camera_media = {
-                    "available": True,
-                    "downloadable_videos": {},
-                    "downloadable_images": {
-                        "front_facing_jpg_url": fwd_img,
-                        "driver_facing_jpg_url": inward_img,
-                    },
-                }
+            if not harsh_data:
+                # An empty {} after the whole poll: Samsara announced the event and then
+                # never filled its record in, so there is no type, no place and no clip.
+                # That is not worth the group's attention, but it is worth somebody's —
+                # it goes to subscribed admins alone, marked as what it is.
+                logger.warning(f"[samsara] Empty response after polling — DM-only id={event.get('id')}")
+                event = {**event, "_incomplete": True}
             else:
-                camera_media = None
-            event = {
-                **event,
-                "type": resolved_type,
-                "location": loc.get("address") or "",
-                "camera_media": camera_media,
-            }
+                harsh_type = harsh_data.get("harshEventType") or ""
+                resolved_type = _SAMSARA_HARSH_TYPE_MAP.get(harsh_type, "harsh_event")
+                loc = harsh_data.get("location") or {}
+                fwd_url = harsh_data.get("downloadForwardVideoUrl") or ""
+                inward_url = harsh_data.get("downloadInwardVideoUrl") or ""
+                fwd_img = harsh_data.get("downloadForwardImageUrl") or ""
+                inward_img = harsh_data.get("downloadInwardImageUrl") or ""
+                if fwd_url or inward_url:
+                    camera_media = {
+                        "available": True,
+                        "downloadable_videos": {
+                            "front_facing_plain_url": fwd_url,
+                            "driver_facing_plain_url": inward_url,
+                        },
+                        "downloadable_images": {},
+                    }
+                elif fwd_img or inward_img:
+                    camera_media = {
+                        "available": True,
+                        "downloadable_videos": {},
+                        "downloadable_images": {
+                            "front_facing_jpg_url": fwd_img,
+                            "driver_facing_jpg_url": inward_img,
+                        },
+                    }
+                else:
+                    camera_media = None
+                event = {
+                    **event,
+                    "type": resolved_type,
+                    "location": loc.get("address") or "",
+                    "camera_media": camera_media,
+                }
 
         event_type = _get_event_type(event)
         event_id = event.get("id", "?")
@@ -979,7 +1018,8 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
                 logger.info(f"Ignored speeding event {event_id} severity='{sev}' (below threshold)")
                 return
 
-        logger.info(f"Processing event {event_id} type={event_type}")
+        logger.info(f"Processing unit={_get_unit_num(event)} type={event_type} id={event_id} "
+                    f"video={'yes' if event.get('camera_media') else 'no'}")
 
         # Persist the violation, unless the first-poll hook already saved it. Same
         # helpers as the hook so the row is identical either way. A row that was already
@@ -989,16 +1029,10 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
             logger.info(f"Duplicate event id={event_id} type={event_type} — not alerting again")
             return
 
-        # Route to the matching driver group (by unit) plus the main group.
-        group_ids = await get_groups_for_event(event_type, (_get_vehicle(event) or "").strip())
+        # Route to the one group (every vehicle; its event filter decides the types) plus
+        # the admins who asked for this type in their own DMs.
+        group_ids = await _group_targets(event_type, event)
         dm_ids = await get_subscribed_admins(event_type)
-        if event_type == "crash":
-            # Crash alerts never follow the normal group routing: a wreck is not news for
-            # the driver's own chat, and in the all-fleet main group it would be buried
-            # under the day's speeding alerts. They go to subscribed admin DMs plus the
-            # one group the company nominated for them, which by construction receives
-            # crashes and nothing else — no other event type routes to CRASH_GROUP_ID.
-            group_ids = [config.CRASH_GROUP_ID] if config.CRASH_GROUP_ID else []
         if not group_ids and not dm_ids:
             logger.info(f"No targets for event='{event_type}' — skipping")
             return
@@ -1036,11 +1070,14 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
                 )
                 if samsara_details:
                     logger.info(f"[samsara] Speeding enrichment id={event_id}: {samsara_details}")
-            text = _format_event(event, company_display, samsara_details)
+            notes = []
             if (not video_urls and not image_urls
                     and event.get("camera_media") is None
                     and event_type != "speeding"):
-                text += "\n\n📷 <i>No camera media available</i>"
+                notes.append("📷 <i>No camera media available</i>")
+            text = _format_event(event, company_display, samsara_details, notes=notes)
+            if event.get("_incomplete"):
+                text = "🔍 <i>Possible error — incomplete Samsara data</i>\n\n" + text
 
         # Download the media ONCE up front and reuse the bytes for every recipient,
         # rather than re-downloading (potentially large crash clips) per chat.
@@ -1110,41 +1147,26 @@ _PERMANENT_SEND_ERRORS = (
 )
 
 
-# Of the errors above, only being kicked is safe to mute a group over: putting the bot
-# back in the chat fires a my_chat_member update, which re-registers the group and clears
-# the mute (see register_group). ChatNotFound has no such signal — if it ever fires on a
-# group the bot is actually still in, muting would silence it permanently with nobody
-# watching, so that case is skipped for this alert only and retried on the next event.
-_MUTE_ON_ERRORS = (BotKicked,)
-
-
 async def _drop_unreachable(chat_id: int, exc: Exception) -> None:
-    """Stop hammering a chat the bot cannot post to, and retire it when — and only when —
-    re-adding the bot would bring it back on its own.
+    """Give up on a chat the bot cannot post to — for this alert, and only this alert.
 
-    BotKicked here says the same thing the my_chat_member update says, and is recorded the
-    same way, because the update is not guaranteed to arrive: polling starts with
-    skip_updates, so a group the bot was thrown out of while it was redeploying never
-    reports it. This is the path that catches those, on the next alert that would have
-    gone there.
+    Nothing is written down. single-company mutes a group the bot has been kicked from,
+    because there a dead driver group would otherwise be retried on every alert for a
+    truck nobody is watching, and re-adding the bot un-mutes it. Here there is one group
+    and it is the whole point of the deployment: a mute that depends on a my_chat_member
+    update to be lifted is a mute that sticks whenever that update is missed — and
+    polling starts with skip_updates, so it is missed every time the bot is put back
+    during a deploy. A send that fails while the bot is out of the chat costs one API
+    call; a group left muted costs every alert until somebody notices.
 
-    Nothing is deleted — the group's unit binding, event-type filter and history survive
-    the round trip, and putting the bot back restores all of it. A DM is only logged: an
-    admin who blocked the bot keeps their access and can unblock at any time."""
+    So the group is always tried, and the first alert after the bot is back gets
+    through on its own. An admin who blocked the bot is likewise only logged: they keep
+    their access and can unblock at any time."""
     if chat_id > 0:
         logger.warning(f"DM {chat_id} unreachable ({type(exc).__name__}) — skipping this alert")
         return
-    if not isinstance(exc, _MUTE_ON_ERRORS):
-        logger.error(f"Group {chat_id} unreachable ({type(exc).__name__}) — skipping this alert, "
-                     f"left registered because nothing would automatically un-mute it")
-        return
-    try:
-        await mark_group_left(chat_id)
-        logger.warning(f"Group {chat_id} unreachable ({type(exc).__name__}) — the bot is not "
-                       f"in it, so it is now muted and out of the panel; adding the bot back "
-                       f"restores it")
-    except Exception as db_exc:
-        logger.error(f"Could not retire unreachable group {chat_id}: {db_exc}")
+    logger.error(f"Alerts group {chat_id} unreachable ({type(exc).__name__}) — this alert "
+                 f"did not reach it. Check that the bot is still in the group.")
 
 
 async def _send_all(bot: Bot, chat_ids: list[int], text: str,
@@ -1183,8 +1205,9 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str,
 
     An item may also be a Telegram file_id string, which uploads nothing: Telegram already
     holds that file and re-sends it from its own storage. Alert clips are each seen once,
-    so they stay bytes — it is the recurring posts (see utils/pti_reminder.py) that would
-    otherwise re-upload the same megabytes to every chat, every day.
+    so they stay bytes — it is a recurring post that would otherwise re-upload the same
+    megabytes to every chat, every day. Nothing on this branch sends one; the path is
+    kept as it is on single-company so the two do not drift apart here.
 
     Returns the Messages Telegram replied with, which is how a caller learns the file_ids
     of what it just uploaded; None when the media path was not taken or did not succeed.
@@ -1379,14 +1402,32 @@ async def motive_webhook(request: web.Request) -> web.Response:
         return web.Response(text="Error", status=500)
 
 
+def add_webhook_routes(app: web.Application) -> None:
+    """Mount the provider webhooks and the health check.
+
+    One company per deployment, so the path needs no company in it — but the
+    multi-company build this replaced put one there, and HF's Samsara dashboard has been
+    delivering to /webhook/samsara/hf ever since. Those forms are still answered, with
+    the segment ignored, so that deploying this does not also mean re-pointing the
+    provider. A delivery is trusted for its signature, never for its path.
+
+    Specific paths first: aiohttp takes the first route that matches, and
+    /webhook/{company} would otherwise claim /webhook/samsara and hand a Samsara
+    delivery to the Motive handler.
+    """
+    app.router.add_post("/webhook/samsara/{company}", samsara_webhook)
+    app.router.add_post("/webhook/samsara", samsara_webhook)
+    app.router.add_post("/webhook/motive/{company}", motive_webhook)
+    app.router.add_post("/webhook/motive", motive_webhook)
+    app.router.add_post("/webhook/{company}", motive_webhook)
+    app.router.add_post("/webhook", motive_webhook)
+    app.router.add_get("/health", lambda r: web.Response(text="OK"))
+
+
 async def start_webhook_server(bot: Bot, port: int = 8080):
     app = web.Application()
     app["bot"] = bot
-    # Single-company build: fixed routes, no per-company path segment. Point this
-    # company's Motive and Samsara dashboards at these two URLs.
-    app.router.add_post("/webhook/samsara", samsara_webhook)
-    app.router.add_post("/webhook/motive", motive_webhook)
-    app.router.add_get("/health", lambda r: web.Response(text="OK"))
+    add_webhook_routes(app)
 
     # The admin Mini App rides on this same server, under /panel. Imported here rather
     # than at module scope because the panel reads EVENT_TYPE_MAP from this file, and a

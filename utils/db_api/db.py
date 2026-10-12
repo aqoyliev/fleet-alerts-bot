@@ -13,32 +13,11 @@ pool: asyncpg.Pool | None = None
 # schemas.sql by hand). Fresh databases get everything from schemas.sql first; these
 # ALTERs are the no-ops that upgrade older ones.
 _MIGRATIONS = [
-    "ALTER TABLE alert_groups ADD COLUMN IF NOT EXISTS title VARCHAR(255)",
-    "ALTER TABLE alert_groups ADD COLUMN IF NOT EXISTS vehicle_number VARCHAR(50)",
-    "ALTER TABLE alert_groups ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE",
-    # What marks the all-fleet group, so that a NULL unit can mean "registered but
-    # not yet assigned" instead. Left nullable, and backfilled from the rule it
-    # replaces: every existing NULL-unit row IS a main group, because under the old
-    # code nothing else could be one. The WHERE is what makes that safe to re-run —
-    # it can only ever match rows written before the column existed, since every
-    # INSERT since then sets the flag explicitly.
-    "ALTER TABLE alert_groups ADD COLUMN IF NOT EXISTS is_main BOOLEAN",
-    "UPDATE alert_groups SET is_main = (vehicle_number IS NULL) WHERE is_main IS NULL",
-    # Set when the bot is removed from a chat, cleared when it is added back. Hides
-    # the group from the panel without throwing away its unit and filter.
-    "ALTER TABLE alert_groups ADD COLUMN IF NOT EXISTS left_at TIMESTAMPTZ",
-    "CREATE UNIQUE INDEX IF NOT EXISTS alert_groups_tgid ON alert_groups (telegram_group_id)",
-    "CREATE INDEX IF NOT EXISTS alert_groups_vehicle ON alert_groups (vehicle_number)",
     # Crash DMs are on for every admin unless they turn them off. A column defaulting to
     # TRUE is what makes that work on both sides: existing rows get TRUE when it is added,
     # new admins get TRUE for free, and an admin who opts out stays opted out — seeding
     # subscription rows instead would silently re-enable them on the next startup.
     "ALTER TABLE admins ADD COLUMN IF NOT EXISTS crash_dm BOOLEAN NOT NULL DEFAULT TRUE",
-    # The PTI reminder claims each morning before it posts, so a restart on top of
-    # the slot neither loses the album nor sends it twice.
-    "CREATE TABLE IF NOT EXISTS pti_reminder_runs (sent_on DATE PRIMARY KEY, group_count INT NOT NULL DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW())",
-    # Uploaded once, then re-sent by file_id — see utils/db_api/pti_posters.py.
-    "CREATE TABLE IF NOT EXISTS pti_poster_cache (fingerprint TEXT PRIMARY KEY, file_ids TEXT[] NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW())",
 ]
 
 
@@ -62,6 +41,14 @@ async def run_migrations():
                 await conn.execute(stmt)
             except Exception as e:
                 logger.warning(f"migration failed ({stmt!r}): {e}")
+
+    # What a database from the old multi-company schema needs before this build can
+    # write to it. Imported here because legacy.py is built on this module's helpers.
+    from utils.db_api.legacy import adopt_legacy_violations
+    try:
+        await adopt_legacy_violations()
+    except Exception as e:
+        logger.error(f"could not adapt the legacy violations table: {e}", exc_info=True)
 
 
 async def close_pool():

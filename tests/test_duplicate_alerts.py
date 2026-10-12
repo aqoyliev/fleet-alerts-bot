@@ -25,13 +25,13 @@ def routed(monkeypatch):
     async def _send_all(bot, chat_ids, text, media=None, is_video=False):
         sent.append(list(chat_ids))
 
-    async def _groups(event_type, vehicle_number=None):
-        return [-100111]
+    async def _group(event_type=None):
+        return -100111
 
     async def _admins(event_type):
         return [777]
 
-    monkeypatch.setattr(wh, "get_groups_for_event", _groups)
+    monkeypatch.setattr(wh, "get_alert_target", _group)
     monkeypatch.setattr(wh, "get_subscribed_admins", _admins)
     monkeypatch.setattr(wh, "_send_all", _send_all)
     monkeypatch.setattr(wh, "_get_camera_media_info", lambda event: ([], []))

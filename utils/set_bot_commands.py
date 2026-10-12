@@ -1,36 +1,34 @@
 """Command menus shown in Telegram's ☰ picker.
 
-Menus are set per SCOPE rather than globally. A single global list leaks the private
--chat commands into every driver group, where a driver taps /help and gets a wall of
-admin text. Telegram resolves the most specific scope
-first, so the group list below is what a driver sees and the private list is what an
-admin sees in a DM.
+Menus are set per SCOPE rather than globally. A single global list would put the DM's
+/start into the group, where it does nothing, and leave the group without the two
+commands it actually uses. Telegram resolves the most specific scope first, so the group
+list below is what the alerts group is offered and the private list is what an admin
+sees in a DM.
 
-Hiding a command does NOT disable it. /events, /event_list and /removegroup all still
-work when typed in a group — they are admin tools, kept out of the picker so drivers
-are not offered them.
-
-/start is absent from the group list on purpose: it opens the private main menu, which
-is a DM concept and does nothing useful typed into a group.
+Hiding a command does NOT disable it. /disable and /enable work when a bot admin types
+them in the group — they are kept out of the picker so that everyone else in the chat is
+not offered a switch they cannot use.
 """
 from aiogram import types
 
-# DMs: the personal and admin surface. /report and /top are group-only handlers, so
-# they are deliberately absent here.
+_REPORT_COMMANDS = [
+    types.BotCommand("report", "Violations report: today / yesterday"),
+    types.BotCommand("top", "Top N violators today (default 10)"),
+]
+
+# DMs: the personal and admin surface.
 _PRIVATE_COMMANDS = [
     types.BotCommand("start", "Open main menu"),
     types.BotCommand("help", "How to use this bot"),
+    *_REPORT_COMMANDS,
 ]
 
-# Driver groups. These exist to RECEIVE that unit's alerts, not to be queried, so the
-# menu is setup plus the on/off switch and the explainer. /report, /top, /event_list,
-# /events and /removegroup still work when typed — they are kept out of the picker so
-# drivers are not offered them.
+# The alerts group. /start is absent on purpose: it opens the private main menu, which
+# is a DM concept and does nothing useful typed into a group.
 _GROUP_COMMANDS = [
-    types.BotCommand("help", "What this bot posts here, and how to set it up"),
-    types.BotCommand("setunit", "Set this group's unit number (e.g. /setunit 1234)"),
-    types.BotCommand("disable", "Mute this group's alerts"),
-    types.BotCommand("enable", "Turn this group's alerts back on"),
+    types.BotCommand("help", "What this bot posts here"),
+    *_REPORT_COMMANDS,
 ]
 
 

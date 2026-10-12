@@ -7,37 +7,85 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot
 
 from data import config
-from utils.db_api.groups import get_all_groups
+from utils.db_api.groups import get_alert_target
 from utils.db_api.violations import get_violations_by_type
 from utils.tg_text import esc
-from utils.webhook_handler import EVENT_TYPE_MAP
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
+# The report's own wording for each type. Not EVENT_TYPE_MAP's titles: those are
+# headlines for a single alert ("SPEEDING OVER POSTED", "CRASH DETECTED") and read wrong
+# as the heading over a list of units. Covers the types this build alerts on and the
+# ones an older row in the table may still carry.
+_EVENT_EMOJI = {
+    "hard_brake":                    "🛑",
+    "crash":                         "💥",
+    "cell_phone":                    "📵",
+    "stop_sign_violation":           "🛑",
+    "road_facing_cam_obstruction":   "📷",
+    "driver_facing_cam_obstruction": "📷",
+    "forward_collision_warning":     "⚠️",
+    "unsafe_parking":                "🅿️",
+    "speeding":                      "🚨",
+    "harsh_event":                   "⚠️",
+    "inattentive_driving":           "😵",
+    "drowsy_driving":                "😴",
+    "harsh_acceleration":            "🚀",
+    "harsh_turn":                    "↩️",
+    "hard_cornering":                "↩️",
+    "no_seat_belt":                  "🚫",
+}
+
+_EVENT_LABEL = {
+    "hard_brake":                    "Harsh Brake",
+    "crash":                         "Crash",
+    "cell_phone":                    "Cell Phone Usage",
+    "stop_sign_violation":           "Rolling Stop",
+    "road_facing_cam_obstruction":   "Road Camera Obstructed",
+    "driver_facing_cam_obstruction": "Driver Camera Obstructed",
+    "forward_collision_warning":     "Forward Collision Warning",
+    "unsafe_parking":                "Unsafe Parking",
+    "speeding":                      "Speeding",
+    "harsh_event":                   "Harsh Event",
+    "inattentive_driving":           "Inattentive Driving",
+    "drowsy_driving":                "Drowsy Driving",
+    "harsh_acceleration":            "Harsh Acceleration",
+    "harsh_turn":                    "Harsh Turn",
+    "hard_cornering":                "Harsh Turn",
+    "no_seat_belt":                  "No Seat Belt",
+}
+
 
 def _format_daily_report(company_name: str, rows: list[dict], date_str: str) -> str:
-    header = f"📊 <b>Daily Violations Report</b>\n<b>{esc(company_name)}</b> — {date_str}\n"
+    header = f"📊 <b>Daily Violations Report</b>\n<b>{esc(company_name)}</b> — {date_str}"
     if not rows:
-        return header + "\n✅ No violations today."
+        return header + "\n\n✅ No violations."
 
-    # Group by event_type
+    # Group rows by event_type
     by_type: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         by_type[row["event_type"]].append(row)
 
-    # Speeding first, then other types sorted by total count desc
-    def _type_sort_key(et):
-        if et == "speeding":
-            return (0, 0)
-        return (1, -sum(v["total"] for v in by_type[et]))
+    # Total violations per type for section ordering
+    type_totals = {et: sum(r["total"] for r in vs) for et, vs in by_type.items()}
+
+    # Speeding first, then rest sorted by total desc
+    ordered = []
+    if "speeding" in by_type:
+        ordered.append("speeding")
+    for et, _ in sorted(type_totals.items(), key=lambda x: -x[1]):
+        if et != "speeding":
+            ordered.append(et)
 
     lines = [header]
-    for event_type in sorted(by_type, key=_type_sort_key):
-        emoji, title = EVENT_TYPE_MAP.get(event_type, ("⚠️", event_type.replace("_", " ").title()))
-        lines.append(f"\n{emoji} <b>{title}</b>")
-        for v in by_type[event_type]:
-            lines.append(f"  🚛 {esc(v['vehicle_number'])} — {v['total']}")
+    for et in ordered:
+        vehicles = sorted(by_type[et], key=lambda r: -r["total"])
+        emoji = _EVENT_EMOJI.get(et, "⚠️")
+        label = _EVENT_LABEL.get(et, et.replace("_", " ").title())
+        lines.append(f"\n{emoji} <b>{label}</b>")
+        for v in vehicles:
+            lines.append(f"  🚛 Unit {esc(v['vehicle_number'])} — {v['total']}")
 
     return "\n".join(lines)
 
@@ -49,11 +97,15 @@ async def send_daily_reports(bot: Bot):
     date_str = yesterday_start.strftime("%b %d, %Y")
 
     try:
+        # Asked without an event type: the report is not an alert, so the group's event
+        # filter has no say in it. A muted group still gets nothing, report included.
+        chat_id = await get_alert_target()
+        if not chat_id:
+            logger.info("Daily report not sent: the alerts group is muted or not configured")
+            return
         rows = await get_violations_by_type(since=yesterday_start, until=today_start)
         text = _format_daily_report(config.COMPANY_NAME, rows, date_str)
-        group_ids = await get_all_groups()
-        for chat_id in group_ids:
-            await bot.send_message(chat_id, text, parse_mode="HTML")
+        await bot.send_message(chat_id, text, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Daily report error: {e}", exc_info=True)
 

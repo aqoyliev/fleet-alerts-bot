@@ -42,69 +42,34 @@ HIDDEN_ADMIN_IDS = _id_set(ADMINS)
 # ── PostgreSQL ──────────────────────────────────────────────────────────────────
 DATABASE_URL = env.str("DATABASE_URL")
 
-# ── Single company this deployment serves ───────────────────────────────────────
-# This build is a per-company template: one deployment == one company. Everything
-# that used to live in the `companies` table is now supplied here via the .env file,
-# so the same branch can be cloned and configured for any company (hf, mz-cargo, …)
-# without code or shared-DB changes. See .env.example.
-COMPANY_SLUG = env.str("COMPANY_SLUG")            # short id, e.g. "hf" — used in report filenames
-COMPANY_NAME = env.str("COMPANY_NAME")            # display name, e.g. "HF Trucking"
+# ── The company this deployment serves ──────────────────────────────────────────
+# One deployment == one company, and this branch is HAULAGE FREIGHT's. Everything that
+# used to live in the `companies` table is supplied here instead. Both values default to
+# HF's own so that the deployment that already exists keeps booting with the variables it
+# already has — set them only to run this branch for somebody else.
+COMPANY_SLUG = env.str("COMPANY_SLUG", "hf")              # short id, used in report filenames
+COMPANY_NAME = env.str("COMPANY_NAME", "HAULAGE FREIGHT LLC")   # display name
 
-# The company's single "main" Telegram group — the dispatcher/office chat that
-# receives EVERY unit's alerts. Each driver's own group (auto-registered when the
-# bot is added, keyed by the unit number parsed from its title/description) receives
-# only that unit's alerts, on top of this one. Telegram group ids are negative.
-# Leave blank/unset if there is no all-fleet main group. Read as a string first so an
-# empty value (MAIN_GROUP_ID=) is treated as "unset" rather than crashing startup.
-_main_group_raw = env.str("MAIN_GROUP_ID", "").strip()
-MAIN_GROUP_ID = int(_main_group_raw) if _main_group_raw else None
-
-# The one group that receives CRASH alerts, and only crash alerts.
+# The one Telegram group this deployment posts to. There is no per-unit routing on this
+# branch — that is single-company, which this was taken from — so every vehicle's alerts
+# go to this one chat. Telegram group ids are negative.
 #
-# Crashes deliberately do not follow the normal group routing: a wreck is not news for
-# the driver's own chat, and pushing it to the all-fleet main group buries it under the
-# day's speeding alerts. So crashes go to subscribed admin DMs plus this group, and no
-# other event type is ever routed here — "crash only" is a property of the routing, not
-# of a filter someone has to remember to set.
-#
-# This group is intentionally NOT registered in `alert_groups`: a row there with a NULL
-# unit *is* the all-fleet main group in this schema, and it would pull the crash group
-# into the daily digest (see get_all_groups). Membership is decided here and nowhere
-# else. Leave blank to keep crashes DM-only, which is the behaviour before this setting.
-_crash_group_raw = env.str("CRASH_GROUP_ID", "").strip()
-CRASH_GROUP_ID = int(_crash_group_raw) if _crash_group_raw else None
+# This value only SEEDS the group, and only when the database has nothing better: a
+# deployment upgraded from the old multi-company schema carries its group over from
+# `company_groups` (see ensure_group in utils/db_api/groups.py), and from the first boot
+# on the `alert_group` row is authoritative. That is what lets the bot follow the chat
+# when Telegram upgrades it to a supergroup and its id changes. Blank, or 0 as the old
+# config defaulted it, means "not set".
+_group_raw = env.str("GROUP_CHAT_ID", "").strip()
+try:
+    GROUP_CHAT_ID = int(_group_raw) or None
+except ValueError:
+    GROUP_CHAT_ID = None
 
 # Minimum severity a speeding event must reach to be alerted ("low"/"medium"/"high"/"critical").
-SPEEDING_MIN_SEVERITY = env.str("SPEEDING_MIN_SEVERITY", "high")
+# "medium" is HF's rule and has been since before this was a setting.
+SPEEDING_MIN_SEVERITY = env.str("SPEEDING_MIN_SEVERITY", "medium")
 
-
-def _parse_hhmm(raw: str) -> tuple[int, int] | None:
-    """Read a "HH:MM" setting into (hour, minute), or None for blank/unusable.
-
-    Blank means "feature off" rather than "use a default", which is what keeps a
-    per-company extra switched off on the deployments that did not ask for it — every
-    company runs this same branch. Garbage is treated the same way and logged nowhere
-    near startup-fatal: a typo'd reminder time must not take a fleet's alerting down.
-    """
-    raw = (raw or "").strip()
-    if not raw:
-        return None
-    try:
-        hour_s, _, minute_s = raw.partition(":")
-        hour, minute = int(hour_s), int(minute_s or 0)
-    except ValueError:
-        return None
-    if 0 <= hour <= 23 and 0 <= minute <= 59:
-        return hour, minute
-    return None
-
-
-# ── Daily PTI reminder (optional — blank disables it) ───────────────────────────
-# The pre-trip inspection posters in assets/pti/, posted to every driver group as one
-# album at this time each morning, Eastern — the clock the fleet already runs on, and
-# the one the daily report uses. "07:00" is the setting Elegant Express asked for;
-# leaving it blank is what every other deployment on this branch does.
-PTI_REMINDER_AT = _parse_hhmm(env.str("PTI_REMINDER_TIME", ""))
 
 # ── Admin Mini App ──────────────────────────────────────────────────────────────
 
@@ -150,18 +115,11 @@ SAMSARA_WEBHOOK_SECRET = env.str("SAMSARA_WEBHOOK_SECRET", "")
 # ── Motive / KeepTruckin ────────────────────────────────────────────────────────
 # Motive signs each webhook with HMAC-SHA1 over the raw body in X-KT-Webhook-Signature.
 MOTIVE_WEBHOOK_SECRET = env.str("MOTIVE_WEBHOOK_SECRET", "")
-# Read-only API token for this company's Motive org. Three jobs:
+# Read-only API token for a Motive org. Two jobs:
 #   * confirming a crash detection before alerting -- Motive withdraws the detections its
-#     review rejects, so absence there is what tells a false crash from a real one;
-#   * fetching the dashcam clip, which is not ready when the webhook fires; and
-#   * reading the vehicle roster (/v1/vehicles), which is how a unit number typed into
-#     /setunit or picked in the admin panel gets verified. Without this key the only
-#     roster is Samsara's, so a truck that exists only in Motive cannot be paired with
-#     its group on either surface -- while Motive keeps sending that truck's alerts,
-#     which then match no group at all.
-# Leave blank and alerts still go out: crashes flagged unconfirmed (see
-# _motive_crash_is_real), every Motive alert without its video, and Motive-only trucks
-# unpairable.
+#     review rejects, so absence there is what tells a false crash from a real one; and
+#   * fetching the dashcam clip, which is not ready when the webhook fires.
+# HF is a Samsara fleet and leaves this blank, along with the secret above.
 MOTIVE_API_KEY = env.str("MOTIVE_API_KEY", "")
 
 # ── Webhook endpoint hardening ──────────────────────────────────────────────────

@@ -25,8 +25,6 @@ const state = {
   tab: 'dashboard',
   detail: null,        // {type, ...} when a detail view is pushed over a tab
   period: 'today',
-  groupsQuery: '',
-  groupsFilter: 'active',  // which of the three Groups sections is showing
   alertFilter: { type: '', unit: '' },
   alertItems: [],
   alertNext: null,
@@ -76,8 +74,8 @@ function el(html) {
 }
 
 /** Escape anything that came from the database before it reaches innerHTML.
- *  Group titles and admin names are typed by people; a truck named `<img onerror>` would
- *  otherwise execute inside the panel of whoever opened the Groups tab. */
+ *  Unit names and admin names are typed by people; a truck named `<img onerror>` would
+ *  otherwise execute inside the panel of whoever opened the Alerts tab. */
 function esc(value) {
   return String(value == null ? '' : value).replace(/[&<>"']/g, (c) => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
@@ -264,7 +262,7 @@ function dayLabel(iso) {
 // ── screen chrome ───────────────────────────────────────────────────────────────
 
 const TITLES = {
-  dashboard: 'Dashboard', groups: 'Groups', alerts: 'Alerts', admins: 'Admins',
+  dashboard: 'Dashboard', group: 'Group', alerts: 'Alerts', admins: 'Admins',
 };
 
 function showBlocker(kind) {
@@ -341,8 +339,7 @@ const SKELETONS = {
         <div class="sk sk-line"></div><div class="sk sk-line"></div>
         <div class="sk sk-line"></div></div>
     </div>`,
-  groups: () => `<div><div class="sk" style="height:44px;border-radius:10px;
-      margin-bottom:12px"></div>${skRows(5)}</div>`,
+  group: () => SKELETONS.detail(),
   alerts: () => `<div><div class="sk" style="height:34px;border-radius:17px;width:70%;
       margin-bottom:14px"></div>${skRows(6)}</div>`,
   admins: () => `<div>${skRows(3)}</div>`,
@@ -428,9 +425,9 @@ function selectTab(tab) {
   renderCurrent({ restore: state.scroll[tab] || 0 });
 }
 
-const DETAIL_VIEWS = { group: groupDetail, admin: adminDetail, addadmin: addAdminScreen };
+const DETAIL_VIEWS = { admin: adminDetail, addadmin: addAdminScreen };
 const TAB_VIEWS = {
-  dashboard: dashboardScreen, groups: groupsScreen,
+  dashboard: dashboardScreen, group: groupScreen,
   alerts: alertsScreen, admins: adminsScreen,
 };
 
@@ -453,14 +450,14 @@ function renderCurrent(opts) {
 
 /** Whether the current screen can paint without waiting for the network. */
 function hasCachedScreen() {
-  if (state.detail) return cache.has('/groups') || cache.has('/admins');
+  if (state.detail) return cache.has('/admins');
   if (state.tab === 'alerts') return state.alertLoaded;
   return screenPaths().every((p) => cache.has(p));
 }
 
 function screenPaths() {
   if (state.tab === 'dashboard') return [statsPath()];
-  if (state.tab === 'groups') return ['/groups', '/units'];
+  if (state.tab === 'group') return ['/group'];
   if (state.tab === 'admins') return ['/admins'];
   return [];
 }
@@ -543,23 +540,20 @@ async function dashboardScreen(opts) {
   });
   wrap.appendChild(seg);
 
-  // The muted warning comes before the numbers on purpose: a silent group is a problem
-  // the numbers themselves cannot show, because its alerts are missing from them.
-  if (data.groups.muted > 0) {
-    const n = data.groups.muted;
+  // The warning comes before the numbers on purpose: a silent group is a problem the
+  // numbers themselves cannot show. Every alert below was recorded and counted, and
+  // none of them was posted where the fleet reads them.
+  const silent = !data.group.configured
+    ? ['No alerts group is set up', 'Alerts are reaching admin DMs only.']
+    : data.group.muted
+      ? ['The alerts group is muted', 'Nothing is being posted there. Tap to turn it back on.']
+      : null;
+  if (silent) {
     const card = el(`<button class="warn-card">
         <span style="font-size:22px">🔕</span>
-        <div><b>${n} group${n > 1 ? 's are' : ' is'} muted</b>
-          <small>${esc(data.groups.muted_titles.join(', '))}</small></div>
+        <div><b>${silent[0]}</b><small>${silent[1]}</small></div>
       </button>`);
-    card.onclick = () => {
-      haptic();
-      state.groupsQuery = '';
-      // A muted group has a unit, so it is in Active with its switch off and the muted
-      // count over the list — which is what this card is a shortcut to.
-      state.groupsFilter = 'active';
-      selectTab('groups');
-    };
+    card.onclick = () => { haptic(); selectTab('group'); };
     wrap.appendChild(card);
   }
 
@@ -574,7 +568,7 @@ async function dashboardScreen(opts) {
 
   const tiles = el('<div class="tiles"></div>');
   [
-    [data.totals.units, 'Units', false, () => selectTab('groups')],
+    [data.totals.units, 'Units', false, () => openAlerts({})],
     [data.totals.speeding, 'Speeding', false, () => openAlerts({ type: 'speeding' })],
     // A crash count is only worth colouring when there is one to colour.
     [data.totals.crashes, 'Crashes', data.totals.crashes > 0,
@@ -673,315 +667,55 @@ function trendCard(byDay) {
   return card;
 }
 
-// ── screen 2: groups ────────────────────────────────────────────────────────────
+// ── screen 2: the alerts group ──────────────────────────────────────────────────
 
-/* The three questions this screen answers.
+/* One chat, so one screen and no list.
  *
- * There are two entirely different ways a truck can be uncovered, and the screen used to
- * show them as the same kind of thing at two ends of one scroll: a group carrying a "no
- * unit" badge somewhere in the list, and a card of leftover roster units underneath it.
- * Neither was countable at a glance, which is the only form the question "is my fleet
- * covered" is ever actually asked in.
- *
- * The sections are a partition, not a set of views — every registered group is in
- * exactly one of the first two, and the third holds what has no group at all. An "All"
- * tab on top of a partition is the same rows a second time, so there isn't one, and
- * nothing may fall between the sections: a group that belongs to none of them is a
- * group nobody can reach. */
-const GROUP_FILTERS = [
-  ['active', 'Active'],
-  ['unpaired', 'Unpaired'],
-  ['unconnected', 'No group'],
-];
-
-/** Registered because the bot was added to the chat, but nobody has said which truck it
- *  belongs to — so it receives nothing until someone picks its unit. */
-function isUnpaired(g) { return !g.is_main && !g.vehicle_number; }
-
-/** Set up: pointed at a truck, or the all-fleet group.
- *
- *  Mute is not the dividing line. It is a switch on the row, flipped and unflipped from
- *  the list itself, and excluding a muted group here would leave it in no section at
- *  all now that "All" is gone — invisible in the one screen that can unmute it. The
- *  count of muted ones is called out above the list instead. */
-function isActive(g) { return !isUnpaired(g); }
-
-async function groupsScreen(opts) {
-  const [groups, roster] = await screenData(['/groups', '/units'], opts);
+ * On single-company this tab is a roster of driver groups, each paired with a truck, and
+ * most of it exists to answer "which trucks have nobody watching them". None of that
+ * applies here: every vehicle's alerts go to the same group, and nothing is registered
+ * by adding the bot to a chat. What is left is what an admin can actually decide about
+ * that one group — whether it is muted, and which event types it is sent. */
+async function groupScreen(opts) {
+  const [g] = await screenData(['/group'], opts);
   const wrap = el('<div></div>');
 
-  const strayUnits = roster.available ? roster.units.filter((u) => !u.linked) : [];
-  const counts = {
-    active: groups.filter(isActive).length,
-    unpaired: groups.filter(isUnpaired).length,
-    unconnected: strayUnits.length,
-  };
-
-  const seg = el('<div class="segmented segmented-stack" role="tablist"></div>');
-  GROUP_FILTERS.forEach(([key, label]) => {
-    const on = key === state.groupsFilter;
-    const b = el(`<button${on ? ' class="is-active"' : ''} role="tab"
-        aria-selected="${on}">
-        <span class="seg-count${counts[key] ? '' : ' is-zero'}">${num(counts[key])}</span>
-        <span class="seg-label">${label}</span></button>`);
-    b.onclick = () => {
-      if (state.groupsFilter === key) return;
-      hapticSelect();
-      state.groupsFilter = key;
-      // Repainting the buttons rather than the screen keeps the search text and the
-      // scroll position, which a re-render would both throw away.
-      [...seg.children].forEach((child, i) => {
-        const active = GROUP_FILTERS[i][0] === key;
-        child.classList.toggle('is-active', active);
-        child.setAttribute('aria-selected', String(active));
-      });
-      renderList(search.value);
-    };
-    seg.appendChild(b);
-  });
-  wrap.appendChild(seg);
-
-  const searchWrap = el(`<div class="search-wrap">
-      <span class="search-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-        stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/>
-        <path d="m20 20-3.5-3.5"/></svg></span>
-      <input class="input" placeholder="Search groups or units" inputmode="search"
-             value="${esc(state.groupsQuery)}">
-      <button class="search-clear" aria-label="Clear search" hidden>✕</button>
-    </div>`);
-  const search = searchWrap.querySelector('input');
-  const clear = searchWrap.querySelector('.search-clear');
-  wrap.appendChild(searchWrap);
-
-  const head = el('<div class="list-head"></div>');
-  wrap.appendChild(head);
-
-  const listWrap = el('<div></div>');
-  wrap.appendChild(listWrap);
-
-  function rowsOf(list) {
-    const rows = el('<div class="rows"></div>');
-    list.forEach((g) => rows.appendChild(groupRow(g)));
-    return rows;
+  if (!g.configured) {
+    wrap.appendChild(el(`<div class="empty"><span class="empty-emoji">👥</span>
+      No alerts group is set up for this deployment.<br>Alerts are reaching admins'
+      direct messages only.</div>`));
+    wrap.appendChild(el(`<div class="note">The group is chosen once, by whoever runs
+      this bot — it isn't something that can be picked from here. Use ✉️ Contact
+      Support in the bot's chat to ask for it.</div>`));
+    render(wrap, opts);
+    return;
   }
-
-  /** The empty state says what is empty. "No groups match" is wrong for a section that is
-   *  empty because everything is fine, and "nothing here" is no use in either case. */
-  function emptyFor(tab, query) {
-    if (query) {
-      return el(`<div class="empty"><span class="empty-emoji">🔍</span>
-        No groups match "${esc(query)}".</div>`);
-    }
-    if (tab === 'unpaired') {
-      return el(`<div class="empty"><span class="empty-emoji">✅</span>
-        Every group has a unit.</div>`);
-    }
-    return el(`<div class="empty"><span class="empty-emoji">👥</span>
-      No group is set up for a truck yet.<br>Add the bot to a truck's group chat, then
-      give it a unit here.</div>`);
-  }
-
-  /** Roster units with no Telegram group at all — the coverage gap no per-group list can
-   *  show, because a missing group has nowhere in one to appear. */
-  function renderUnconnected(query) {
-    if (!roster.available) {
-      head.innerHTML = '';
-      listWrap.appendChild(el(`<div class="empty"><span class="empty-emoji">⚠️</span>
-        ${esc(roster.reason || 'The unit roster is unavailable.')}</div>`));
-      return;
-    }
-    const q = query.trim().toLowerCase();
-    const units = strayUnits.filter((u) => !q || u.name.toLowerCase().includes(q));
-    head.innerHTML = `<span>${num(units.length)} unit${units.length === 1 ? '' : 's'}</span>`;
-    if (!units.length) {
-      listWrap.appendChild(el(`<div class="empty"><span class="empty-emoji">✅</span>
-        ${query ? `No units match "${esc(query)}".` : 'Every unit has a group.'}</div>`));
-      return;
-    }
-    const card = el('<div class="card"></div>');
-    const chips = el('<div class="chips"></div>');
-    units.forEach((u) => {
-      chips.appendChild(el(`<span class="chip is-static">${esc(u.name)}</span>`));
-    });
-    card.appendChild(chips);
-    // Adding the bot is the one step that cannot happen here — Telegram has no way for a
-    // bot to put itself in a chat. Everything after it does.
-    card.appendChild(el(`<div class="note">These units have no Telegram group receiving
-      their alerts. Add the bot to that unit's group chat — it appears here straight
-      away, and you can set its unit from its page.</div>`));
-    listWrap.appendChild(card);
-  }
-
-  function renderList(query) {
-    listWrap.innerHTML = '';
-    clear.hidden = !query;
-    const tab = state.groupsFilter;
-
-    if (tab === 'unconnected') {
-      renderUnconnected(query);
-      return;
-    }
-
-    const q = query.trim().toLowerCase();
-    const matches = (g) => !q
-      || (g.title || '').toLowerCase().includes(q)
-      || (g.vehicle_number || '').toLowerCase().includes(q);
-
-    const inTab = groups.filter((g) => (tab === 'active' ? isActive(g) : isUnpaired(g)));
-    const filtered = inTab.filter(matches);
-    const muted = inTab.filter((g) => !g.enabled).length;
-
-    // The noun agrees with the last number in the phrase — "1 of 6 groups", not
-    // "1 of 6 group".
-    const shown = q ? `${num(filtered.length)} of ${num(inTab.length)}` : num(filtered.length);
-    const counted = q ? inTab.length : filtered.length;
-    head.innerHTML = `<span>${shown} group${counted === 1 ? '' : 's'}</span>`
-      + (muted ? `<span style="color:var(--destructive)">${num(muted)} muted</span>` : '');
-
-    if (!filtered.length) {
-      listWrap.appendChild(emptyFor(tab, query));
-    } else {
-      listWrap.appendChild(rowsOf(filtered));
-    }
-
-    // On the section that lists what receives alerts, because that is where someone
-    // counts the chats and wonders which one gets a crash.
-    if (tab === 'active' && state.boot.crash_group_id) {
-      listWrap.appendChild(el(`<div class="note">💥 Crash alerts go to a dedicated chat
-        configured in the deployment settings, not listed here.</div>`));
-    }
-  }
-
-  /** One row: the name on its own line so a long one is readable, the badges under it,
-   *  and the mute switch on the row itself — muting used to cost two taps and a screen
-   *  change, which is a lot for the control people reach for most. */
-  function groupRow(g) {
-    const badge = g.is_main
-      ? '<span class="badge badge-main">ALL UNITS</span>'
-      : `<span class="badge badge-unit">${esc(g.vehicle_number || 'no unit')}</span>`;
-    const filter = g.filter_mode === 'all' ? 'All events'
-      : `${g.event_types.length} event type${g.event_types.length === 1 ? '' : 's'}`;
-
-    const row = el(`<div class="row"></div>`);
-    const main = el(`<button class="row-main">
-        <div class="row-title">${esc(g.title || 'Untitled group')}</div>
-        <div class="row-meta">${badge}
-          <span class="row-sub">${filter} · ${num(g.alerts_7d)} this week</span></div>
-      </button>`);
-    main.onclick = () => {
-      haptic();
-      pushDetail({ type: 'group', id: g.telegram_group_id, title: g.title || 'Group' });
-    };
-    row.appendChild(main);
-
-    const sw = el(`<button class="switch${g.enabled ? ' is-on' : ''}" role="switch"
-        aria-checked="${!!g.enabled}" aria-label="Alerts for this group"></button>`);
-    // Redrawing the list keeps the "N muted" count above it honest. The search field is
-    // outside listWrap, so whatever was typed — and the focus — survives.
-    sw.onclick = () => toggleGroupEnabled(g, sw, () => renderList(search.value));
-    row.appendChild(sw);
-    return row;
-  }
-
-  search.oninput = () => { state.groupsQuery = search.value; renderList(search.value); };
-  clear.onclick = () => {
-    haptic();
-    state.groupsQuery = '';
-    search.value = '';
-    renderList('');
-    search.focus();
-  };
-  renderList(state.groupsQuery);
-
-  render(wrap, opts);
-}
-
-/** Flip a group's alerts, updating the row rather than the screen.
- *
- *  The cached group object is the same object the list was built from, so writing the
- *  new value into it keeps the cache and the DOM in step without a refetch. Only the
- *  dashboard is dropped, because its muted count just changed. */
-async function toggleGroupEnabled(g, sw, after) {
-  const next = !g.enabled;
-  sw.classList.toggle('is-on', next);
-  sw.setAttribute('aria-checked', String(next));
-  sw.disabled = true;
-  haptic();
-  try {
-    await post(`/groups/${g.telegram_group_id}/enabled`, { enabled: next });
-    g.enabled = next;
-    invalidate('/stats');
-    hapticResult(true);
-    toast(next ? 'Alerts on' : 'Alerts muted');
-    if (after) after();
-  } catch (e) {
-    sw.classList.toggle('is-on', !next);
-    sw.setAttribute('aria-checked', String(!next));
-    hapticResult(false);
-    alertMessage(e.message);
-  } finally {
-    sw.disabled = false;
-  }
-}
-
-async function groupDetail(opts) {
-  const id = state.detail.id;
-  const [groups, roster] = await screenData(['/groups', '/units'], opts);
-  const g = groups.find((x) => x.telegram_group_id === id);
-  if (!g) { popDetail(); return; }
-
-  const wrap = el('<div></div>');
 
   // — alerts on/off —
   const card = el('<div class="card"></div>');
   const field = el(`<div class="field"><span class="field-label">Alerts</span></div>`);
-  const status = el(`<span class="field-value ${g.enabled ? 'is-on' : 'is-off'}"
-      style="margin-right:10px">${g.enabled ? 'On' : 'Muted'}</span>`);
+  const status = el(`<span class="field-value" style="margin-right:10px"></span>`);
   const sw = el(`<button class="switch${g.enabled ? ' is-on' : ''}" role="switch"
-      aria-checked="${!!g.enabled}" aria-label="Alerts"></button>`);
-  sw.onclick = async () => {
-    await toggleGroupEnabled(g, sw);
+      aria-checked="${!!g.enabled}" aria-label="Alerts to the group"></button>`);
+  const paused = el(`<div class="note note-warn">Nothing is being posted to the group.
+      Alerts are still recorded, and still sent to admins who turned on their own
+      notifications.</div>`);
+  const drawStatus = () => {
     status.textContent = g.enabled ? 'On' : 'Muted';
     status.className = `field-value ${g.enabled ? 'is-on' : 'is-off'}`;
+    paused.hidden = !!g.enabled;
   };
+  sw.onclick = () => toggleGroupEnabled(g, sw, drawStatus);
+  drawStatus();
   field.appendChild(status);
   field.appendChild(sw);
   card.appendChild(field);
   card.appendChild(el(`<div class="field"><span class="field-label">Alerts this week</span>
       <span class="field-value">${num(g.alerts_7d)}</span></div>`));
   card.appendChild(el(`<div class="field"><span class="field-label">Chat ID</span>
-      <span class="field-value">${esc(String(id))}</span></div>`));
+      <span class="field-value">${esc(String(g.telegram_group_id))}</span></div>`));
+  card.appendChild(paused);
   wrap.appendChild(card);
-
-  // — unit —
-  if (!g.is_main) {
-    const unitCard = el('<div class="card"><div class="card-title">Unit</div></div>');
-    if (roster.available) {
-      // A picker, not a text box: the roster's spelling is the only one alert routing
-      // matches, so handing over the exact strings removes the whole class of typo.
-      const select = el('<select class="input" aria-label="Unit"></select>');
-      select.appendChild(el(`<option value="">— choose a unit —</option>`));
-      roster.units.forEach((u) => {
-        const taken = u.linked && u.name !== g.vehicle_number ? ' (already linked)' : '';
-        const sel = u.name === g.vehicle_number ? ' selected' : '';
-        select.appendChild(el(
-          `<option value="${esc(u.name)}"${sel}>${esc(u.name)}${taken}</option>`));
-      });
-      select.onchange = () => saveUnit(id, select.value);
-      const selectWrap = el('<div class="select-wrap"></div>');
-      selectWrap.appendChild(select);
-      unitCard.appendChild(selectWrap);
-    } else {
-      const input = el(`<input class="input" value="${esc(g.vehicle_number || '')}"
-                         placeholder="e.g. 1234" aria-label="Unit">`);
-      unitCard.appendChild(input);
-      const save = el('<button class="btn btn-block" style="margin-top:10px">Save unit</button>');
-      save.onclick = () => saveUnit(id, input.value);
-      unitCard.appendChild(save);
-      unitCard.appendChild(el(`<div class="note note-warn">${esc(roster.reason)}</div>`));
-    }
-    wrap.appendChild(unitCard);
-  }
 
   // — event filter —
   const evCard = el('<div class="card"><div class="card-title">Event types</div></div>');
@@ -1014,66 +748,48 @@ async function groupDetail(opts) {
     });
 
     note.textContent = all
-      ? 'Receiving every event type, including any added later.'
-      : 'Only the highlighted types are delivered to this group.';
+      ? 'The group receives every event type, including any added later.'
+      : 'Only the highlighted types are posted to the group. The rest are still '
+        + 'recorded, and still count in the reports.';
   }
   drawChips();
   wrap.appendChild(evCard);
 
-  // — danger zone —
-  if (state.boot.me.is_super && !g.is_main) {
-    const zone = el('<div class="danger-zone"></div>');
-    const btn = el('<button class="btn btn-danger btn-block">Remove group</button>');
-    btn.onclick = async () => {
-      const ok = await confirmAction(
-        `Remove "${g.title || 'this group'}"? It will stop receiving alerts until the bot is re-added.`);
-      if (!ok) return;
-      try {
-        await post(`/groups/${id}/remove`, { confirm: true });
-        invalidate('/groups');
-        invalidate('/units');
-        invalidate('/stats');
-        hapticResult(true);
-        toast('Group removed');
-        popDetail();
-      } catch (e) { hapticResult(false); alertMessage(e.message); }
-    };
-    zone.appendChild(btn);
-    wrap.appendChild(zone);
-  }
-
   render(wrap, opts);
 }
 
-async function saveUnit(id, unit) {
-  if (!unit) return;
-  busy(true);
+/** Flip the group's alerts, updating the switch rather than the screen.
+ *
+ *  The cached object is the one the screen was built from, so writing the new value into
+ *  it keeps the cache and the DOM in step without a refetch. Only the dashboard is
+ *  dropped, because its muted warning just changed. */
+async function toggleGroupEnabled(g, sw, after) {
+  const next = !g.enabled;
+  sw.classList.toggle('is-on', next);
+  sw.setAttribute('aria-checked', String(next));
+  sw.disabled = true;
+  haptic();
   try {
-    const res = await post(`/groups/${id}/unit`, { unit });
-    invalidate('/groups');
-    invalidate('/units');
+    await post('/group/enabled', { enabled: next });
+    g.enabled = next;
+    invalidate('/stats');
     hapticResult(true);
-    if (res.note) alertMessage(res.note);
-    else toast('Unit saved');
-    renderCurrent({ keep: true });
+    toast(next ? 'Alerts on' : 'Alerts muted');
+    if (after) after();
   } catch (e) {
+    sw.classList.toggle('is-on', !next);
+    sw.setAttribute('aria-checked', String(!next));
     hapticResult(false);
-    // The server sends "did you mean" candidates with a 409; showing them is the whole
-    // point of the endpoint returning them rather than a bare rejection.
-    const hint = (e.data && e.data.suggestions && e.data.suggestions.length)
-      ? `\n\nDid you mean: ${e.data.suggestions.join(', ')}`
-      : '';
-    alertMessage(e.message + hint);
-    renderCurrent({ keep: true });
+    alertMessage(e.message);
   } finally {
-    busy(false);
+    sw.disabled = false;
   }
 }
 
 async function toggleEvent(g, body, redraw) {
   haptic();
   try {
-    const res = await post(`/groups/${g.telegram_group_id}/events`, body);
+    const res = await post('/group/events', body);
     // The response carries the authoritative list — the collapse rule that turns a full
     // allowlist back into "all types" lives in next_event_filter on the server, and is
     // deliberately not reimplemented here where it would drift.
@@ -1118,9 +834,9 @@ function openAlerts(filter) {
 }
 
 /** "All", then the four types that account for nearly every alert, then the rest of the
- *  catalog. Crash is named literally because it is deliberately absent from
- *  GROUP_FILTER_TYPES — a crash is never a per-group filter — but it is the one alert
- *  anybody opens this feed to find. */
+ *  catalog. Crash is named literally, ahead of the catalog's own row for it, because it
+ *  is the one alert anybody opens this feed to find and must not depend on where the
+ *  catalog happens to list it. */
 function alertFilterChips() {
   const catalog = (state.boot && state.boot.event_types) || [];
   const byType = new Map(catalog.map((t) => [t.type, t]));

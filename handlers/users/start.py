@@ -97,7 +97,7 @@ async def bot_start(message: types.Message):
     panel = _panel_button()
     if panel is not None:
         await message.answer(
-            "Fleet at a glance — groups, alerts and admins in one place.\n"
+            "Fleet at a glance — the dashboard, every alert, and the alerts group's settings.\n"
             "Also on the ☰ <b>Menu</b> button, any time.",
             parse_mode="HTML",
             reply_markup=panel,

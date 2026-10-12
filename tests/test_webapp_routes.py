@@ -74,14 +74,14 @@ async def test_every_api_route_refuses_an_anonymous_caller(client):
     for method, path in routes:
         # Path params are irrelevant: authentication must be refused before the handler
         # ever looks at them.
-        url = path.replace("{tgid}", "-100123").replace("{admin_id}", "1")
+        url = path.replace("{admin_id}", "1")
         resp = await client.request(method, url)
         assert resp.status == 401, f"{method} {path} answered {resp.status} unauthenticated"
 
 
 async def test_a_forged_credential_is_refused_everywhere(client):
     for method, path in _api_routes(client.app):
-        url = path.replace("{tgid}", "-100123").replace("{admin_id}", "1")
+        url = path.replace("{admin_id}", "1")
         resp = await client.request(method, url, headers={
             "X-Telegram-Init-Data": "user=%7B%22id%22%3A1%7D&auth_date=1&hash=deadbeef",
         })
@@ -93,7 +93,7 @@ async def test_a_verified_non_admin_is_refused_everywhere(client, monkeypatch):
     monkeypatch.setattr(auth, "is_super_admin", _always(False))
 
     for method, path in _api_routes(client.app):
-        url = path.replace("{tgid}", "-100123").replace("{admin_id}", "1")
+        url = path.replace("{admin_id}", "1")
         resp = await client.request(method, url,
                                     headers={"X-Telegram-Init-Data": _init_data()})
         assert resp.status == 403, f"{method} {path} let a non-admin through"
@@ -103,7 +103,7 @@ async def test_super_only_routes_refuse_a_plain_admin(client, monkeypatch):
     monkeypatch.setattr(auth, "is_admin", _always(True))
     monkeypatch.setattr(auth, "is_super_admin", _always(False))
 
-    for path in ("/panel/api/groups/-100123/remove", "/panel/api/admins",
+    for path in ("/panel/api/admins",
                  "/panel/api/admins/1/update", "/panel/api/admins/1/remove"):
         resp = await client.post(path, json={"confirm": True},
                                  headers={"X-Telegram-Init-Data": _init_data()})
@@ -171,28 +171,32 @@ async def test_bootstrap_never_hands_the_samsara_key_to_the_browser(client, monk
     assert (await resp.json())["samsara_enabled"] is True
 
 
-async def test_groups_serializes_datetimes(client, monkeypatch):
+async def test_no_route_takes_a_group_id(client):
+    """One alerts group, so no path names one. A {tgid} appearing here would mean a
+    per-group endpoint had come back in from single-company with nothing behind it."""
+    for _method, path in _api_routes(client.app):
+        assert "{tgid}" not in path
+        assert "/groups" not in path
+
+
+async def test_the_alerts_feed_serializes_datetimes(client, monkeypatch):
     """asyncpg returns datetime objects, which json refuses. The _json_default hook is
     easy to leave out of a new endpoint and only fails once real rows exist."""
     from datetime import datetime, timezone
 
     monkeypatch.setattr(auth, "is_admin", _always(True))
 
-    async def _overview():
-        return [{"id": 1, "telegram_group_id": -100, "title": "Unit 571",
-                 "vehicle_number": "unit571", "is_main": False, "enabled": True,
-                 "created_at": datetime.now(timezone.utc), "event_types": []}]
+    async def _recent(**_kwargs):
+        return [{"id": 9, "vehicle_number": "1196", "event_type": "hard_brake",
+                 "severity": None, "occurred_at": datetime.now(timezone.utc)}]
 
-    async def _counts(_since):
-        return {"unit571": 4}
+    monkeypatch.setattr(api, "get_recent_events", _recent)
 
-    monkeypatch.setattr(api, "get_groups_overview", _overview)
-    monkeypatch.setattr(api, "get_counts_by_vehicle", _counts)
-
-    resp = await client.get("/panel/api/groups",
+    resp = await client.get("/panel/api/alerts?limit=1",
                             headers={"X-Telegram-Init-Data": _init_data()})
     assert resp.status == 200
-    row = (await resp.json())[0]
-    assert row["filter_mode"] == "all"      # no rows in group_event_types = every type
-    assert row["alerts_7d"] == 4
-    assert isinstance(row["created_at"], str)
+    data = await resp.json()
+    assert isinstance(data["items"][0]["occurred_at"], str)
+    assert data["items"][0]["label"] == "HARSH BRAKE"
+    # A full page implies more, and the cursor it hands back is a datetime too.
+    assert isinstance(data["next"]["before_ts"], str)

@@ -77,16 +77,25 @@ def test_parse_unknown_event_type_ignored():
 
 # ── formatting ──────────────────────────────────────────────────────────────────
 
-def test_samsara_alerts_tagged_motive_not():
+def test_the_first_crash_alert_says_the_video_is_still_coming():
     crash = {"type": "crash", "_source": "samsara", "vehicle": {"number": "Unit 42"},
              "start_time": "2026-05-22T15:00:00Z", "location": "I-95 N"}
-    initial = wh._format_crash_initial(crash, "DM World")
-    assert "Video pending" in initial and "via Samsara" in initial
+    initial = wh._format_crash_initial(crash, "HAULAGE FREIGHT LLC")
+    assert "Video pending" in initial
+    assert "I-95 N" in initial
     assert "CRASH" in wh._format_crash_video_caption(crash)
 
-    motive = {"type": "hard_brake", "vehicle": {"number": "Unit 1"},
-              "start_time": "2026-05-22T15:00:00Z", "location": "Main St"}
-    assert "via Samsara" not in wh._format_event(motive)
+
+@pytest.mark.parametrize("samsara_name, internal", [
+    ("Rolling Stop", "stop_sign_violation"),
+    ("Did Not Stop", "stop_sign_violation"),
+    ("Near Collision", "forward_collision_warning"),
+])
+def test_the_samsara_names_hf_added_resolve_to_alertable_types(samsara_name, internal):
+    """Three names Samsara sends HF that single-company's table does not have. Without
+    them each of these would go out as an unnamed HARSH EVENT."""
+    assert wh._SAMSARA_HARSH_TYPE_MAP[samsara_name] == internal
+    assert internal in wh.ALLOWED_TYPES
 
 
 # ── _fetch_samsara_harsh_event poll loop (faked HTTP) ───────────────────────────
@@ -191,16 +200,36 @@ async def test_poll_noncrash_gives_up_after_three_attempts(patch_poll):
     assert session.calls == 3
 
 
-async def test_poll_obstructed_camera_is_not_skipped(patch_poll):
-    # Obstructed Camera is now a real, alertable type — resolved like any other
-    # harsh event (polled up to 3 attempts, sent even with no media).
+@pytest.mark.parametrize("harsh_type", ["Obstructed Camera", "Tailgating"])
+async def test_poll_stops_at_once_for_a_type_that_is_not_alerted_on(patch_poll, harsh_type):
+    """HF does not alert on these, so there is no card to wait on a clip for. The poll
+    ends on the first response that names the type, instead of spending a minute and two
+    more API calls on an event that is about to be discarded."""
     session = patch_poll["install"]([
-        _FakeResp(200, {"harshEventType": "Obstructed Camera"}),
+        _FakeResp(200, {"harshEventType": harsh_type}),
     ])
-    data = await wh._fetch_samsara_harsh_event("v1", 1, "key")
-    assert data is not None
-    assert data["harshEventType"] == "Obstructed Camera"
+    assert await wh._fetch_samsara_harsh_event("v1", 1, "key") is None
+    assert session.calls == 1
+
+
+async def test_poll_keeps_waiting_on_a_record_samsara_has_not_named_yet(patch_poll):
+    """No type at all is not "a type we skip": the record is still being filled in. That
+    one is polled to the end, and comes back as the empty record it still is."""
+    session = patch_poll["install"]([_FakeResp(200, {})])
+    assert await wh._fetch_samsara_harsh_event("v1", 1, "key") == {}
     assert session.calls == 3
+
+
+async def test_poll_does_not_persist_or_alert_a_type_that_is_not_alerted_on(patch_poll):
+    """The early stop comes before the first-response hook, so nothing is written for it."""
+    patch_poll["install"]([_FakeResp(200, {"harshEventType": "Obstructed Camera"})])
+    seen = []
+
+    async def _on_first(data):
+        seen.append(data)
+
+    await wh._fetch_samsara_harsh_event("v1", 1, "key", on_first=_on_first)
+    assert seen == []
 
 
 async def test_poll_http_error_gives_up(patch_poll):
@@ -299,8 +328,8 @@ async def test_handle_event_downloads_media_once_for_all_recipients(monkeypatch)
 
     monkeypatch.setattr(wh, "_download", _fake_download)
     monkeypatch.setattr(wh, "save_violation", _async_const(True))
-    monkeypatch.setattr(wh, "get_groups_for_event", _async_const([1, 2]))
-    monkeypatch.setattr(wh, "get_subscribed_admins", _async_const([3]))
+    monkeypatch.setattr(wh, "get_alert_target", _async_const(-1001))
+    monkeypatch.setattr(wh, "get_subscribed_admins", _async_const([3, 4]))
 
     bot = _FakeBot()
     event = {
@@ -317,4 +346,4 @@ async def test_handle_event_downloads_media_once_for_all_recipients(monkeypatch)
     await wh._handle_event(bot, event)
 
     assert len(downloads) == 1                   # ONE download for the single clip...
-    assert bot.video_calls == [1, 2, 3]          # ...delivered to all three recipients
+    assert bot.video_calls == [-1001, 3, 4]      # ...delivered to all three recipients

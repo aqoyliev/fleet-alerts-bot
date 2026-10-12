@@ -2,14 +2,14 @@
 
 The bot sends with parse_mode=HTML, and Telegram rejects a message whose entities don't
 parse. A rejection is not a cosmetic problem: the alert is not delivered at all. Driver
-names, reverse-geocoded addresses, vehicle names and group titles are all written by
-someone else, so each one is escaped at the point it is interpolated.
+names, reverse-geocoded addresses and vehicle names are all written by someone else, so
+each one is escaped at the point it is interpolated.
 
 `&` is the realistic trigger — addresses like "Main St & 5th" are ordinary — and `<` is
-the one that would otherwise let a crafted group title inject markup into an admin's DM.
+the one that would otherwise let a crafted vehicle name inject markup into the group.
 """
 
-from utils import group_texts
+from utils.daily_report import _format_daily_report
 from utils.tg_text import esc
 import utils.webhook_handler as wh
 
@@ -64,19 +64,17 @@ def test_the_crash_video_caption_escapes_the_unit():
         _event(type="crash", vehicle={"number": "a&b"}))
 
 
-# ── the group-facing texts ─────────────────────────────────────────────────────
+# ── the reports ────────────────────────────────────────────────────────────────
 
-def test_a_group_setup_message_escapes_the_unit_it_echoes():
-    assert "&lt;script&gt;" in group_texts.joined_registered("<script>")
+def test_the_daily_report_escapes_the_unit_and_the_company():
+    """The unit is whatever Samsara's roster calls the truck, and it is read back out of
+    the database long after the alert that carried it was escaped."""
+    text = _format_daily_report(
+        "A & B Freight", [{"event_type": "speeding", "vehicle_number": "57<1", "total": 2}],
+        "May 07, 2026")
 
-
-def test_an_unknown_unit_message_escapes_the_roster_suggestions():
-    text = group_texts.joined_unknown_unit("A & B Trucking", "57<1", ["unit&1"],
-                                           roster="Samsara")
-
-    assert "A &amp; B Trucking" in text
-    assert "57&lt;1" in text
-    assert "unit&amp;1" in text
+    assert "A &amp; B Freight" in text
+    assert "Unit 57&lt;1" in text
 
 
 # ── the helper itself ──────────────────────────────────────────────────────────

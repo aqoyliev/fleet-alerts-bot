@@ -1,4 +1,8 @@
-"""Tests for the Motive clip follow-up, and for tailgating being an event at all.
+"""Tests for the Motive clip follow-up, and for tailgating NOT being an event here.
+
+HF is a Samsara fleet and none of the Motive path runs in production on this branch. It
+is kept, and kept tested, because it is single-company's and this branch follows that
+one: the day a Motive webhook secret is configured here, this is the behaviour.
 
 Motive sends the webhook the instant its detector trips, which is before the dashcam clip
 has been transcoded: the delivery says a clip exists and every URL in it is still null.
@@ -203,8 +207,8 @@ def alerted(monkeypatch, api_key):
     async def _save_violation(**kwargs):
         return True
 
-    async def _groups(event_type, vehicle_number=None):
-        return [-100111]
+    async def _group(event_type=None):
+        return -100111
 
     async def _admins(event_type):
         return [777]
@@ -220,7 +224,7 @@ def alerted(monkeypatch, api_key):
         return ([b"clip"] if video_urls or image_urls else []), bool(video_urls)
 
     monkeypatch.setattr(wh, "save_violation", _save_violation)
-    monkeypatch.setattr(wh, "get_groups_for_event", _groups)
+    monkeypatch.setattr(wh, "get_alert_target", _group)
     monkeypatch.setattr(wh, "get_subscribed_admins", _admins)
     monkeypatch.setattr(wh, "_send_all", _send_all)
     monkeypatch.setattr(wh, "_wait_for_motive_clip", _wait)
@@ -237,7 +241,7 @@ async def test_the_card_and_the_clip_arrive_as_one_message(alerted):
     assert sent["is_video"] is True
     assert sent["media"] == [b"clip"]
     # The whole card, not a bare caption: there is no earlier message to refer back to.
-    assert "HARD BRAKE" in sent["text"]
+    assert "HARSH BRAKE" in sent["text"]
     assert "1269" in sent["text"]
 
 
@@ -246,7 +250,7 @@ async def test_a_clip_that_never_came_still_sends_the_card_once(alerted):
     await wh._handle_event(object(), _event())
 
     assert len(alerted["sent"]) == 1
-    assert "HARD BRAKE" in alerted["sent"][0]["text"]
+    assert "HARSH BRAKE" in alerted["sent"][0]["text"]
     assert alerted["sent"][0]["media"] == []
 
 
@@ -261,25 +265,18 @@ async def test_an_event_with_no_footage_coming_is_not_delayed(alerted):
 
 # -- tailgating ----------------------------------------------------------------
 
-def test_tailgating_is_an_event_the_bot_handles():
-    """Motive sends type='tailgating' and Samsara sends "Tailgating" -- the alias table
-    has mapped it all along -- but it was missing from EVENT_TYPE_MAP, so the
-    ALLOWED_TYPES gate dropped both with only a debug line to show for it."""
-    assert "tailgating" in wh.ALLOWED_TYPES
+def test_tailgating_is_recognised_and_not_alerted_on():
+    """single-company added tailgating to its alerts. HF's list does not have it, and
+    that is a decision rather than an omission — so the alias stays, which is what lets
+    a Samsara "Tailgating" event be recognised and dropped instead of going out as a
+    generic harsh event."""
     assert wh._SAMSARA_HARSH_TYPE_MAP["Tailgating"] == "tailgating"
+    assert "tailgating" not in wh.ALLOWED_TYPES
 
 
-def test_a_tailgating_card_has_a_title_of_its_own():
-    card = wh._format_event({"id": 9003, "type": "tailgating",
-                             "start_time": "2026-04-08T09:00:00Z",
-                             "current_vehicle": {"number": "3030"}})
-    assert "TAILGATING" in card
-    assert "3030" in card
-
-
-def test_a_group_can_filter_tailgating_like_any_other_type():
-    """A type that routes but cannot be toggled is a type a group cannot turn off."""
-    assert "tailgating" in GROUP_FILTER_TYPE_SET
+def test_a_type_that_is_not_alerted_on_has_no_chip_in_the_panel():
+    """A chip for a type the bot never sends is a switch connected to nothing."""
+    assert "tailgating" not in GROUP_FILTER_TYPE_SET
 
 
 # -- the lookup the follow-up and the crash check now share --------------------

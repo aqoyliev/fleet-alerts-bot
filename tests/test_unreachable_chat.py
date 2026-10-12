@@ -1,13 +1,18 @@
 """Tests for delivery to chats the bot can no longer post to.
 
-Production hit this when the bot was kicked from a driver group: BotKicked subclasses
-TelegramAPIError, so the media loop retried it three times, the text-only fallback did
-not catch it at all, and the exception escaped _send_with_retry — aborting the whole
-broadcast, so every recipient after the dead group silently lost the alert.
+Production hit this on single-company when the bot was kicked from a driver group:
+BotKicked subclasses TelegramAPIError, so the media loop retried it three times, the
+text-only fallback did not catch it at all, and the exception escaped _send_with_retry —
+aborting the whole broadcast, so every recipient after the dead group silently lost the
+alert.
+
+The fix is carried over whole, with one difference: single-company also mutes the dead
+group, and this branch must not. See test_a_kicked_group_is_not_muted.
 """
 import pytest
 from aiogram.utils.exceptions import BotKicked, ChatNotFound, NetworkError
 
+import utils.db_api.groups as groups
 import utils.webhook_handler as wh
 
 
@@ -32,14 +37,18 @@ class _Bot:
 
 
 @pytest.fixture
-def retired(monkeypatch):
-    """Records which groups were marked as left, standing in for the DB write."""
-    calls: list[int] = []
+def writes(monkeypatch):
+    """Every statement the group layer sends to the database while a send fails.
 
-    async def _mark(gid):
-        calls.append(gid)
+    The claim under test is that there are none, so the spy sits on the database itself
+    rather than on one named function: a mute added back under any name still lands here.
+    """
+    calls: list[str] = []
 
-    monkeypatch.setattr(wh, "mark_group_left", _mark)
+    async def _execute(query, *args):
+        calls.append(" ".join(query.split()))
+
+    monkeypatch.setattr(groups.db, "execute", _execute)
     monkeypatch.setattr(wh.asyncio, "sleep", _no_sleep)
     return calls
 
@@ -50,40 +59,51 @@ async def _no_sleep(_seconds):
 
 # ── permanent errors are not retried ───────────────────────────────────────────
 
-async def test_kicked_group_is_not_retried_and_is_retired(retired):
+async def test_kicked_group_is_not_retried(writes):
     bot = _Bot(exc=BotKicked("bot was kicked from the group chat"))
     await wh._send_with_retry(bot, -100123, "alert", media=[b"jpg"], is_video=False)
 
     assert bot.photo_calls == [-100123]      # one attempt, not three
     assert bot.message_calls == []           # no pointless text fallback
-    assert retired == [-100123]              # out of routing and out of the panel
 
 
-async def test_chat_not_found_is_not_retried_but_is_left_alone(retired):
-    """Nothing would ever bring back a group retired on ChatNotFound — there is no re-add
-    event to recover from it — so the send is skipped and the row is left as it is."""
+async def test_a_kicked_group_is_not_muted(writes):
+    """There is one group, and a mute is lifted only by an admin.
+
+    single-company mutes a group it is kicked from and relies on the my_chat_member
+    update to un-mute it when the bot is put back. That update is skipped whenever the
+    bot is re-added while it is restarting, which would leave the fleet's only group
+    silent with nothing on screen to explain why. So nothing is recorded: the group is
+    tried again on the next alert, and the first one after the bot returns gets through.
+    """
+    bot = _Bot(exc=BotKicked("bot was kicked from the group chat"))
+    await wh._send_with_retry(bot, -100123, "alert")
+
+    assert writes == []
+
+
+async def test_chat_not_found_is_not_retried_and_changes_nothing(writes):
     bot = _Bot(exc=ChatNotFound("chat not found"))
     await wh._send_with_retry(bot, -100777, "alert")
 
     assert bot.message_calls == [-100777]   # one attempt, not three
-    assert retired == []
+    assert writes == []
 
 
-async def test_blocked_dm_is_skipped_without_touching_groups(retired):
-    """A DM (positive id) is never retired — the admin keeps access and can unblock."""
+async def test_blocked_dm_is_skipped(writes):
+    """An admin who blocked the bot keeps their access and can unblock at any time."""
     bot = _Bot(exc=BotKicked("blocked"))
     await wh._send_with_retry(bot, 555, "alert")
 
     assert bot.message_calls == [555]
-    assert retired == []
+    assert writes == []
 
 
-async def test_transient_error_still_retries(retired):
+async def test_transient_error_still_retries(writes):
     bot = _Bot(exc=NetworkError("boom"))
     await wh._send_with_retry(bot, 555, "alert", retries=3)
 
     assert bot.message_calls == [555, 555, 555]   # transient errors keep their retries
-    assert retired == []
 
 
 # ── one dead chat must not silence the rest ────────────────────────────────────
@@ -97,28 +117,7 @@ async def test_send_all_continues_past_a_failing_chat(monkeypatch):
         delivered.append(chat_id)
 
     monkeypatch.setattr(wh, "_send_with_retry", _send)
-    await wh._send_all(None, [-100999, -100111, 555], "alert")
+    await wh._send_all(None, [-100999, 555, 556], "alert")
 
-    # The dead group used to abort the loop, costing everyone behind it their alert.
-    assert delivered == [-100111, 555]
-
-
-# ── re-adding the bot restores a retired group ─────────────────────────────────
-
-async def test_register_group_clears_the_mute_and_the_departure(monkeypatch):
-    """Retiring a group is only safe because re-registration undoes it: nobody unmutes a
-    group by hand, so putting the bot back has to set enabled back to TRUE — and clear
-    left_at, or the group would stay invisible in the panel it has to be configured in."""
-    import utils.db_api.groups as groups
-    captured = {}
-
-    async def _execute(query, *args):
-        captured["query"] = query
-
-    monkeypatch.setattr(groups.db, "execute", _execute)
-    await groups.register_group(-100123, "UNIT 571", "571")
-
-    q = " ".join(captured["query"].split())
-    assert "ON CONFLICT (telegram_group_id) DO UPDATE" in q
-    assert "enabled = TRUE" in q
-    assert "left_at = NULL" in q
+    # The dead group used to abort the loop, costing every admin behind it their alert.
+    assert delivered == [555, 556]

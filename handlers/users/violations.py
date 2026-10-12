@@ -35,17 +35,24 @@ def _period_range(period: str) -> tuple[datetime, datetime]:
     return since, until
 
 
-def _format_top10_text(rows: list[dict], period_label: str, company_name: str, event_type: str) -> str:
+def _date_range_label(since: datetime, until: datetime) -> str:
+    # until is exclusive (start of the next period), so the last covered day is until - 1
+    end = until - timedelta(days=1)
+    if since.year == end.year:
+        return f"{since.strftime('%b %d')} – {end.strftime('%b %d, %Y')}"
+    return f"{since.strftime('%b %d, %Y')} – {end.strftime('%b %d, %Y')}"
+
+
+def _format_top10_text(rows: list[dict], date_label: str, company_name: str, event_type: str) -> str:
     if event_type == "speeding":
         header = (
-            f"📊 <b>{esc(company_name)} — {period_label}</b>\n"
+            f"📊 <b>{esc(company_name)} — {date_label}</b>\n"
             f"<i>🚨 Speeding only</i>\n"
-            f"<i>ℹ️ Download report shows days with 3+ speeding events per unit</i>\n"
         )
     elif event_type == "other":
-        header = f"📊 <b>{esc(company_name)} — {period_label}</b>\n<i>⚠️ Other violations (excl. speeding)</i>\n"
+        header = f"📊 <b>{esc(company_name)} — {date_label}</b>\n<i>⚠️ Other violations (excl. speeding)</i>\n"
     else:
-        header = f"📊 <b>{esc(company_name)} — {period_label}</b>\n"
+        header = f"📊 <b>{esc(company_name)} — {date_label}</b>\n"
 
     if not rows:
         return header + "\n✅ No violations found."
@@ -69,7 +76,7 @@ async def _edit_or_send(call: types.CallbackQuery, text: str, reply_markup, pars
 async def _show_top10(call: types.CallbackQuery, period: str, event_type: str):
     since, until = _period_range(period)
     rows = await get_top_violators(since, until=until, event_type=event_type, limit=10)
-    text = _format_top10_text(rows, PERIOD_LABELS[period], config.COMPANY_NAME, event_type)
+    text = _format_top10_text(rows, _date_range_label(since, until), config.COMPANY_NAME, event_type)
     kb = top10_keyboard(rows, period, event_type)
     await _edit_or_send(call, text, kb)
     await call.answer()
@@ -83,8 +90,13 @@ async def show_violations_menu(message: types.Message):
     await message.answer("Select event type:", reply_markup=event_type_keyboard())
 
 
+# The callbacks below read their arguments from the END of the callback data. The build
+# this replaced put the company slug first ("viol_etype:hf:speeding"), and those
+# keyboards are still sitting in admins' chats: read from the right, both forms land on
+# the same values, and a button pressed on last week's message does what it says.
+
 # Back: to event type selection
-@dp.callback_query_handler(lambda c: c.data == "viol_bk_et")
+@dp.callback_query_handler(lambda c: c.data == "viol_bk_et" or c.data.startswith("viol_bk_et:"))
 async def cb_back_event_type(call: types.CallbackQuery):
     if not await is_admin(call.from_user.id):
         await call.answer("⛔ Access denied.", show_alert=True)
@@ -99,7 +111,7 @@ async def cb_event_type(call: types.CallbackQuery):
     if not await is_admin(call.from_user.id):
         await call.answer("⛔ Access denied.", show_alert=True)
         return
-    event_type = call.data.split(":")[1]
+    event_type = call.data.split(":")[-1]
     await _show_top10(call, "last_week", event_type)
 
 
@@ -109,7 +121,9 @@ async def cb_period_toggle(call: types.CallbackQuery):
     if not await is_admin(call.from_user.id):
         await call.answer("⛔ Access denied.", show_alert=True)
         return
-    _, event_type, period = call.data.split(":")
+    event_type, period = call.data.split(":")[-2:]
+    if period not in PERIOD_LABELS:
+        period = "last_week"
     await _show_top10(call, period, event_type)
 
 
@@ -119,9 +133,9 @@ async def cb_download(call: types.CallbackQuery):
     if not await is_admin(call.from_user.id):
         await call.answer("⛔ Access denied.", show_alert=True)
         return
-    parts = call.data.split(":")
-    period = parts[1]
-    event_type = parts[2]
+    period, event_type = call.data.split(":")[-2:]
+    if period not in PERIOD_LABELS:
+        period = "last_week"
 
     await call.answer("Generating report...")
     super_admin = await is_super_admin(call.from_user.id)
@@ -139,7 +153,6 @@ async def cb_download(call: types.CallbackQuery):
     ]
     if event_type == "speeding":
         lines.append("Filter: Speeding only")
-        lines.append("Note: Only days with 3+ speeding events per unit are listed.")
         lines.append("")
     elif event_type == "other":
         lines.append("Filter: Other violations (excl. speeding)")
@@ -161,12 +174,11 @@ async def cb_download(call: types.CallbackQuery):
                 by_date.setdefault(day, []).append(time_str)
             day_lines = []
             for day, times in by_date.items():
-                if len(times) >= 3:
-                    day_lines.append(f"     • {day}, {', '.join(times)} — {len(times)} times")
+                day_lines.append(f"     • {day}, {', '.join(times)} — {len(times)} time{'s' if len(times) != 1 else ''}")
             if not day_lines:
                 continue
-            total_shown = sum(len(by_date[d]) for d in by_date if len(by_date[d]) >= 3)
-            lines.append(f"{rank}. Unit {unit} — {total_shown} speeding events")
+            total_shown = sum(len(v) for v in by_date.values())
+            lines.append(f"{rank}. Unit {unit} — {total_shown} speeding event{'s' if total_shown != 1 else ''}")
             lines.extend(day_lines)
         else:
             total = row["total"]
