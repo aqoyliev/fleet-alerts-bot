@@ -118,6 +118,23 @@ async def promote_to_super(admin_id: int) -> None:
     )
 
 
+async def demote_from_super(admin_id: int) -> None:
+    """Make a super admin a regular admin again, leaving them active.
+
+    Only the maintainer is offered this (see update_admin in utils/webapp/api.py). Among
+    the company's own super admins nobody outranks anybody, so none of them can take the
+    role off another; the maintainer is the one account that sits above all of them, and
+    is the way out when a super admin was promoted by mistake or should no longer be one.
+
+    A maintainer's own row is never passed here. Their role comes from config.ADMINS —
+    is_super_admin answers True for them whatever the row says, and seed_super_admins
+    would put the flag back on the next boot.
+    """
+    await db.execute(
+        "UPDATE admins SET is_super = FALSE WHERE id = $1", admin_id
+    )
+
+
 async def transfer_super_admin(current_telegram_id: int, target_admin_id: int) -> None:
     """Move super-admin status from the current holder to another admin, atomically:
     promote the target (and ensure it's active) and demote the current super to a

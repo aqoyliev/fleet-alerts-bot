@@ -17,6 +17,7 @@ What `hf` deliberately does differently — keep these when resolving a merge:
 | Groups | one driver group per truck, registered when the bot is added, paired by `/setunit` | **one alerts group**, a single row; adding the bot to a chat registers nothing |
 | Crash alerts | DMs + a dedicated `CRASH_GROUP_ID`, never the other groups | the alerts group (if its filter lists crash) + DMs |
 | Mute | `/disable` · `/enable` by anyone in a driver group; a kicked group is muted automatically | **the panel's switch only** — no group commands, nothing is ever muted automatically, nobody is DMed when the bot joins or leaves a chat |
+| Super admins | nobody can deactivate, demote or remove one | the **maintainer** (`ADMINS`) can do all three to any other super admin |
 | Event types | adds tailgating, camera obstruction, near miss, … | HF's shorter list (`EVENT_TYPE_MAP`); the rest are recognised and dropped |
 | Alert card | ruled into blocks | plain rows, title + blank line (`_format_event`) |
 | Speeding threshold | `high` | `medium` |
@@ -83,7 +84,9 @@ A singleton row in `alert_group` (`id` pinned to 1). Seeded once by `ensure_grou
 
 ### Admins and the hidden maintainer
 
-`ADMINS` (env) are the **maintainer's** ids, not the company's staff. They are permanent super admins and are hidden from the panel: other admins cannot see, deactivate or remove them (`is_maintainer` / `visible_admins` in `utils/db_api/admins.py`). The company's own admins are added and removed in the panel's Admins screen.
+`ADMINS` (env) are the **maintainer's** ids, not the company's staff — on this deployment, Akbar alone. They are permanent super admins and are hidden from the panel: other admins cannot see, deactivate or remove them (`is_maintainer` / `visible_admins` in `utils/db_api/admins.py`). The company's own admins are added and removed in the panel's Admins screen.
+
+The maintainer is also above the company's super admins. A super admin manages regular admins only and cannot touch another super admin; the maintainer can deactivate, demote (`demote_from_super`) and remove any of them (`update_admin` / `delete_admin_route` in `utils/webapp/api.py`). Refusals shown to a company super admin never mention that such an account exists.
 
 Crash DMs are on by default for every admin (`admins.crash_dm`); every other type is opt-in under ⚙️ Settings.
 

@@ -1,9 +1,13 @@
-"""Admin management through the panel refuses the same things the old in-chat flow did.
+"""Admin management through the panel: who may do what to whom.
 
-Self-removal, touching a super admin, and mutating a concealed maintainer are all
-refused. Those rules exist because losing them costs someone their access with no way
-back that isn't a hand-written SQL statement — the panel is now the only surface that
-mutates admins, so it carries every one of them itself.
+Self-removal, a super admin touching another super admin, and mutating a concealed
+maintainer are all refused. Those rules exist because losing them costs someone their
+access with no way back that isn't a hand-written SQL statement — the panel is the only
+surface that mutates admins, so it carries every one of them itself.
+
+One account is above those rules, and only on this branch: the maintainer, who can
+deactivate, demote and remove the company's super admins. The second half of this file
+is about that — and about it staying invisible to the people it applies to.
 """
 
 import hashlib
@@ -69,7 +73,7 @@ ADMINS = {
 
 @pytest.fixture
 def panel(monkeypatch):
-    writes = {"active": [], "promoted": [], "deleted": [], "added": []}
+    writes = {"active": [], "promoted": [], "demoted": [], "deleted": [], "added": []}
 
     monkeypatch.setattr(auth, "is_admin", _always(True))
     monkeypatch.setattr(auth, "is_super_admin", _always(True))
@@ -86,6 +90,9 @@ def panel(monkeypatch):
     async def _promote(admin_id):
         writes["promoted"].append(admin_id)
 
+    async def _demote(admin_id):
+        writes["demoted"].append(admin_id)
+
     async def _delete(admin_id):
         writes["deleted"].append(admin_id)
 
@@ -99,6 +106,7 @@ def panel(monkeypatch):
     monkeypatch.setattr(api, "get_admin_by_id", _by_id)
     monkeypatch.setattr(api, "set_admin_active", _set_active)
     monkeypatch.setattr(api, "promote_to_super", _promote)
+    monkeypatch.setattr(api, "demote_from_super", _demote)
     monkeypatch.setattr(api, "delete_admin", _delete)
     monkeypatch.setattr(api, "add_admin", _add)
     monkeypatch.setattr(api, "ensure_user", _ensure_user)
@@ -190,10 +198,10 @@ async def test_a_maintainer_looks_exactly_like_a_deleted_admin(panel):
 
 
 async def test_a_maintainer_cannot_be_mutated(panel):
-    for body in ({"is_active": False}, {"is_super": True}):
+    for body in ({"is_active": False}, {"is_super": True}, {"is_super": False}):
         resp = await api.update_admin(_Request(body, {"admin_id": "5"}))
         assert resp.status == 404
-    assert panel["active"] == [] and panel["promoted"] == []
+    assert panel["active"] == [] and panel["promoted"] == [] and panel["demoted"] == []
 
 
 async def test_adding_a_maintainer_reports_success_without_doing_anything(panel):
@@ -244,3 +252,177 @@ async def test_a_plain_admin_cannot_add_anyone(panel, monkeypatch):
     resp = await api.create_admin(_Request({"telegram_id": 555}))
     assert resp.status == 403
     assert panel["added"] == []
+
+
+# ── the maintainer is above the company's super admins ──────────────────────────
+#
+# Among the company's own super admins nobody outranks anybody: none of them can
+# deactivate, demote or remove another. The maintainer can do all three, and is the only
+# way a super admin is ever undone.
+
+def _as_maintainer(body, admin_id):
+    return _Request(body, {"admin_id": str(admin_id)}, user_id=MAINTAINER)
+
+
+async def test_the_maintainer_can_deactivate_another_super_admin(panel):
+    resp = await api.update_admin(_as_maintainer({"is_active": False}, 3))
+
+    assert resp.status == 200
+    assert panel["active"] == [(3, False)]
+
+
+async def test_the_maintainer_can_remove_another_super_admin(panel):
+    resp = await api.delete_admin_route(_as_maintainer({"confirm": True}, 3))
+
+    assert resp.status == 200
+    assert panel["deleted"] == [3]
+
+
+async def test_the_maintainer_can_take_the_super_role_away(panel):
+    resp = await api.update_admin(_as_maintainer({"is_super": False}, 3))
+
+    assert resp.status == 200
+    assert json.loads(resp.body) == {"ok": True, "is_super": False}
+    assert panel["demoted"] == [3]
+
+
+async def test_the_maintainer_can_do_it_to_the_super_admin_who_is_acting_too(panel):
+    """Row 1 is ACTOR — a super admin like any other from where the maintainer sits."""
+    resp = await api.update_admin(_as_maintainer({"is_super": False}, 1))
+
+    assert resp.status == 200
+    assert panel["demoted"] == [1]
+
+
+async def test_a_super_admin_cannot_take_the_role_from_another(panel):
+    resp = await api.update_admin(_Request({"is_super": False}, {"admin_id": "3"}))
+
+    assert resp.status == 403
+    assert json.loads(resp.body)["error"] == "is_super"
+    assert panel["demoted"] == []
+
+
+async def test_a_super_admin_cannot_take_the_role_from_themselves_either(panel):
+    """Stepping down is how a company ends up with no super admin of its own and
+    nothing in the panel that can make one."""
+    resp = await api.update_admin(_Request({"is_super": False}, {"admin_id": "1"}))
+
+    assert resp.status == 403
+    assert panel["demoted"] == []
+
+
+async def test_the_refusal_does_not_say_somebody_else_could(panel):
+    """ "Only the maintainer can do this" would tell a company's super admin that there
+    is an account above theirs — the one thing the Admins screen exists to not show."""
+    for resp in (
+        await api.update_admin(_Request({"is_super": False}, {"admin_id": "3"})),
+        await api.update_admin(_Request({"is_active": False}, {"admin_id": "3"})),
+        await api.delete_admin_route(_Request({"confirm": True}, {"admin_id": "3"})),
+    ):
+        message = json.loads(resp.body)["message"].lower()
+        assert resp.status == 403
+        for word in ("maintainer", "owner", "developer", "only"):
+            assert word not in message
+
+
+async def test_a_regular_admin_has_no_super_role_to_take(panel):
+    resp = await api.update_admin(_as_maintainer({"is_super": False}, 2))
+
+    assert resp.status == 400
+    assert json.loads(resp.body)["error"] == "not_super"
+    assert panel["demoted"] == []
+
+
+async def test_removing_a_super_admin_still_needs_confirming(panel):
+    resp = await api.delete_admin_route(_as_maintainer({}, 3))
+
+    assert resp.status == 400
+    assert panel["deleted"] == []
+
+
+# ── and the maintainer's own row is nobody's to edit ────────────────────────────
+
+async def test_the_maintainer_cannot_demote_deactivate_or_remove_themselves(panel):
+    """Their access comes from the deployment's settings, not from the row: is_admin and
+    is_super_admin answer True for them whatever it says, and the next boot rewrites it.
+    Letting the panel change it would show a switch that does nothing."""
+    demote = await api.update_admin(_as_maintainer({"is_super": False}, 5))
+    deactivate = await api.update_admin(_as_maintainer({"is_active": False}, 5))
+    remove = await api.delete_admin_route(_as_maintainer({"confirm": True}, 5))
+
+    assert json.loads(demote.body)["error"] == "locked"
+    assert json.loads(deactivate.body)["error"] == "self_action"
+    assert json.loads(remove.body)["error"] == "self_action"
+    assert demote.status == deactivate.status == remove.status == 403
+    assert panel["demoted"] == [] and panel["active"] == [] and panel["deleted"] == []
+
+
+async def test_one_maintainer_cannot_edit_another(panel, monkeypatch):
+    """Should ADMINS ever name two accounts. Each is restored from config on boot, so
+    neither can meaningfully act on the other's row."""
+    monkeypatch.setattr(config, "HIDDEN_ADMIN_IDS", {MAINTAINER, 888})
+    monkeypatch.setitem(ADMINS, 6, {"id": 6, "telegram_id": 888, "full_name": "Second",
+                                    "is_super": True, "is_active": True})
+
+    for resp in (
+        await api.update_admin(_as_maintainer({"is_super": False}, 6)),
+        await api.update_admin(_as_maintainer({"is_active": False}, 6)),
+        await api.delete_admin_route(_as_maintainer({"confirm": True}, 6)),
+    ):
+        assert resp.status == 403
+        assert json.loads(resp.body)["error"] == "locked"
+    assert panel["demoted"] == [] and panel["active"] == [] and panel["deleted"] == []
+
+
+# ── what the screen is told ─────────────────────────────────────────────────────
+
+async def test_only_the_maintainer_is_offered_the_controls_on_super_admins(panel, monkeypatch):
+    monkeypatch.setattr(api, "is_super_admin", _always(True))
+
+    theirs = json.loads((await api.bootstrap(_Request(user_id=ACTOR))).body)
+    mine = json.loads((await api.bootstrap(_Request(user_id=MAINTAINER))).body)
+
+    assert theirs["me"]["can_manage_supers"] is False
+    assert mine["me"]["can_manage_supers"] is True
+
+
+async def test_the_list_a_company_admin_gets_gives_nothing_away(panel, monkeypatch):
+    """No maintainer row, and no row marked as special: every `locked` is false, so the
+    flag carries no information to somebody who must not learn the account exists."""
+    async def _everyone():
+        return list(ADMINS.values())
+
+    monkeypatch.setattr(api, "get_all_admins", _everyone)
+
+    rows = json.loads((await api.admins(_Request(user_id=ACTOR))).body)
+
+    assert MAINTAINER not in [r["telegram_id"] for r in rows]
+    assert [r["locked"] for r in rows] == [False] * len(rows)
+    assert len(rows) == len(ADMINS) - 1
+
+
+async def test_the_maintainer_sees_everyone_with_their_own_row_marked(panel, monkeypatch):
+    async def _everyone():
+        return list(ADMINS.values())
+
+    monkeypatch.setattr(api, "get_all_admins", _everyone)
+
+    rows = json.loads((await api.admins(_Request(user_id=MAINTAINER))).body)
+
+    assert len(rows) == len(ADMINS)
+    assert [r["telegram_id"] for r in rows if r["locked"]] == [MAINTAINER]
+
+
+async def test_demotion_only_clears_the_flag(monkeypatch):
+    """The admin stays an admin, and stays active — it is the role that goes."""
+    from utils.db_api import admins as adm
+
+    calls = []
+
+    async def _execute(query, *args):
+        calls.append((" ".join(query.split()), args))
+
+    monkeypatch.setattr(adm.db, "execute", _execute)
+    await adm.demote_from_super(7)
+
+    assert calls == [("UPDATE admins SET is_super = FALSE WHERE id = $1", (7,))]

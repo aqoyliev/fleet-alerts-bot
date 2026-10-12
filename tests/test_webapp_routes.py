@@ -149,7 +149,8 @@ async def test_bootstrap_returns_the_shape_the_frontend_reads(client, monkeypatc
     assert resp.status == 200
     data = await resp.json()
 
-    assert data["me"] == {"telegram_id": 42, "is_super": True}
+    # 42 is not in ADMINS, so the controls over other super admins are not offered.
+    assert data["me"] == {"telegram_id": 42, "is_super": True, "can_manage_supers": False}
     assert data["company"]["name"]
     assert data["event_types"] and {"type", "emoji", "label"} <= set(data["event_types"][0])
 

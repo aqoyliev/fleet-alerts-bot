@@ -32,8 +32,8 @@ from aiohttp import web
 from data import config
 from data.event_catalog import GROUP_FILTER_TYPES, next_event_filter
 from utils.db_api.admins import (
-    add_admin, delete_admin, get_admin_by_id, get_all_admins, is_maintainer,
-    is_super_admin, promote_to_super, set_admin_active, visible_admins,
+    add_admin, delete_admin, demote_from_super, get_admin_by_id, get_all_admins,
+    is_maintainer, is_super_admin, promote_to_super, set_admin_active, visible_admins,
 )
 from utils.db_api.groups import (
     get_group_event_types, get_group_status, set_group_enabled, set_group_event_types,
@@ -134,6 +134,11 @@ async def bootstrap(request: web.Request) -> web.Response:
         "me": {
             "telegram_id": telegram_id,
             "is_super": await is_super_admin(telegram_id),
+            # Whether the Admins screen should offer this caller the controls on OTHER
+            # super admins — deactivate, demote, remove. True for the maintainer alone.
+            # It says what the caller may do, about nobody but the caller, so it gives
+            # a company admin nothing to find the hidden account with: theirs is false.
+            "can_manage_supers": is_maintainer(telegram_id),
         },
         "company": {"name": config.COMPANY_NAME, "slug": config.COMPANY_SLUG},
         "event_types": [
@@ -245,7 +250,14 @@ async def admins(request: web.Request) -> web.Response:
     """Maintainers are filtered out server-side. The panel must not become the place that
     leaks what the bot deliberately hides (see data/config.py on HIDDEN_ADMIN_IDS)."""
     everyone = await get_all_admins()
-    return _ok(visible_admins(everyone, request["telegram_id"]))
+    # `locked` marks a row whose role and status come from the deployment's settings
+    # rather than from this table, so the panel has no controls for it. It can only be
+    # true in a list a maintainer is reading: visible_admins has already taken those
+    # rows out for everybody else, so the flag tells a company admin nothing.
+    return _ok([
+        {**row, "locked": is_maintainer(row["telegram_id"])}
+        for row in visible_admins(everyone, request["telegram_id"])
+    ])
 
 
 # ── group mutations ─────────────────────────────────────────────────────────────
@@ -300,9 +312,23 @@ async def toggle_event(request: web.Request) -> web.Response:
 # ── admin mutations ─────────────────────────────────────────────────────────────
 #
 # This is now the only surface for admin management — the old in-chat 👥 Admins flow
-# was removed once the panel covered everything it did. The refusals below (no
-# self-removal, no touching a super admin, maintainer concealed) are the same rules
-# that flow used to enforce.
+# was removed once the panel covered everything it did.
+#
+# Who may do what to whom:
+#
+#   • A super admin manages the regular admins: add, activate, deactivate, promote,
+#     remove. Not themselves, and not another super admin — among the company's own
+#     super admins nobody outranks anybody.
+#   • The maintainer (config.ADMINS) is above all of them and can also deactivate,
+#     demote and remove any other super admin. That is the difference from
+#     single-company, where a super admin, once made, can be undone by nobody.
+#   • A maintainer's own row is not editable by anyone, themselves included: their
+#     access comes from the deployment's settings, not from the row, and the next boot
+#     would put back whatever was changed. To everyone else that row does not exist.
+
+_LOCKED = ("locked", "This account is set in the deployment's settings and can't be "
+                     "changed here.")
+
 
 async def _load_target_admin(request: web.Request) -> tuple[dict | None, web.Response | None]:
     admin_id = _int_param(request, "admin_id")
@@ -346,28 +372,49 @@ async def update_admin(request: web.Request) -> web.Response:
 
     body = await _body(request)
     actor = request["telegram_id"]
+    over_supers = is_maintainer(actor)
+    # Only a maintainer gets this far with a maintainer's row — _load_target_admin has
+    # already answered "not found" to everyone else.
+    locked = is_maintainer(target["telegram_id"])
 
     if "is_active" in body:
         active = bool(body["is_active"])
-        if target["is_super"]:
-            return _fail("is_super", "Super admins can't be deactivated here.", status=403)
         # A guard the bot's flow can't easily reach but a panel can: is_admin requires
         # is_active, so a super admin who deactivates their own row is locked out of both
         # surfaces with no way back that isn't a hand-written SQL statement.
         if target["telegram_id"] == actor and not active:
             return _fail("self_action", "You can't deactivate yourself.", status=403)
+        if locked:
+            return _fail(*_LOCKED, status=403)
+        if target["is_super"] and not over_supers:
+            return _fail("is_super", "Super admins can't be deactivated here.", status=403)
         await set_admin_active(target["id"], active)
         logger.info(f"[webapp] {actor} set admin {target['id']} active={active}")
         return _ok({"ok": True, "is_active": active})
 
-    if body.get("is_super"):
-        if target["is_super"]:
-            return _fail("already_super", "That admin is already a super admin.")
-        if not target["is_active"]:
-            return _fail("inactive", "Activate this admin before promoting them.")
-        await promote_to_super(target["id"])
-        logger.info(f"[webapp] {actor} promoted admin {target['id']} to super")
-        return _ok({"ok": True, "is_super": True})
+    if "is_super" in body:
+        if body["is_super"]:
+            if target["is_super"]:
+                return _fail("already_super", "That admin is already a super admin.")
+            if not target["is_active"]:
+                return _fail("inactive", "Activate this admin before promoting them.")
+            await promote_to_super(target["id"])
+            logger.info(f"[webapp] {actor} promoted admin {target['id']} to super")
+            return _ok({"ok": True, "is_super": True})
+
+        # Taking the role away. The refusal a company's super admin gets is worded like
+        # the other two above — "can't be done here" — and not as "only the maintainer
+        # can": that sentence would tell them there is somebody above them to look for.
+        if locked:
+            return _fail(*_LOCKED, status=403)
+        if not over_supers:
+            return _fail("is_super", "A super admin's role can't be removed here.",
+                         status=403)
+        if not target["is_super"]:
+            return _fail("not_super", "That admin isn't a super admin.")
+        await demote_from_super(target["id"])
+        logger.info(f"[webapp] {actor} demoted admin {target['id']} from super")
+        return _ok({"ok": True, "is_super": False})
 
     return _fail("bad_request", "Nothing to change.")
 
@@ -379,10 +426,13 @@ async def delete_admin_route(request: web.Request) -> web.Response:
         return err
     if not (await _body(request)).get("confirm"):
         return _fail("confirm_required", "This needs to be confirmed.")
-    if target["telegram_id"] == request["telegram_id"]:
+    actor = request["telegram_id"]
+    if target["telegram_id"] == actor:
         return _fail("self_action", "You can't remove yourself.", status=403)
-    if target["is_super"]:
+    if is_maintainer(target["telegram_id"]):
+        return _fail(*_LOCKED, status=403)
+    if target["is_super"] and not is_maintainer(actor):
         return _fail("is_super", "Super admins can't be removed here.", status=403)
     await delete_admin(target["id"])
-    logger.info(f"[webapp] {request['telegram_id']} removed admin {target['id']}")
+    logger.info(f"[webapp] {actor} removed admin {target['id']}")
     return _ok({"ok": True})

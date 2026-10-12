@@ -1048,7 +1048,12 @@ async function adminDetail(opts) {
   if (!a) { popDetail(); return; }
 
   const isSuper = state.boot.me.is_super;
+  // The maintainer's view: the one account that may act on other super admins. For
+  // everyone else this is false and a super admin's row offers nothing to press.
+  const overSupers = !!state.boot.me.can_manage_supers;
   const isSelf = a.telegram_id === state.boot.me.telegram_id;
+  const LOCKED = "This account is set in the deployment's settings and can't be changed here.";
+  const name = a.full_name || 'this admin';
   const wrap = el('<div></div>');
 
   wrap.appendChild(el(`<div class="card">
@@ -1078,8 +1083,9 @@ async function adminDetail(opts) {
 
   const activeBtn = el(`<button class="btn btn-secondary btn-block"
       style="margin-bottom:10px">${a.is_active ? 'Deactivate' : 'Activate'}</button>`);
-  if (a.is_super) disable(activeBtn, "Super admins can't be deactivated here.");
-  else if (isSelf && a.is_active) disable(activeBtn, "You can't deactivate yourself.");
+  if (isSelf && a.is_active) disable(activeBtn, "You can't deactivate yourself.");
+  else if (a.locked) disable(activeBtn, LOCKED);
+  else if (a.is_super && !overSupers) disable(activeBtn, "Super admins can't be deactivated here.");
   else activeBtn.onclick = () => mutateAdmin(a.id, { is_active: !a.is_active },
                                              a.is_active ? 'Deactivated' : 'Activated');
   actions.appendChild(activeBtn);
@@ -1088,19 +1094,30 @@ async function adminDetail(opts) {
     const promote = el('<button class="btn btn-secondary btn-block" style="margin-bottom:10px">⭐ Make super admin</button>');
     if (!a.is_active) disable(promote, 'Activate this admin before promoting them.');
     else promote.onclick = async () => {
-      if (await confirmAction(`Make ${a.full_name || 'this admin'} a super admin?`)) {
+      if (await confirmAction(`Make ${name} a super admin?`)) {
         mutateAdmin(a.id, { is_super: true }, 'Promoted');
       }
     };
     actions.appendChild(promote);
+  } else if (overSupers && !a.locked) {
+    // The way back from a promotion. Shown only where it will work: a company's own
+    // super admins cannot demote each other, and a button that always refuses is noise.
+    const demote = el('<button class="btn btn-secondary btn-block" style="margin-bottom:10px">Remove super admin role</button>');
+    demote.onclick = async () => {
+      if (await confirmAction(`Make ${name} a regular admin? They keep their access but can no longer manage admins.`)) {
+        mutateAdmin(a.id, { is_super: false }, 'Now a regular admin');
+      }
+    };
+    actions.appendChild(demote);
   }
   wrap.appendChild(actions);
 
   const remove = el('<button class="btn btn-danger btn-block">Remove admin</button>');
   if (isSelf) disable(remove, "You can't remove yourself.");
-  else if (a.is_super) disable(remove, "Super admins can't be removed here.");
+  else if (a.locked) disable(remove, LOCKED);
+  else if (a.is_super && !overSupers) disable(remove, "Super admins can't be removed here.");
   else remove.onclick = async () => {
-    if (!await confirmAction(`Remove ${a.full_name || 'this admin'}?`)) return;
+    if (!await confirmAction(`Remove ${name}?`)) return;
     try {
       await post(`/admins/${a.id}/remove`, { confirm: true });
       invalidate('/admins');
