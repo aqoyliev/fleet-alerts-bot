@@ -44,7 +44,15 @@ _MIGRATIONS = [
 
 async def init_pool():
     global pool
-    pool = await asyncpg.create_pool(config.DATABASE_URL)
+    # min_size=1, not asyncpg's default of 10. The default opens ten connections at
+    # startup and holds them for the life of the process, so a bot that spends most of
+    # the day waiting for a webhook kept ten idle backends alive on the Postgres server
+    # — paid for by the memory they hold, on both sides, all month.
+    #
+    # max_size stays at ten, so a burst of events still gets ten connections; the pool
+    # closes whatever it opened once it has been idle for max_inactive_connection_lifetime
+    # (asyncpg's default, five minutes) and shrinks back to one.
+    pool = await asyncpg.create_pool(config.DATABASE_URL, min_size=1, max_size=10)
 
 
 async def run_migrations():
