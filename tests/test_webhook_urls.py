@@ -34,6 +34,9 @@ async def _handler_for(app, method, path):
 @pytest.mark.parametrize("path", [
     "/webhook/samsara",
     "/webhook/samsara/hf",        # where HF's Samsara dashboard has always delivered
+    "/webhook/samsara/mzcargo",   # MZ's, under each spelling the company has gone by
+    "/webhook/samsara/mz_cargo",
+    "/webhook/samsara/mz-cargo",
     "/webhook/samsara/anything",  # the segment is ignored, not checked
 ])
 async def test_samsara_paths_reach_the_samsara_handler(app, path):
@@ -43,7 +46,10 @@ async def test_samsara_paths_reach_the_samsara_handler(app, path):
 @pytest.mark.parametrize("path", [
     "/webhook/motive",
     "/webhook/motive/hf",
+    "/webhook/motive/mzcargo",   # Motive is live on MZ: this one is not hypothetical
+    "/webhook/motive/mz_cargo",
     "/webhook/hf",     # the oldest form, from before Samsara was supported at all
+    "/webhook/mzcargo",
     "/webhook",
 ])
 async def test_motive_paths_reach_the_motive_handler(app, path):

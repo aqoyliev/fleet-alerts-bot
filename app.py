@@ -7,6 +7,7 @@ from utils.set_bot_commands import set_default_commands
 from utils.webhook_handler import start_webhook_server, resume_pending_crash_confirmations
 from utils.db_api import init_pool, close_pool, run_migrations
 from utils.db_api.groups import ensure_group
+from utils.db_api.legacy import adopt_legacy_company
 from utils.db_api.admins import seed_super_admins
 from utils.daily_report import schedule_daily_reports
 from data import config
@@ -31,6 +32,7 @@ def _admin_ids() -> list[int]:
 async def on_startup(dispatcher):
     await init_pool()
     await run_migrations()
+    await adopt_legacy_company()
     await ensure_group()
     await seed_super_admins(_admin_ids())
     await set_default_commands(dispatcher)

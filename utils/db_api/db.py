@@ -44,11 +44,15 @@ async def run_migrations():
 
     # What a database from the old multi-company schema needs before this build can
     # write to it. Imported here because legacy.py is built on this module's helpers.
-    from utils.db_api.legacy import adopt_legacy_violations
-    try:
-        await adopt_legacy_violations()
-    except Exception as e:
-        logger.error(f"could not adapt the legacy violations table: {e}", exc_info=True)
+    # Each on its own: the two tables are unrelated, and one that cannot be adapted is
+    # no reason to leave the other refusing inserts.
+    from utils.db_api.legacy import adopt_legacy_crash_confirmations, adopt_legacy_violations
+    for adopt, table in ((adopt_legacy_violations, "violations"),
+                         (adopt_legacy_crash_confirmations, "motive_crash_confirmations")):
+        try:
+            await adopt()
+        except Exception as e:
+            logger.error(f"could not adapt the legacy {table} table: {e}", exc_info=True)
 
 
 async def close_pool():

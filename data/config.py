@@ -43,12 +43,18 @@ HIDDEN_ADMIN_IDS = _id_set(ADMINS)
 DATABASE_URL = env.str("DATABASE_URL")
 
 # ── The company this deployment serves ──────────────────────────────────────────
-# One deployment == one company, and this branch is HAULAGE FREIGHT's. Everything that
-# used to live in the `companies` table is supplied here instead. Both values default to
-# HF's own so that the deployment that already exists keeps booting with the variables it
+# One deployment == one company, and this branch is MZ CARGO's. Everything that used to
+# live in the `companies` table is supplied here instead. Both values default to MZ's
+# own so that the deployment that already exists keeps booting with the variables it
 # already has — set them only to run this branch for somebody else.
-COMPANY_SLUG = env.str("COMPANY_SLUG", "hf")              # short id, used in report filenames
-COMPANY_NAME = env.str("COMPANY_NAME", "HAULAGE FREIGHT LLC")   # display name
+COMPANY_SLUG = env.str("COMPANY_SLUG", "mzcargo")         # short id, used in report filenames
+# The display name, on every report and in the panel's header. Left unset, a deployment
+# upgraded from the old schema shows the name its `companies` row has always carried
+# (see adopt_legacy_company in utils/db_api/legacy.py) and only a fresh database falls
+# back to the default below; setting the variable overrules both.
+_company_name_raw = env.str("COMPANY_NAME", "").strip()
+COMPANY_NAME = _company_name_raw or "MZ CARGO INC"
+COMPANY_NAME_FROM_ENV = bool(_company_name_raw)
 
 # The one Telegram group this deployment posts to. There is no per-unit routing on this
 # branch — that is single-company, which this was taken from — so every vehicle's alerts
@@ -67,7 +73,7 @@ except ValueError:
     GROUP_CHAT_ID = None
 
 # Minimum severity a speeding event must reach to be alerted ("low"/"medium"/"high"/"critical").
-# "medium" is HF's rule and has been since before this was a setting.
+# "medium" is MZ's rule and has been since before this was a setting.
 SPEEDING_MIN_SEVERITY = env.str("SPEEDING_MIN_SEVERITY", "medium")
 
 
@@ -106,7 +112,10 @@ WEBAPP_URL = _resolve_webapp_url(
     env.str("RAILWAY_PUBLIC_DOMAIN", "").strip(),
 )
 
-# ── Samsara (optional — leave blank if this company has no Samsara fleet) ────────
+# MZ CARGO runs both providers: part of the fleet reports through Samsara and part
+# through Motive, into the same group. Each needs its own pair of values below.
+
+# ── Samsara ─────────────────────────────────────────────────────────────────────
 # API key is the bearer token used for the harsh-event poll callback; the webhook
 # secret signs inbound Samsara webhooks.
 SAMSARA_API_KEY = env.str("SAMSARA_API_KEY", "")
@@ -119,7 +128,8 @@ MOTIVE_WEBHOOK_SECRET = env.str("MOTIVE_WEBHOOK_SECRET", "")
 #   * confirming a crash detection before alerting -- Motive withdraws the detections its
 #     review rejects, so absence there is what tells a false crash from a real one; and
 #   * fetching the dashcam clip, which is not ready when the webhook fires.
-# HF is a Samsara fleet and leaves this blank, along with the secret above.
+# Without it every crash goes out marked "Unconfirmed" (the gate fails open) and no
+# Motive alert ever gets its clip.
 MOTIVE_API_KEY = env.str("MOTIVE_API_KEY", "")
 
 # ── Webhook endpoint hardening ──────────────────────────────────────────────────
