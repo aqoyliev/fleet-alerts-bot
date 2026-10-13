@@ -15,6 +15,7 @@ from urllib.parse import urlencode
 import pytest
 
 from data import config
+from data.event_catalog import GROUP_FILTER_TYPES
 from utils.webapp import api, auth
 
 BOT_TOKEN = "123:test"
@@ -260,6 +261,52 @@ async def test_resetting_to_all_writes_the_empty_allowlist(panel):
 async def test_an_invented_event_type_is_rejected(panel):
     resp = await api.toggle_event(
         _Request({"action": "toggle", "event_type": "drop table"}, {"tgid": str(GROUP_ID)}))
+
+    assert resp.status == 400
+    assert panel["event_types"] == []
+
+
+async def test_saving_a_whole_selection_expands_every_row_it_names(panel):
+    """One round trip for a filter that used to cost one per type. The browser sends the
+    rows that were tapped, never a computed allowlist: expanding a row into its provider
+    spellings stays in data/event_catalog.py, where the toggle rule already lives."""
+    resp = await api.toggle_event(_Request(
+        {"action": "set", "event_types": ["speeding", "drowsy_driving"]},
+        {"tgid": str(GROUP_ID)}))
+
+    assert resp.status == 200
+    tgid, written = panel["event_types"][0]
+    assert tgid == GROUP_ID
+    # Both spellings of drowsiness, or Motive's rows stop arriving in that group.
+    assert written == {"speeding", "drowsy_driving", "drowsiness"}
+    assert _body(resp)["filter_mode"] == "custom"
+
+
+async def test_a_selection_covering_everything_collapses_to_all(panel):
+    """The collapse rule is what keeps a group receiving event types added later, and it
+    must apply to a batch save exactly as it applies to the last toggle of a set."""
+    every = [types[0] for types, _, _ in GROUP_FILTER_TYPES]
+    resp = await api.toggle_event(
+        _Request({"action": "set", "event_types": every}, {"tgid": str(GROUP_ID)}))
+
+    assert panel["event_types"] == [(GROUP_ID, set())]
+    assert _body(resp)["filter_mode"] == "all"
+
+
+async def test_an_empty_selection_is_refused_rather_than_meaning_everything(panel):
+    """An empty allowlist is how this schema spells "every type", so saving an empty
+    selection would deliver the exact opposite of what was asked, silently."""
+    resp = await api.toggle_event(
+        _Request({"action": "set", "event_types": []}, {"tgid": str(GROUP_ID)}))
+
+    assert resp.status == 400
+    assert panel["event_types"] == []
+
+
+async def test_a_batch_save_validates_every_token(panel):
+    resp = await api.toggle_event(_Request(
+        {"action": "set", "event_types": ["speeding", "drop table"]},
+        {"tgid": str(GROUP_ID)}))
 
     assert resp.status == 400
     assert panel["event_types"] == []

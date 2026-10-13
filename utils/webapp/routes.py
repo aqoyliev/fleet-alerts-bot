@@ -55,7 +55,6 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/panel/api/alerts", api.alerts)
     app.router.add_get("/panel/api/units", api.units)
     app.router.add_get("/panel/api/admins", api.admins)
-    app.router.add_get("/panel/api/report", api.report)
     app.router.add_get("/panel/api/settings", api.settings)
 
     # Mutations are POST even where PATCH/DELETE would read better. Telegram's WebView

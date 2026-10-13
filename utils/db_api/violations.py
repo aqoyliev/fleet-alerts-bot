@@ -99,23 +99,40 @@ async def get_vehicle_breakdown(vehicle_number: str, since,
 # panel answers "what is the fleet doing" — widening the existing ones would put an
 # optional vehicle filter on queries whose whole purpose is that the filter is required.
 
-async def get_totals(since, until) -> dict:
+def _scope_clause(scope: str | None, column: str = "event_type") -> str:
+    """SQL narrowing a panel aggregate to one report scope: all, speeding, or everything
+    else.
+
+    The same three values get_top_violators has always taken, named here so the numbers
+    screen can put a single scope control over every figure on it rather than over the
+    ranking alone. Interpolated into the query text rather than bound, like the clauses
+    in that function: the fragment is chosen from a closed set in this module and the
+    caller's string only ever selects between them -- it never reaches the SQL.
+    """
+    if scope == "speeding":
+        return f"AND {column} = 'speeding'"
+    if scope == "other":
+        return f"AND {column} <> 'speeding'"
+    return ""
+
+
+async def get_totals(since, until, scope: str | None = None) -> dict:
     """The dashboard's headline numbers, in one round trip rather than four."""
     row = await db.fetchrow(
-        """
+        f"""
         SELECT COUNT(*)                                         AS total,
                COUNT(*) FILTER (WHERE event_type =  'speeding') AS speeding,
                COUNT(*) FILTER (WHERE event_type =  'crash')    AS crashes,
                COUNT(DISTINCT vehicle_number)                   AS units
         FROM violations
-        WHERE occurred_at >= $1 AND occurred_at < $2
+        WHERE occurred_at >= $1 AND occurred_at < $2 {_scope_clause(scope)}
         """,
         since, until,
     )
     return dict(row) if row else {"total": 0, "speeding": 0, "crashes": 0, "units": 0}
 
 
-async def get_type_counts(since, until) -> list[dict]:
+async def get_type_counts(since, until, scope: str | None = None) -> list[dict]:
     """Fleet-wide count per event type, for the dashboard's bar list.
 
     get_violations_by_type is per (type, vehicle) because the daily digest needs that
@@ -123,10 +140,10 @@ async def get_type_counts(since, until) -> list[dict]:
     row per vehicle to draw sixteen bars.
     """
     rows = await db.fetch(
-        """
+        f"""
         SELECT event_type, COUNT(*) AS total
         FROM violations
-        WHERE occurred_at >= $1 AND occurred_at < $2
+        WHERE occurred_at >= $1 AND occurred_at < $2 {_scope_clause(scope)}
         GROUP BY event_type
         ORDER BY total DESC
         """,
@@ -135,7 +152,7 @@ async def get_type_counts(since, until) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def get_daily_counts(since, until) -> list[dict]:
+async def get_daily_counts(since, until, scope: str | None = None) -> list[dict]:
     """Per-day totals for the dashboard trend, with quiet days present as zeroes.
 
     generate_series is what puts the zeroes in, and it matters: a week with nothing on
@@ -151,7 +168,7 @@ async def get_daily_counts(since, until) -> list[dict]:
     quietly disagree with the numbers the same fleet reads in its /report message.
     """
     rows = await db.fetch(
-        """
+        f"""
         SELECT d::date AS day, COUNT(v.id) AS total
         FROM generate_series(
                  ($1 AT TIME ZONE 'America/New_York')::date,
@@ -160,6 +177,7 @@ async def get_daily_counts(since, until) -> list[dict]:
         LEFT JOIN violations v
                ON v.occurred_at >= $1 AND v.occurred_at < $2
               AND (v.occurred_at AT TIME ZONE 'America/New_York')::date = d::date
+              {_scope_clause(scope, "v.event_type")}
         GROUP BY d
         ORDER BY d
         """,
@@ -169,7 +187,7 @@ async def get_daily_counts(since, until) -> list[dict]:
 
 
 async def get_recent_events(limit: int = 50, before_ts=None, before_id: int | None = None,
-                            event_type: str | None = None,
+                            event_types: list[str] | None = None,
                             vehicle_number: str | None = None) -> list[dict]:
     """The fleet-wide alert feed, newest first.
 
@@ -180,18 +198,24 @@ async def get_recent_events(limit: int = 50, before_ts=None, before_id: int | No
 
     Filters are bound parameters, never interpolated — unlike the closed-set type_clause
     above, these values come from a browser.
+
+    `event_types` is a list rather than one string because a filter the user sees as one
+    thing is often several stored types: "Camera Obstructed" is three provider spellings
+    and "Drowsiness" is two (data/event_catalog.py). Matching one of them exactly meant
+    a chip that could only ever find the provider whose name happened to be the row's
+    first — so on a Samsara fleet the camera chip matched nothing at all.
     """
     rows = await db.fetch(
         """
         SELECT id, vehicle_number, event_type, severity, occurred_at
         FROM violations
         WHERE ($1::timestamptz IS NULL OR (occurred_at, id) < ($1, $2::bigint))
-          AND ($3::text IS NULL OR event_type = $3)
+          AND ($3::text[] IS NULL OR event_type = ANY($3))
           AND ($4::text IS NULL OR vehicle_number = $4)
         ORDER BY occurred_at DESC, id DESC
         LIMIT $5
         """,
-        before_ts, before_id, event_type, vehicle_number, limit,
+        before_ts, before_id, event_types, vehicle_number, limit,
     )
     return [dict(r) for r in rows]
 

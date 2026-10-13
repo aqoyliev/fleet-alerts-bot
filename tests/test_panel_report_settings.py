@@ -137,19 +137,68 @@ async def test_an_unknown_event_type_is_refused(panel):
 # ── the report ──────────────────────────────────────────────────────────────────
 
 async def test_an_unknown_period_falls_back_rather_than_failing(panel):
-    """A read, from a query string, on a screen that is useless while it errors. The
-    three periods are a closed set, so anything else is simply not one of them."""
-    asked = []
+    """A read, from a query string, on the screen that is useless while it errors. The
+    periods and scopes are closed sets, so anything else is simply not one of them — and
+    the scope reaches a SQL fragment, so "not one of them" has to mean the empty one."""
+    scopes = []
 
-    async def _top(period, scope, limit=10):
-        asked.append((period, scope))
+    async def _totals(since, until, scope=None):
+        scopes.append(scope)
+        return {"total": 0, "speeding": 0, "crashes": 0, "units": 0}
+
+    async def _rows(since, until, scope=None):
+        scopes.append(scope)
         return []
 
-    panel.setattr(api, "top_units", _top)
-    data = _payload(await api.report(_Request(query={"period": "../etc", "type": "x"})))
+    async def _top(since=None, until=None, event_type=None, limit=10):
+        scopes.append(event_type)
+        return []
 
-    assert asked == [("last_week", "")]
-    assert data["period"]["key"] == "last_week"
+    async def _groups():
+        return []
+
+    panel.setattr(api, "get_totals", _totals)
+    panel.setattr(api, "get_type_counts", _rows)
+    panel.setattr(api, "get_daily_counts", _rows)
+    panel.setattr(api, "get_top_violators", _top)
+    panel.setattr(api, "get_groups_overview", _groups)
+
+    data = _payload(await api.stats(
+        _Request(query={"period": "../etc", "type": "' OR 1=1"})))
+
+    assert data["period"]["key"] == "today"
+    assert data["type"] == ""
+    assert set(scopes) <= {"", None}
+
+
+async def test_the_calendar_periods_the_report_file_supports_are_marked(panel):
+    """The screen offers five windows and the downloadable file supports two of them.
+    Which is which is the server's to say, not something the client should hard-code a
+    second time."""
+    async def _totals(since, until, scope=None):
+        return {"total": 0, "speeding": 0, "crashes": 0, "units": 0}
+
+    async def _rows(since, until, scope=None):
+        return []
+
+    async def _top(since=None, until=None, event_type=None, limit=10):
+        return []
+
+    async def _groups():
+        return []
+
+    panel.setattr(api, "get_totals", _totals)
+    panel.setattr(api, "get_type_counts", _rows)
+    panel.setattr(api, "get_daily_counts", _rows)
+    panel.setattr(api, "get_top_violators", _top)
+    panel.setattr(api, "get_groups_overview", _groups)
+
+    for period, downloadable in (("today", True), ("7d", False), ("30d", False),
+                                 ("last_week", True), ("last_month", True)):
+        data = _payload(await api.stats(_Request(query={"period": period})))
+        assert data["period"]["key"] == period
+        assert data["period"]["downloadable"] is downloadable, period
+        assert data["period"]["range"]
 
 
 async def test_the_report_file_goes_to_the_caller_and_nobody_else(panel):
@@ -203,3 +252,46 @@ async def test_a_chat_that_cannot_be_reached_is_said_out_loud(panel):
 
     assert resp.status == 502
     assert "/start" in _payload(resp)["message"]
+
+
+# ── the feed's filter chips ─────────────────────────────────────────────────────
+
+async def test_a_feed_chip_matches_every_spelling_behind_its_label(panel):
+    """The chips are the catalog's rows, and a row can be several provider spellings.
+    Matching the row's first type exactly meant the Camera Obstructed chip could only
+    ever find Motive's road-facing events — on a Samsara-only fleet, which stores
+    `obstructed_camera`, it returned an empty feed every time."""
+    asked = []
+
+    async def _recent(limit=50, before_ts=None, before_id=None, event_types=None,
+                      vehicle_number=None):
+        asked.append(event_types)
+        return []
+
+    panel.setattr(api, "get_recent_events", _recent)
+
+    await api.alerts(_Request(query={"type": "road_facing_cam_obstruction"}))
+    assert set(asked[-1]) == {"road_facing_cam_obstruction",
+                              "driver_facing_cam_obstruction", "obstructed_camera"}
+
+    await api.alerts(_Request(query={"type": "drowsy_driving"}))
+    assert set(asked[-1]) == {"drowsy_driving", "drowsiness"}
+
+
+async def test_a_type_outside_the_catalog_still_filters_on_itself(panel):
+    """Crash is deliberately absent from GROUP_FILTER_TYPES — it is never a per-group
+    filter — but it is the one alert anybody opens this feed to find."""
+    asked = []
+
+    async def _recent(limit=50, before_ts=None, before_id=None, event_types=None,
+                      vehicle_number=None):
+        asked.append(event_types)
+        return []
+
+    panel.setattr(api, "get_recent_events", _recent)
+
+    await api.alerts(_Request(query={"type": "crash"}))
+    assert asked[-1] == ["crash"]
+
+    await api.alerts(_Request(query={}))
+    assert asked[-1] is None

@@ -80,3 +80,22 @@ def next_event_filter(current: set[str], toggled: str) -> set[str]:
     if result >= GROUP_FILTER_TYPE_SET:
         return set()
     return result
+
+
+def expand_tokens(tokens) -> set[str]:
+    """Every real event type covered by a set of row tokens.
+
+    The batch counterpart of next_event_filter, here for the same reason it is: the
+    collapse rule -- an allowlist that covers every filterable type becomes the empty
+    "all types" state -- must have exactly one implementation. A second one in the
+    browser would drift, and a group whose filter was saved by the drifted copy would
+    quietly stop receiving event types added later.
+
+    Unknown tokens contribute nothing; validate them in the caller, which can say so.
+    """
+    result: set[str] = set()
+    for token in tokens:
+        result |= _TOKEN_GROUPS.get(token, frozenset())
+    if result >= GROUP_FILTER_TYPE_SET:
+        return set()
+    return result

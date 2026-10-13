@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 from aiohttp import web
 
 from data import config
-from data.event_catalog import GROUP_FILTER_TYPES, next_event_filter
+from data.event_catalog import GROUP_FILTER_TYPES, expand_tokens, next_event_filter
 from loader import bot
 from utils.db_api.admins import (
     add_admin, delete_admin, demote_from_super, get_admin_by_id, get_admin_subscriptions,
@@ -49,7 +49,7 @@ from utils.units import (
 )
 from utils.violation_report import (
     EVENT_SCOPES, PERIOD_LABELS, build_report_file, date_range_label, period_label,
-    period_range, report_filename, top_units,
+    period_range, report_filename,
 )
 from utils.webapp.auth import require_admin, require_super
 
@@ -113,20 +113,31 @@ def _int_param(request: web.Request, name: str) -> int | None:
         return None
 
 
-def _period_range(period: str) -> tuple[datetime, datetime, str]:
-    """(since, until, label) for the dashboard's three windows, in Eastern time.
+# Every window the numbers screen offers, rolling and calendar in one table.
+#
+# The panel used to have only the three rolling windows and the report only the two
+# calendar ones, on the reasoning that a live panel answers "how are we doing right now"
+# and a report answers "what happened last week". Both are true, and while the two lived
+# on separate screens the split was invisible. They are one screen now, and a dispatcher
+# who reads "Top units, last 7 days" and then downloads "last week" gets two different
+# answers to one question -- so the panel offers both windows explicitly and labels which
+# is which, instead of choosing silently.
+_ROLLING = {"today": (0, "Today"), "7d": (6, "Last 7 days"), "30d": (29, "Last 30 days")}
+PANEL_PERIODS = ("today", "7d", "30d", "last_week", "last_month")
+# What the scope control over the whole screen may say; the same three get_top_violators
+# has always taken.
+PANEL_SCOPES = ("", "speeding", "other")
 
-    Deliberately not the same set as the DM report's today/last_week/last_month
-    (handlers/users/violations.py): "last week" on a Monday morning is not the question a
-    dispatcher opening a live panel is asking. Rolling windows are.
-    """
+
+def _period_range(period: str) -> tuple[datetime, datetime, str]:
+    """(since, until, label) for one of the panel's windows, in Eastern time."""
+    if period in ("last_week", "last_month"):
+        since, until = period_range(period)
+        return since, until, period_label(period)
+    days, label = _ROLLING.get(period, _ROLLING["today"])
     now = datetime.now(tz=ET)
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    if period == "30d":
-        return midnight - timedelta(days=29), now, "Last 30 days"
-    if period == "7d":
-        return midnight - timedelta(days=6), now, "Last 7 days"
-    return midnight, now, "Today"
+    return (midnight - timedelta(days=days) if days else midnight), now, label
 
 
 def _event_label(event_type: str) -> tuple[str, str]:
@@ -148,6 +159,30 @@ def _is_reserved(telegram_group_id: int) -> bool:
 
 # ── reads ───────────────────────────────────────────────────────────────────────
 
+_bot_username: str | None = None
+
+
+async def _username() -> str:
+    """The bot's @name, for t.me/<bot>?startgroup=true.
+
+    Adding the bot to a chat is the one setup step the panel genuinely cannot perform --
+    Telegram has no API for a bot to put itself in a group. It does have a deep link that
+    opens the user's own chat picker and does it in one tap, and that link needs the
+    username. Asked once and kept: it changes about as often as the bot token.
+
+    A failure is not cached, so a panel opened during a Telegram outage is not stuck
+    without the link for the life of the process.
+    """
+    global _bot_username
+    if _bot_username is None:
+        try:
+            _bot_username = (await bot.get_me()).username or ""
+        except Exception as e:
+            logger.warning(f"[webapp] get_me failed, no group link this time: {e}")
+            return ""
+    return _bot_username
+
+
 @require_admin
 async def bootstrap(request: web.Request) -> web.Response:
     """Everything the shell needs to render before it knows anything else.
@@ -168,6 +203,7 @@ async def bootstrap(request: web.Request) -> web.Response:
             "is_owner": is_maintainer(telegram_id),
         },
         "company": {"name": config.COMPANY_NAME, "slug": config.COMPANY_SLUG},
+        "bot_username": await _username(),
         "event_types": [
             {"type": types[0], "emoji": emoji, "label": label}
             for types, emoji, label in GROUP_FILTER_TYPES
@@ -180,17 +216,40 @@ async def bootstrap(request: web.Request) -> web.Response:
 
 @require_admin
 async def stats(request: web.Request) -> web.Response:
-    since, until, label = _period_range(request.query.get("period", "today"))
-    totals = await get_totals(since, until)
-    by_type = await get_type_counts(since, until)
-    top_units = await get_top_violators(since=since, until=until, limit=5)
-    by_day = await get_daily_counts(since, until) if since.date() != until.date() else []
+    """Everything the numbers screen shows, for one window and one scope.
+
+    One endpoint rather than two. The panel used to read this for its dashboard and a
+    second endpoint for its report, which is how it ended up showing two rankings of the
+    same thing with different numbers on one scroll.
+    """
+    period = request.query.get("period", "today")
+    if period not in PANEL_PERIODS:
+        period = "today"
+    scope = request.query.get("type", "")
+    if scope not in PANEL_SCOPES:
+        scope = ""
+
+    since, until, label = _period_range(period)
+    totals = await get_totals(since, until, scope)
+    by_type = await get_type_counts(since, until, scope)
+    top_units = await get_top_violators(since=since, until=until,
+                                        event_type=scope or None, limit=10)
+    by_day = (await get_daily_counts(since, until, scope)
+              if since.date() != until.date() else [])
 
     groups = await get_groups_overview()
     muted = [g for g in groups if not g["enabled"]]
+    # Coverage, from the list this handler already has in hand -- no second query. It is
+    # on the numbers screen because "18 of 20 groups are pointed at a truck" is a number,
+    # and because the two that are not are the reason some of the others read zero.
+    unpaired = [g for g in groups if not g["is_main"] and not g["vehicle_number"]]
 
     return _ok({
-        "period": {"key": request.query.get("period", "today"), "label": label},
+        "period": {"key": period, "label": label,
+                   "range": date_range_label(since, until),
+                   "downloadable": period in PERIOD_LABELS},
+        "type": scope,
+        "scope_label": EVENT_SCOPES[scope],
         "totals": dict(totals),
         "by_type": [
             {**row, "emoji": _event_label(row["event_type"])[0],
@@ -199,8 +258,15 @@ async def stats(request: web.Request) -> web.Response:
         ],
         "by_day": by_day,
         "top_units": top_units,
-        "groups": {"total": len(groups), "muted": len(muted),
-                   "muted_titles": [g["title"] or str(g["telegram_group_id"]) for g in muted[:5]]},
+        "groups": {
+            "total": len(groups),
+            "muted": len(muted),
+            "muted_titles": [g["title"] or str(g["telegram_group_id"]) for g in muted[:5]],
+            "unpaired": len(unpaired),
+            "unpaired_titles": [g["title"] or str(g["telegram_group_id"])
+                                for g in unpaired[:5]],
+            "with_unit": len(groups) - len(unpaired),
+        },
     })
 
 
@@ -252,9 +318,16 @@ async def alerts(request: web.Request) -> web.Response:
     except ValueError:
         return _fail("bad_cursor", "That page cursor isn't valid.")
 
+    # One chip, every spelling behind it. The filter chips are the catalog's rows and a
+    # row can carry several real event types; expand_tokens is the same function the group
+    # filter uses, so the feed and the filter agree about what a label means. A token that
+    # is not a catalog row -- crash is deliberately not one -- stands for itself.
+    token = request.query.get("type") or None
+    event_types = sorted(expand_tokens([token])) or [token] if token else None
+
     rows = await get_recent_events(
         limit=limit, before_ts=before_ts, before_id=before_id,
-        event_type=request.query.get("type") or None,
+        event_types=event_types,
         vehicle_number=request.query.get("unit") or None,
     )
     items = [
@@ -337,28 +410,6 @@ async def settings(request: web.Request) -> web.Response:
         rows.append({"type": types_[0], "emoji": emoji, "label": label,
                      "on": any(t in subscribed for t in types_)})
     return _ok({"notifications": rows})
-
-
-@require_admin
-async def report(request: web.Request) -> web.Response:
-    """The ranked units behind the DM report, for the panel's Report screen."""
-    period = request.query.get("period", "last_week")
-    if period not in PERIOD_LABELS:
-        period = "last_week"
-    scope = request.query.get("type", "")
-    if scope not in EVENT_SCOPES:
-        scope = ""
-
-    rows = await top_units(period, scope, limit=10)
-    since, until = period_range(period)
-    return _ok({
-        "period": {"key": period, "label": period_label(period),
-                   "range": date_range_label(since, until)},
-        "type": scope,
-        "scope_label": EVENT_SCOPES[scope],
-        "rows": rows,
-        "total": sum(r["total"] for r in rows),
-    })
 
 
 @require_admin
@@ -492,14 +543,19 @@ async def _tell_group_its_unit(group: dict, unit: str) -> None:
 
 @require_admin
 async def toggle_event(request: web.Request) -> web.Response:
-    """Flip one event type in a group's filter, or reset it to "all".
+    """Change a group's event filter: flip one type, set the whole list, or reset to
+    "all".
 
-    The toggle rule lives in next_event_filter and stays there. Batching the changes in
-    the browser and saving once would mean reimplementing its collapse rule — "an
-    allowlist covering every type becomes the empty all-types state" — in JavaScript,
-    and when the two drifted, a group would quietly stop receiving newly added event
-    types with nothing in the UI to show for it. So each tap is a round trip and the
-    response carries the authoritative list the client re-renders from.
+    Every one of those is decided in data/event_catalog.py and stays there. Batching in
+    the browser and saving a computed allowlist would mean reimplementing the collapse
+    rule -- "an allowlist covering every type becomes the empty all-types state" -- in
+    JavaScript, and when the two drifted a group would quietly stop receiving newly
+    added event types with nothing in the UI to show for it.
+
+    So "set" sends the tokens the user picked, not a computed filter: the browser says
+    what was tapped and the server says what that means. That is what makes one round
+    trip safe where fifteen taps used to be fifteen. Every response carries the
+    authoritative list the client re-renders from.
     """
     group, err = await _load_editable_group(request)
     if err is not None:
@@ -508,12 +564,28 @@ async def toggle_event(request: web.Request) -> web.Response:
     body = await _body(request)
     tgid = group["telegram_group_id"]
 
+    known = {types[0] for types, _, _ in GROUP_FILTER_TYPES}
+
     if body.get("action") == "all":
         await set_group_event_types(tgid, set())
         selected: list[str] = []
+    elif body.get("action") == "set":
+        tokens = body.get("event_types")
+        if not isinstance(tokens, list) or any(t not in known for t in tokens):
+            return _fail("bad_event_type", "That isn't an event type this bot sends.")
+        # An empty allowlist means "every type" in this schema, so saving an empty
+        # selection would turn "send nothing" into "send everything" -- the exact
+        # opposite of what was asked, silently. Muting a group is a different control
+        # and it is on the row above.
+        if not tokens:
+            return _fail("empty_filter", "Pick at least one event type — or mute the "
+                                         "group if it should receive nothing.")
+        updated = expand_tokens(tokens)
+        await set_group_event_types(tgid, updated)
+        selected = sorted(updated)
     else:
         event_type = body.get("event_type")
-        if event_type not in {types[0] for types, _, _ in GROUP_FILTER_TYPES}:
+        if event_type not in known:
             return _fail("bad_event_type", "That isn't an event type this bot sends.")
         current = set(await get_group_event_types(tgid))
         updated = next_event_filter(current, event_type)
