@@ -743,7 +743,8 @@ _CRASH_CONFIRM_PROBES = (60, 120)
 # the footage, rather than a card now and a clip later. Splitting them was the first
 # attempt here and it reads wrong — the video is part of the alert, not a second alert
 # about the same thing — so the cost is paid on latency instead, up to the last mark
-# below. Crash alerts already wait out their confirmation for a comparable reason.
+# below. The one exception is a crash, which on this branch sends its card as soon as it
+# is confirmed and its clip afterwards (see _handle_event): it has waited once already.
 #
 # These marks are a guess at how long transcoding takes, in the shape of
 # _CRASH_CONFIRM_PROBES: each attempt logs what it found, so the real timing can be read
@@ -763,8 +764,16 @@ def _motive_clip_is_coming(event: dict) -> bool:
     cameras (a speeding event, which also carries no `type` to look itself up by), and
     a delivery that already has its URLs needs nothing. Without the API key there is
     nothing to ask, and a Samsara event has its own poll.
+
+    Nor is a crash that Motive withdrew. It goes out as a hard brake (_type_override),
+    and it would qualify on every other count — but being withdrawn means the event is
+    gone from the very listing the clip is fetched from, so each probe would come back
+    absent and the alert would sit out the whole wait to arrive with nothing. Withdrawn
+    detections are most of what Motive's crash webhook sends, so that is not a corner.
     """
     if event.get("_source") == "samsara" or not config.MOTIVE_API_KEY:
+        return False
+    if event.get("_type_override"):
         return False
     if not (event.get("type") or "").strip():
         return False
@@ -1053,21 +1062,38 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
 
         video_urls, image_urls = _get_camera_media_info(event)
         if _motive_clip_is_coming(event):
+            if event_type == "crash":
+                # Every other Motive alert waits for its clip and goes out as one
+                # message. A crash does not get to: it has already been held three
+                # minutes for confirmation, and the clip can be ten more behind that.
+                # So it takes the shape a Samsara crash has above — the whole card now,
+                # to everyone, and the footage after it under a short caption. MZ's
+                # crash alerts have always arrived once the confirmation was in, and
+                # waiting for video is not allowed to make that later.
+                await _send_all(bot, [*group_ids, *dm_ids],
+                                _format_crash_initial(event, company_display))
+                crash_card_sent = True
+                # Motive's delivery carries the location from the start, so the clip
+                # brings nothing the first card lacked and its caption stays short.
+                crash_first_had_location = True
+                logger.info(f"[motive] Crash card sent ahead of its clip → "
+                            f"{len(group_ids) + len(dm_ids)} target(s) id={event_id}")
             video_urls, image_urls = await _wait_for_motive_clip(event)
 
+        source_tag = event.get("_source") or "motive"
         if crash_card_sent:
             # The full details already went out at first detection (to everyone). The
             # follow-up is ONLY the video. With no media there's no clip to send — but
             # the first alert's "Video pending…" line leaves recipients waiting, so
             # send a short closure note to the same crash targets.
             if not video_urls and not image_urls:
-                logger.info(f"[samsara] Crash had no media — sending no-video closure note id={event_id}")
+                logger.info(f"[{source_tag}] Crash had no media — sending no-video closure note id={event_id}")
                 await _send_all(bot, [*group_ids, *dm_ids], "📹 <i>No video available for this crash.</i>")
                 return
             if not crash_first_had_location and event.get("location"):
                 # Location wasn't ready for the first alert but is now — send the full
                 # card as the video caption so recipients still get it.
-                logger.info(f"[samsara] Location resolved after first crash alert — using full caption id={event_id}")
+                logger.info(f"[{source_tag}] Location resolved after first crash alert — using full caption id={event_id}")
                 text = _format_event(event, company_display)
             else:
                 text = _format_crash_video_caption(event)
