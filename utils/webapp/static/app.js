@@ -1248,6 +1248,27 @@ async function fleetScreen(opts) {
     wrap.appendChild(card);
   }
 
+  const searchWrap = el(`<div class="search-wrap">
+      <span class="search-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/>
+        <path d="m20 20-3.5-3.5"/></svg></span>
+      <input class="input" placeholder="Search groups or units" inputmode="search"
+             value="${esc(state.groupsQuery)}">
+      <button class="search-clear" aria-label="Clear search" hidden>✕</button>
+    </div>`);
+  const search = searchWrap.querySelector('input');
+  const clear = searchWrap.querySelector('.search-clear');
+  // A search box over three rows is 56px of the first screen spent filtering a list you
+  // can already see all of. It appears when the biggest section is long enough to need
+  // it — and once it is on screen it stays, whatever the filter is narrowed to.
+  //
+  // It sits above the sections because it searches past them: the sections are three
+  // ways of looking through one fleet, not three places a group can be.
+  if (Math.max(counts.active, counts.unpaired, counts.unconnected) > 8
+      || state.groupsQuery) {
+    wrap.appendChild(searchWrap);
+  }
+
   const seg = el('<div class="segmented segmented-stack" role="tablist"></div>');
   GROUP_FILTERS.forEach(([key, label]) => {
     const on = key === state.groupsFilter;
@@ -1274,24 +1295,6 @@ async function fleetScreen(opts) {
   });
   wrap.appendChild(seg);
 
-  const searchWrap = el(`<div class="search-wrap">
-      <span class="search-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-        stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/>
-        <path d="m20 20-3.5-3.5"/></svg></span>
-      <input class="input" placeholder="Search groups or units" inputmode="search"
-             value="${esc(state.groupsQuery)}">
-      <button class="search-clear" aria-label="Clear search" hidden>✕</button>
-    </div>`);
-  const search = searchWrap.querySelector('input');
-  const clear = searchWrap.querySelector('.search-clear');
-  // A search box over three rows is 56px of the first screen spent filtering a list you
-  // can already see all of. It appears when the biggest section is long enough to need
-  // it — and once it is on screen it stays, whatever the filter is narrowed to.
-  if (Math.max(counts.active, counts.unpaired, counts.unconnected) > 8
-      || state.groupsQuery) {
-    wrap.appendChild(searchWrap);
-  }
-
   const head = el('<div class="list-head"></div>');
   wrap.appendChild(head);
 
@@ -1309,7 +1312,7 @@ async function fleetScreen(opts) {
   function emptyFor(tab, query) {
     if (query) {
       return el(`<div class="empty"><span class="empty-emoji">🔍</span>
-        No groups match "${esc(query)}".</div>`);
+        <p>Nothing matches "${esc(query)}" — no group title, no unit.</p></div>`);
     }
     if (tab === 'unpaired') {
       return el(`<div class="empty"><span class="empty-emoji">✅</span>
@@ -1322,7 +1325,7 @@ async function fleetScreen(opts) {
 
   /** Roster units with no Telegram group at all — the coverage gap no per-group list can
    *  show, because a missing group has nowhere in one to appear. */
-  function renderUnconnected(query) {
+  function renderUnconnected() {
     if (!roster) {
       head.innerHTML = '';
       listWrap.appendChild(el(`<div class="empty"><span class="spinner"></span>
@@ -1335,14 +1338,20 @@ async function fleetScreen(opts) {
         ${esc(roster.reason || 'The unit roster is unavailable.')}</div>`));
       return;
     }
-    const q = query.trim().toLowerCase();
-    const units = strayUnits.filter((u) => !q || u.name.toLowerCase().includes(q));
-    head.innerHTML = `<span>${num(units.length)} unit${units.length === 1 ? '' : 's'}</span>`;
-    if (!units.length) {
+    head.innerHTML = `<span>${num(strayUnits.length)} unit${
+      strayUnits.length === 1 ? '' : 's'}</span>`;
+    if (!strayUnits.length) {
       listWrap.appendChild(el(`<div class="empty"><span class="empty-emoji">✅</span>
-        ${query ? `No units match "${esc(query)}".` : 'Every unit has a group.'}</div>`));
+        Every unit has a group.</div>`));
       return;
     }
+    listWrap.appendChild(unitChipsCard(strayUnits));
+  }
+
+  /** The chips for roster units with no group. Its own function because a search finds
+   *  these too: "Search groups or units" has to mean it, and a unit with no group yet is
+   *  exactly the one somebody types the number of. */
+  function unitChipsCard(units) {
     const card = el('<div class="card"></div>');
     const chips = el('<div class="chips"></div>');
     const linkable = !!(state.boot.bot_username && tg && tg.openTelegramLink);
@@ -1364,39 +1373,68 @@ async function fleetScreen(opts) {
       : `<div class="note">These trucks have no Telegram group receiving their alerts.
          Add the bot to that truck's group chat — it appears here straight away, and
          you can set its unit from its page.</div>`));
-    listWrap.appendChild(card);
+    return card;
+  }
+
+  /** Every group whose title or unit matches, wherever it sits, and the roster units
+   *  with no group at all.
+   *
+   *  The search used to run inside the section the user happened to be standing in, so
+   *  typing a unit number on Active answered "No groups match" while the group sat one
+   *  segment over under Unpaired — and a group somebody has to search for is exactly
+   *  the one that is not where they expected it. The sections are suspended while a
+   *  query is on screen rather than silently narrowing the answer. */
+  function renderSearch(q, raw) {
+    const hits = groups.filter((g) => (g.title || '').toLowerCase().includes(q)
+      || (g.vehicle_number || '').toLowerCase().includes(q));
+    const units = strayUnits.filter((u) => u.name.toLowerCase().includes(q));
+    const total = hits.length + units.length;
+
+    // "whole fleet" rather than a count of what was searched: the one thing somebody
+    // needs to be told here is that the answer is not limited to the section they were
+    // standing in when they started typing.
+    head.innerHTML = `<span>${num(total)} result${total === 1 ? '' : 's'}</span>`
+      + '<span>whole fleet</span>';
+
+    if (!total) {
+      listWrap.appendChild(emptyFor(null, raw));
+      return;
+    }
+    if (hits.length) listWrap.appendChild(rowsOf(hits));
+    if (units.length) {
+      listWrap.appendChild(el(`<div class="list-head section-gap"><span>${
+        num(units.length)} unit${units.length === 1 ? '' : 's'} with no group</span></div>`));
+      listWrap.appendChild(unitChipsCard(units));
+    }
   }
 
   function renderList(query) {
     listWrap.innerHTML = '';
     clear.hidden = !query;
-    const tab = state.groupsFilter;
+    const q = query.trim().toLowerCase();
 
+    // The sections are hidden rather than left lit while a query is on screen: "Active"
+    // highlighted above a list holding an unpaired group is a lie about what is being
+    // shown. They sit below the field, so nothing the user is typing into moves.
+    seg.hidden = !!q;
+    if (q) { renderSearch(q, query); return; }
+
+    const tab = state.groupsFilter;
     if (tab === 'unconnected') {
-      renderUnconnected(query);
+      renderUnconnected();
       return;
     }
 
-    const q = query.trim().toLowerCase();
-    const matches = (g) => !q
-      || (g.title || '').toLowerCase().includes(q)
-      || (g.vehicle_number || '').toLowerCase().includes(q);
-
     const inTab = groups.filter((g) => (tab === 'active' ? isActive(g) : isUnpaired(g)));
-    const filtered = inTab.filter(matches);
     const muted = inTab.filter((g) => !g.enabled).length;
 
-    // The noun agrees with the last number in the phrase — "1 of 6 groups", not
-    // "1 of 6 group".
-    const shown = q ? `${num(filtered.length)} of ${num(inTab.length)}` : num(filtered.length);
-    const counted = q ? inTab.length : filtered.length;
-    head.innerHTML = `<span>${shown} group${counted === 1 ? '' : 's'}</span>`
+    head.innerHTML = `<span>${num(inTab.length)} group${inTab.length === 1 ? '' : 's'}</span>`
       + (muted ? `<span class="count-warn">${num(muted)} muted</span>` : '');
 
-    if (!filtered.length) {
-      listWrap.appendChild(emptyFor(tab, query));
+    if (!inTab.length) {
+      listWrap.appendChild(emptyFor(tab, ''));
     } else {
-      listWrap.appendChild(rowsOf(filtered));
+      listWrap.appendChild(rowsOf(inTab));
     }
 
     // On the section that lists what receives alerts, because that is where someone
