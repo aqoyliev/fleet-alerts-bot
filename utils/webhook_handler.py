@@ -20,6 +20,7 @@ from aiogram.utils.exceptions import (
 )
 
 from data import config
+from data.event_catalog import ALERTED_TYPES, EVENT_TYPES, event_title
 from utils.db_api.groups import get_alert_target, migrate_group
 from utils.db_api.violations import save_violation
 from utils.db_api.admins import get_subscribed_admins
@@ -136,31 +137,20 @@ SEVERITY_EMOJI = {
     "severe": "🆘",
 }
 
-# Event type → (emoji, display title). This is MZ's list, and it is shorter than
-# single-company's on purpose: a type that is not here is not alerted on at all (see
-# ALLOWED_TYPES below), and MZ does not want camera obstructions or tailgating in its
-# group. The Samsara alias table further down still names those types — that is how an
-# event of one of them is recognised and dropped, rather than reported as a generic
-# harsh event.
+# Event type → (emoji, display title) for the types THIS deployment alerts on, worded the
+# way its reports and panel word them. Which types those are is the company's rule, not
+# the code's: the core list plus whatever EXTRA_EVENT_TYPES names (data/event_catalog.py
+# holds every type the build knows and decides). A type that is not in here is not
+# alerted on at all — the Samsara alias table further down still names those types, and
+# that is how an event of one of them is recognised and dropped rather than reported as
+# a generic harsh event.
 #
-# The titles are the ones MZ's group has always been shown. hf, which this branch
-# follows, words two of them the way Samsara does ("HARSH BRAKE", "ROLLING STOP"); MZ's
-# fleet is half Motive, whose names for the same things are these.
+# An alert card does not take its title from this map: it uses the wording of whichever
+# provider reported that event (see _format_event). This is for everything that shows a
+# type without an event behind it — ⚙️ Settings, the downloadable report, the panel.
 EVENT_TYPE_MAP = {
-    "hard_brake":                   ("🛑", "HARD BRAKE"),
-    "crash":                        ("💥", "CRASH DETECTED"),
-    "cell_phone":                   ("📵", "CELL PHONE USAGE"),
-    "stop_sign_violation":          ("🛑", "STOP SIGN VIOLATION"),
-    "forward_collision_warning":    ("⚠️", "FORWARD COLLISION WARNING"),
-    "unsafe_parking":               ("🅿️", "UNSAFE PARKING"),
-    "speeding":                     ("🚨", "SPEEDING OVER POSTED"),
-    "harsh_event":                  ("⚠️", "HARSH EVENT"),
-    "inattentive_driving":          ("😵", "INATTENTIVE DRIVING"),
-    "drowsy_driving":               ("😴", "POSSIBLE DROWSINESS"),
-    "harsh_acceleration":           ("🚀", "HARSH ACCELERATION"),
-    "harsh_turn":                   ("↩️", "HARSH TURN"),
-    "hard_cornering":               ("↩️", "HARSH TURN"),
-    "no_seat_belt":                 ("🚫", "NO SEAT BELT"),
+    event_type: event_title(event_type)
+    for event_type in EVENT_TYPES if event_type in ALERTED_TYPES
 }
 
 # Only process these event types — everything else is ignored
@@ -224,13 +214,13 @@ def _to_et(utc_iso: str) -> str:
 def _get_event_type(event: dict) -> str:
     """Determine canonical event type from action or type field.
 
-    A hard brake is a hard brake here, whatever its severity. hf and single-company
-    read a Motive hard_brake of critical severity as a crash and put it through the
-    confirmation wait; MZ never has, and on this branch that reading is left out. MZ is
-    the one fleet actually receiving Motive's deliveries, Motive files its crashes under
-    type `crash`, and a critical hard brake promoted to one would spend three minutes
-    held back only to be found absent from the crash listing and sent as the hard brake
-    it was — or, with Motive's API unreachable, be announced as an unconfirmed CRASH.
+    A hard brake is a hard brake here, whatever its severity. single-company reads a
+    Motive hard_brake of critical severity as a crash and puts it through the
+    confirmation wait, and that reading is left out of this branch. Motive files its
+    crashes under type `crash`, and the confirmation asks Motive's crash listing — so a
+    critical hard brake promoted to one can only spend three minutes held back, be found
+    absent from a listing it was never going to be in, and go out as the hard brake it
+    was; or, with Motive's API unreachable, be announced as an unconfirmed CRASH.
     """
     # Set when Motive's API says a crash detection was withdrawn (see
     # _motive_crash_is_real). Checked first so the downgrade sticks everywhere the type
@@ -310,22 +300,24 @@ def _format_event(
 ) -> str:
     """Render one alert card.
 
-    The title on its own line, then the unit, who and when, then what the event
-    measured, and under a blank line which provider reported it. This is MZ's layout,
-    kept as its group has always seen it, and it differs from hf's in three places:
+    The title on its own line, then who and when, then what the event measured. One
+    layout for every company on this branch; single-company rules its cards into blocks
+    so the two shapes' alerts are told apart at a glance, and that difference is
+    deliberate.
 
-      * the unit stands on a line of its own with no "Vehicle:" label in front of it;
-      * the card is signed "via Samsara" or "via Motive" — MZ runs both, so which of
-        them saw the event is something the reader cannot work out for themselves;
-      * the company's name is not printed, on a crash or on anything else. Every card
-        in this group is this company's. `company_name` is still accepted, so the
-        callers shared with hf need no changes, and is not used.
+    The title is in the wording of the provider that reported this event — Samsara's
+    "HARSH BRAKE" is Motive's "HARD BRAKE" — so a card reads the way the dashboard an
+    admin opens next does.
 
-    `notes` are lines for the very end — "video pending", "no camera media" — set off
-    from the signature by one blank line however many there are.
+    Under one blank line come the footer lines, however many there are: an unconfirmed
+    crash says so, then `notes` ("video pending", "no camera media"), and last, on a
+    fleet that runs both providers, which of them this came from. On a one-provider
+    fleet that line would be the same three words on every card and is left off.
     """
     event_type = _get_event_type(event)
-    emoji, title = EVENT_TYPE_MAP.get(event_type, ("🚨", event_type.upper().replace("_", " ")))
+    source = "samsara" if event.get("_source") == "samsara" else "motive"
+    emoji, title = (event_title(event_type, source)
+                    or ("🚨", event_type.upper().replace("_", " ")))
 
     samsara = samsara or {}
     driver_info = event.get("driver") or event.get("current_driver") or {}
@@ -351,12 +343,16 @@ def _format_event(
     # with a "<" in it would otherwise make Telegram reject the whole card, and a
     # rejected alert is a dropped alert.
     lines = [f"{emoji} <b>{title}</b>\n"]
-    lines.append(_vehicle_markup(event))
+    if company_name and event_type == "crash":
+        lines.append(esc(company_name))
+    lines.append(f"🚛 <b>Vehicle:</b> {_vehicle_markup(event)}")
     # No line at all for an unidentified driver. Samsara's webhooks never name one, so
     # "Driver: Unidentified" would be on nearly every card and say nothing on any.
     if driver:
         lines.append(f"👤 <b>Driver:</b> {esc(driver)}")
-    if sev_display:
+    # A blocked camera has no degree to it; Motive sends a severity with one all the same.
+    if sev_display and event_type not in {"driver_facing_cam_obstruction",
+                                          "road_facing_cam_obstruction"}:
         sev_emoji = SEVERITY_EMOJI.get(sev_display.lower(), "⚠️")
         lines.append(f"📊 <b>Severity:</b> {sev_emoji} {esc(sev_display.title())}")
     lines.append(f"🕐 <b>Time:</b> {esc(start_time)}")
@@ -395,19 +391,17 @@ def _format_event(
         if duration:
             lines.append(f"⏱ <b>Duration:</b> {duration}s")
 
+    foot: list[str] = []
     # Say so when a crash alert went out without Motive's confirmation, so an
     # unverified crash is never mistaken for a verified one.
     if event_type == "crash" and event.get("_crash_unconfirmed"):
+        foot.append("⚠️ <i>Unconfirmed — Motive's review could not be reached.</i>")
+    foot.extend(notes or [])
+    if config.SHOW_PROVIDER:
+        foot.append(f"<i>via {source.title()}</i>")
+    if foot:
         lines.append("")
-        lines.append("⚠️ <i>Unconfirmed — Motive's review could not be reached.</i>")
-
-    source = "Samsara" if event.get("_source") == "samsara" else "Motive"
-    lines.append("")
-    lines.append(f"<i>via {source}</i>")
-
-    if notes:
-        lines.append("")
-        lines.extend(notes)
+        lines.extend(foot)
 
     return "\n".join(lines)
 
@@ -490,7 +484,7 @@ def _format_crash_initial(event: dict, company_name: str = "") -> str:
 def _format_crash_video_caption(event: dict) -> str:
     """Short caption for the crash video follow-up — the full details already went out
     in the first alert, so this just labels the clip."""
-    return f"💥 <b>CRASH</b> — {_vehicle_markup(event)}"
+    return f"💥 <b>CRASH</b> · {_vehicle_markup(event)}"
 
 
 # ── Samsara webhook auth ───────────────────────────────────────────────────────
@@ -1067,9 +1061,9 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
                 # message. A crash does not get to: it has already been held three
                 # minutes for confirmation, and the clip can be ten more behind that.
                 # So it takes the shape a Samsara crash has above — the whole card now,
-                # to everyone, and the footage after it under a short caption. MZ's
-                # crash alerts have always arrived once the confirmation was in, and
-                # waiting for video is not allowed to make that later.
+                # to everyone, and the footage after it under a short caption. A crash
+                # alert arrives once the confirmation is in, and waiting for video is
+                # not allowed to make that later.
                 await _send_all(bot, [*group_ids, *dm_ids],
                                 _format_crash_initial(event, company_display))
                 crash_card_sent = True
@@ -1446,8 +1440,8 @@ def add_webhook_routes(app: web.Application) -> None:
     """Mount the provider webhooks and the health check.
 
     One company per deployment, so the path needs no company in it — but the
-    multi-company build this replaced put one there, and MZ's providers have been
-    delivering to URLs of that form ever since. Those forms are still answered, with
+    multi-company build this replaced put one there, and HF's and MZ's providers have
+    been delivering to URLs of that form ever since. Those forms are still answered, with
     the segment ignored, so that deploying this does not also mean re-pointing the
     provider. A delivery is trusted for its signature, never for its path.
 

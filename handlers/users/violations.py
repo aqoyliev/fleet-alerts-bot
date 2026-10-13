@@ -91,7 +91,7 @@ async def show_violations_menu(message: types.Message):
 
 
 # The callbacks below read their arguments from the END of the callback data. The build
-# this replaced put the company slug first ("viol_etype:mzcargo:speeding"), and those
+# this replaced put the company slug first ("viol_etype:hf:speeding"), and those
 # keyboards are still sitting in admins' chats: read from the right, both forms land on
 # the same values, and a button pressed on last week's message does what it says.
 

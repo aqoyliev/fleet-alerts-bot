@@ -1,9 +1,9 @@
 """The report texts: the nightly digest, /report, /top, and the top-10 header.
 
-These are MZ's own, kept as they were when the branch took hf as its base — the wording
-differs from that branch's on purpose ("Hard Brake" where hf says "Harsh Brake", "Stop
-Sign Violation" where it says "Rolling Stop"), and a merge from it must not quietly
-bring its wording back.
+Two types go by a different name at each provider ("Harsh Brake" / "Hard Brake",
+"Rolling Stop" / "Stop Sign Violation"). A report has no single event to take the name
+from, so it uses the fleet's — config.EVENT_WORDING. The suite's baseline is a fleet with
+no Motive, which is Samsara's wording; test_event_wording covers the other one.
 """
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -31,7 +31,7 @@ def test_daily_report_speeding_appears_first():
         {"event_type": "cell_phone",  "vehicle_number": "1006", "total": 8},
     ]
     result = _format_daily_report("MZ CARGO INC", rows, "May 07, 2026")
-    assert result.index("Speeding") < result.index("Hard Brake")
+    assert result.index("Speeding") < result.index("Harsh Brake")
 
 def test_daily_report_other_types_are_ordered_by_their_totals():
     rows = [
@@ -39,7 +39,7 @@ def test_daily_report_other_types_are_ordered_by_their_totals():
         {"event_type": "hard_brake",  "vehicle_number": "1196", "total": 10},
     ]
     result = _format_daily_report("MZ CARGO INC", rows, "May 07, 2026")
-    assert result.index("Hard Brake") < result.index("Cell Phone Usage")
+    assert result.index("Harsh Brake") < result.index("Cell Phone Usage")
 
 def test_daily_report_shows_vehicle_and_count():
     rows = [{"event_type": "speeding", "vehicle_number": "1196 - JOHN", "total": 7}]
@@ -64,7 +64,7 @@ def test_daily_report_uses_the_reports_own_wording_for_a_type():
     rows = [{"event_type": "stop_sign_violation", "vehicle_number": "1196", "total": 1},
             {"event_type": "speeding", "vehicle_number": "1196", "total": 1}]
     result = _format_daily_report("MZ CARGO INC", rows, "May 07, 2026")
-    assert "<b>Stop Sign Violation</b>" in result
+    assert "<b>Rolling Stop</b>" in result
     assert "<b>Speeding</b>" in result
     assert "OVER POSTED" not in result
 
@@ -75,9 +75,9 @@ def test_daily_report_has_wording_for_every_type_the_bot_alerts_on():
 
 def test_daily_report_survives_a_type_it_has_no_wording_for():
     """An old row, or a type added to the alerts and forgotten here."""
-    rows = [{"event_type": "near_miss", "vehicle_number": "1196", "total": 1}]
+    rows = [{"event_type": "wrong_way_driving", "vehicle_number": "1196", "total": 1}]
     result = _format_daily_report("MZ CARGO INC", rows, "May 07, 2026")
-    assert "<b>Near Miss</b>" in result
+    assert "<b>Wrong Way Driving</b>" in result
 
 
 # ── _format_top_report ─────────────────────────────────────────────────────────

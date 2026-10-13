@@ -29,11 +29,39 @@ def _admin_ids() -> list[int]:
     return ids
 
 
+def _log_alert_rules() -> None:
+    """Say, once per boot, which company this is and how its alerts are ruled.
+
+    The same code runs every company on this branch and what differs between them is a
+    handful of variables. This line is how a deploy is checked against the company it
+    was meant for — and where a mistyped EXTRA_EVENT_TYPES shows up, since a name that
+    matches nothing is otherwise simply a type that never alerts.
+    """
+    import logging
+    from data.event_catalog import ALERTED_TYPES, OPTIONAL_EVENT_TYPES, unknown_extra_types
+
+    log = logging.getLogger(__name__)
+    providers = [name for name, on in (("Samsara", config.SAMSARA_ENABLED),
+                                       ("Motive", config.MOTIVE_ENABLED)) if on]
+    extras = sorted(ALERTED_TYPES & OPTIONAL_EVENT_TYPES)
+    log.info(
+        f"{config.COMPANY_NAME} ({config.COMPANY_SLUG}): providers "
+        f"{' + '.join(providers) or 'none configured'}; speeding from "
+        f"'{config.SPEEDING_MIN_SEVERITY}'; {len(ALERTED_TYPES)} event types"
+        f"{' incl. ' + ', '.join(extras) if extras else ' (core list only)'}"
+    )
+    unknown = unknown_extra_types()
+    if unknown:
+        log.warning(f"EXTRA_EVENT_TYPES names types this build does not know, ignored: "
+                    f"{', '.join(unknown)}")
+
+
 async def on_startup(dispatcher):
     await init_pool()
     await run_migrations()
     await adopt_legacy_company()
     await ensure_group()
+    _log_alert_rules()
     await seed_super_admins(_admin_ids())
     await set_default_commands(dispatcher)
     await on_startup_notify(dispatcher)

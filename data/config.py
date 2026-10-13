@@ -43,17 +43,17 @@ HIDDEN_ADMIN_IDS = _id_set(ADMINS)
 DATABASE_URL = env.str("DATABASE_URL")
 
 # ── The company this deployment serves ──────────────────────────────────────────
-# One deployment == one company, and this branch is MZ CARGO's. Everything that used to
-# live in the `companies` table is supplied here instead. Both values default to MZ's
-# own so that the deployment that already exists keeps booting with the variables it
-# already has — set them only to run this branch for somebody else.
-COMPANY_SLUG = env.str("COMPANY_SLUG", "mzcargo")         # short id, used in report filenames
+# One deployment == one company. This branch runs several of them — one Railway service
+# each, each with its own database — and nothing in the code says which: what a company
+# is called and how its alerts are ruled comes from that service's variables and, for
+# the two that were upgraded from the old multi-company schema, from its database.
+COMPANY_SLUG = env.str("COMPANY_SLUG", "fleet").strip() or "fleet"   # short id, used in report filenames
 # The display name, on every report and in the panel's header. Left unset, a deployment
 # upgraded from the old schema shows the name its `companies` row has always carried
-# (see adopt_legacy_company in utils/db_api/legacy.py) and only a fresh database falls
-# back to the default below; setting the variable overrules both.
+# (see adopt_legacy_company in utils/db_api/legacy.py), and a database with no such row
+# falls back to the slug in capitals; setting the variable overrules both.
 _company_name_raw = env.str("COMPANY_NAME", "").strip()
-COMPANY_NAME = _company_name_raw or "MZ CARGO INC"
+COMPANY_NAME = _company_name_raw or COMPANY_SLUG.upper()
 COMPANY_NAME_FROM_ENV = bool(_company_name_raw)
 
 # The one Telegram group this deployment posts to. There is no per-unit routing on this
@@ -72,9 +72,22 @@ try:
 except ValueError:
     GROUP_CHAT_ID = None
 
+# ── How this company's alerts are ruled ─────────────────────────────────────────
 # Minimum severity a speeding event must reach to be alerted ("low"/"medium"/"high"/"critical").
-# "medium" is MZ's rule and has been since before this was a setting.
-SPEEDING_MIN_SEVERITY = env.str("SPEEDING_MIN_SEVERITY", "medium")
+# "medium" is the rule at HF and MZ CARGO, neither of which sets this; JTR alerts from
+# "high" and says so in its variables.
+SPEEDING_MIN_SEVERITY = (env.str("SPEEDING_MIN_SEVERITY", "medium").strip().lower()
+                         or "medium")
+
+# Event types alerted on beyond the core list (comma separated). The core is what every
+# company gets; these are the ones that are one company's choice — camera obstructions,
+# near misses, Motive's seat-belt and drowsiness events, tailgating. A type that is
+# neither core nor named here is recognised and dropped: not alerted, not stored, not
+# counted in a report. The names and what they cover are in data/event_catalog.py, which
+# also ignores anything listed here that it does not know.
+EXTRA_EVENT_TYPES = frozenset(
+    name.strip().lower() for name in env.list("EXTRA_EVENT_TYPES", []) if name.strip()
+)
 
 
 # ── Admin Mini App ──────────────────────────────────────────────────────────────
@@ -112,8 +125,9 @@ WEBAPP_URL = _resolve_webapp_url(
     env.str("RAILWAY_PUBLIC_DOMAIN", "").strip(),
 )
 
-# MZ CARGO runs both providers: part of the fleet reports through Samsara and part
-# through Motive, into the same group. Each needs its own pair of values below.
+# A company's fleet reports through Samsara, through Motive, or through both into the
+# same group. Each provider in use needs its own pair of values below; the other pair
+# stays blank, and its webhook then refuses whatever is posted to it.
 
 # ── Samsara ─────────────────────────────────────────────────────────────────────
 # API key is the bearer token used for the harsh-event poll callback; the webhook
@@ -131,6 +145,20 @@ MOTIVE_WEBHOOK_SECRET = env.str("MOTIVE_WEBHOOK_SECRET", "")
 # Without it every crash goes out marked "Unconfirmed" (the gate fails open) and no
 # Motive alert ever gets its clip.
 MOTIVE_API_KEY = env.str("MOTIVE_API_KEY", "")
+
+# Which providers this deployment is wired to — read off the values above, so there is
+# nothing to keep in step with them. Two things follow, both about wording:
+#
+#   * what a hard brake and a stop-sign violation are called on reports and in the
+#     panel. Samsara says "Harsh Brake" and "Rolling Stop"; Motive says "Hard Brake" and
+#     "Stop Sign Violation". A fleet with any Motive in it uses Motive's names there. (An
+#     alert card always uses the names of the provider that reported that event.)
+#   * whether a card says which provider it came from. Only where there are two: on a
+#     one-provider fleet the line would be the same three words on every card.
+SAMSARA_ENABLED = bool(SAMSARA_API_KEY or SAMSARA_WEBHOOK_SECRET)
+MOTIVE_ENABLED = bool(MOTIVE_API_KEY or MOTIVE_WEBHOOK_SECRET)
+EVENT_WORDING = "motive" if MOTIVE_ENABLED else "samsara"
+SHOW_PROVIDER = SAMSARA_ENABLED and MOTIVE_ENABLED
 
 # ── Webhook endpoint hardening ──────────────────────────────────────────────────
 # Both webhook URLs are public, and an unsigned one accepts whatever is posted to it:

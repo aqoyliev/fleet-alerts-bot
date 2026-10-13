@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot
 
 from data import config
+from data.event_catalog import event_label
 from utils.db_api.groups import get_alert_target
 from utils.db_api.violations import get_violations_by_type
 from utils.tg_text import esc
@@ -16,8 +17,8 @@ ET = ZoneInfo("America/New_York")
 
 # The report's own wording for each type. Not EVENT_TYPE_MAP's titles: those are
 # headlines for a single alert ("SPEEDING OVER POSTED", "CRASH DETECTED") and read wrong
-# as the heading over a list of units. Covers the types this build alerts on and the
-# ones an older row in the table may still carry.
+# as the heading over a list of units. Covers every type the build knows — a deployment
+# alerts on some of them, and an older row in its table may carry any.
 _EVENT_EMOJI = {
     "hard_brake":                    "🛑",
     "crash":                         "💥",
@@ -35,6 +36,11 @@ _EVENT_EMOJI = {
     "harsh_turn":                    "↩️",
     "hard_cornering":                "↩️",
     "no_seat_belt":                  "🚫",
+    "obstructed_camera":             "📷",
+    "seat_belt_violation":           "🔒",
+    "near_miss":                     "⚠️",
+    "drowsiness":                    "😴",
+    "tailgating":                    "🚗",
 }
 
 _EVENT_LABEL = {
@@ -54,7 +60,16 @@ _EVENT_LABEL = {
     "harsh_turn":                    "Harsh Turn",
     "hard_cornering":                "Harsh Turn",
     "no_seat_belt":                  "No Seat Belt",
+    "obstructed_camera":             "Camera Obstructed",
+    "seat_belt_violation":           "Seat Belt Violation",
+    "near_miss":                     "Near Miss",
+    "drowsiness":                    "Drowsiness",
+    "tailgating":                    "Tailgating",
 }
+# Two of these are named differently by the two providers, and a report has no single
+# event to take the name from — so it uses the fleet's: Samsara's on a Samsara-only
+# fleet ("Harsh Brake", "Rolling Stop"), Motive's wherever there is any Motive.
+_EVENT_LABEL = {t: event_label(t, label) for t, label in _EVENT_LABEL.items()}
 
 
 def _format_daily_report(company_name: str, rows: list[dict], date_str: str) -> str:

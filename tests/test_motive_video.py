@@ -330,7 +330,7 @@ async def test_the_crash_clip_follows_under_a_short_caption(crash):
     assert clip["is_video"] is True
     assert clip["media"] == [b"clip"]
     # Not the card a second time: everything on it was in the first message.
-    assert clip["text"] == "💥 <b>CRASH</b> — <code>1269</code>"
+    assert clip["text"] == "💥 <b>CRASH</b> · <code>1269</code>"
 
 
 async def test_a_crash_clip_that_never_came_is_said_to_be_missing(crash):
