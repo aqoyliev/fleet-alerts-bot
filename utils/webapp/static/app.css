@@ -165,10 +165,18 @@
   --track-title:  -.01em;    /* 20px */
 
   /* ── space ─────────────────────────────────────────────────────────────── *
-   * 2 / 4 / 6 / 8 / 12 / 16 / 20 / 24 / 32 / 40. Named by px so a value in
-   * the file can be checked against the scale by reading it.                 */
-  --s-2:  2px;  --s-4:  4px;  --s-6:  6px;  --s-8:  8px;  --s-12: 12px;
-  --s-16: 16px; --s-20: 20px; --s-24: 24px; --s-32: 32px; --s-40: 40px;
+   * 2 / 4 / 6 / 8 / 10 / 12 / 16 / 20 / 24 / 32 / 40. Named by px so a value
+   * in the file can be checked against the scale by reading it.
+   *
+   * 10 is on the scale because nine rules already ask for it — row padding,
+   * the topbar's lower edge, the toast, the note, the bar row, the readout.
+   * It was missing, so every one of those declarations was invalid at
+   * computed-value time and thrown away: a list row lost its padding
+   * entirely and fell back to the 52px min-height with the text pressed
+   * against the separator, which is what made the panel look tight.         */
+  --s-2:  2px;  --s-4:  4px;  --s-6:  6px;  --s-8:  8px;  --s-10: 10px;
+  --s-12: 12px; --s-16: 16px; --s-20: 20px; --s-24: 24px; --s-32: 32px;
+  --s-40: 40px;
 
   /* ── radii ─────────────────────────────────────────────────────────────── */
   --r-xs:   6px;    /* badges */
@@ -539,10 +547,17 @@ button.row-main:active { background: var(--wash-press); }
 
 /* Badges sit under the title rather than in front of it. Inline, they ate the
    width a long group name needed and every such row truncated to
-   "Unit 1422 - a rather long…". */
+   "Unit 1422 - a rather long…".
+
+   The line wraps because a unit number is not always a number: a roster that
+   spells its units "TRUCK #002 JAVOKHIR AZIZOV" fills the line with the badge
+   alone, and the badge is nowrap and does not shrink, so everything after it
+   was cut to "All events · 2 this …". Short unit numbers still share one
+   line — the wrap only happens on the rows that need it. */
 .row-meta {
-  display: flex; align-items: center; gap: var(--s-6);
-  margin-top: var(--s-4); min-width: 0;
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: var(--s-4) var(--s-6);
+  margin-top: var(--s-6); min-width: 0;
 }
 .row-meta .row-sub { margin-top: 0; }
 
@@ -585,6 +600,7 @@ button.row-main:active { background: var(--wash-press); }
   color: var(--text-2);
   vertical-align: middle;
   white-space: nowrap;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis;
 }
 .badge-unit  { background: var(--surface-sunken); color: var(--text-1);
                font-variant-numeric: tabular-nums; }
@@ -1225,6 +1241,29 @@ button.bar-row:active { background: var(--wash-press); }
 @media (min-width: 440px) {
   .bar-row { --bar-name-w: 32%; }
 }
+
+/* A ranking whose labels are roster names rather than unit numbers. The fixed
+   name column is 38% of a 400px panel — about 125px — and a fleet that spells
+   its units "TRUCK #002 JAVOKHIR AZIZOV" truncated every row at the same
+   place, which told you the rank and nothing else. The name takes the line and
+   the bar runs underneath it.
+
+   The tracks still all start at one x, which is the only reason the column was
+   fixed to begin with, and they are wider here than in the inline row, so the
+   comparison the card exists for reads better rather than worse. */
+.bar-row.is-stacked {
+  display: grid;
+  grid-template-columns: 2.2ch minmax(0, 1fr) auto;
+  grid-template-areas:
+    "rank name  count"
+    ".    track track";
+  column-gap: var(--s-12); row-gap: var(--s-8);
+  align-items: center;
+}
+.bar-row.is-stacked .bar-rank  { grid-area: rank; }
+.bar-row.is-stacked .bar-name  { grid-area: name; }
+.bar-row.is-stacked .bar-track { grid-area: track; }
+.bar-row.is-stacked .bar-count { grid-area: count; }
 
 
 /* ==========================================================================

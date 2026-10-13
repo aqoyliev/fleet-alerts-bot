@@ -778,8 +778,13 @@ async function reportScreen(opts) {
     const card = el(`<div class="card"><div class="card-head">
         <div class="card-title">Worst units</div>
         <span class="card-head-note">tap to filter</span></div></div>`);
+    // How a fleet spells its units decides the shape of this card. A unit number fits
+    // the name column beside its bar; a roster that spells them out — Elegant Express
+    // sends "TRUCK #002 JAVOKHIR AZIZOV" — does not, and every row truncated at the
+    // same place. Those rankings put the name on its own line with the bar under it.
+    const spelledOut = data.top_units.some((u) => (u.vehicle_number || '').length > 14);
     data.top_units.forEach((u, i) => {
-      const row = el(`<button class="bar-row">
+      const row = el(`<button class="bar-row${spelledOut ? ' is-stacked' : ''}">
           <span class="bar-rank">${i + 1}</span>
           <span class="bar-name">${esc(u.vehicle_number)}</span>
           <span class="bar-track"><span class="bar-fill"
