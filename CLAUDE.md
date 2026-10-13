@@ -4,7 +4,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Telegram bot that receives vehicle safety webhooks from **Motive** and **Samsara** fleet APIs, stores violations in PostgreSQL, and distributes alerts to configured Telegram groups and admin DMs. It also generates a daily violations report at midnight ET.
+The Telegram alerts bot for **HAULAGE FREIGHT LLC** (branch `hf`). It receives vehicle safety webhooks from **Samsara**, stores each violation in PostgreSQL, and posts an alert to the company's **one** Telegram group and to the admins who asked for DMs. It sends a daily violations report at midnight ET and serves an admin **Mini App** from the same process.
+
+## How this branch relates to the others
+
+`hf` follows `single-company`. It was re-based onto it by a merge (`Merge single-company into hf: adopt it as the base`), so later work on `single-company` comes in with an ordinary `git merge origin/single-company`.
+
+What `hf` deliberately does differently — keep these when resolving a merge:
+
+| | `single-company` | `hf` |
+|---|---|---|
+| Groups | one driver group per truck, registered when the bot is added, paired by `/setunit` | **one alerts group**, a single row; adding the bot to a chat registers nothing |
+| Crash alerts | DMs + a dedicated `CRASH_GROUP_ID`, never the other groups | the alerts group (if its filter lists crash) + DMs |
+| Mute | `/disable` · `/enable` by anyone in a driver group; a kicked group is muted automatically | **the panel's switch only** — no group commands, nothing is ever muted automatically, nobody is DMed when the bot joins or leaves a chat |
+| Super admins | nobody can deactivate, demote or remove one | the **maintainer** (`ADMINS`) can do all three to any other super admin |
+| Event types | adds tailgating, camera obstruction, near miss, … | HF's shorter list (`EVENT_TYPE_MAP`); the rest are recognised and dropped |
+| Alert card | ruled into blocks | plain rows, title + blank line (`_format_event`) |
+| Speeding threshold | `high` | `medium` |
+| Reports | group-only `/report`, 3+/day rule in the download | `/report today\|yesterday` and `/top [N]` in the group **and** admin DMs; every event listed |
+| PTI reminder, unit rosters | yes | removed (they exist for driver groups) |
+
+Files that are HF's own and should win a conflict: `utils/db_api/groups.py`, `utils/db_api/legacy.py`, `handlers/groups/group_events.py`, `handlers/users/report.py`, `utils/daily_report.py`, `data/event_catalog.py`, and the Group screen in `utils/webapp/static/app.js`.
 
 ## Running the bot
 
@@ -13,18 +33,13 @@ pip install -r requirements.txt
 python app.py
 ```
 
-The bot starts an aiohttp webhook server on port 8080 alongside the Telegram polling loop.
+The bot starts an aiohttp server (webhooks + admin panel) on `$PORT` (default 8080) alongside the Telegram polling loop.
 
-**Python environment note (Windows):** Python is inside a pipenv virtualenv. Either activate it first (`C:\Users\user\.virtualenvs\motive_alerts_bot-c-vbPPhO\Scripts\Activate.ps1`) or use the full path: `C:\Users\user\.virtualenvs\motive_alerts_bot-c-vbPPhO\Scripts\python.exe`.
+**Python environment (Windows):** a pipenv virtualenv, `C:\Users\ALFA\.virtualenvs\hf-alerts-bot-96Gq4aZS\Scripts\python.exe`.
 
-**Run tests:**
+**Run tests** (needs `pip install -r requirements-dev.txt` — pytest-asyncio is what makes the async tests run):
 ```powershell
-python -m pytest tests/ -v
-```
-
-**Manual webhook formatting test** (no live bot needed):
-```bash
-python test_webhook.py
+python -m pytest -q
 ```
 
 ## Architecture
@@ -32,69 +47,71 @@ python test_webhook.py
 ### Data flow
 
 ```
-POST /webhook/motive or /webhook/samsara
-  → HMAC verification (if secret configured)
-  → deduplication (in-memory 5-min TTL on event_id)
+POST /webhook/samsara            (also /webhook/samsara/hf — the old build's URL, still answered)
+  → HMAC + timestamp check       (no secret configured = delivery REFUSED, unless ALLOW_UNSIGNED_WEBHOOKS)
+  → in-memory dedup              (5-min TTL on eventId)
   → normalize to internal event dict
-  → [Samsara only] background poll for harsh_event details + video URL
-  → format message (HTML, emojis, ET timezone)
-  → download media from cloud storage
-  → save_violation() → violations table
-  → send to company groups + subscribed admin DMs
+  → harsh events: background poll of the legacy harsh_event API for type, location, video
+      · first typed response: violation saved; a crash is alerted at once ("Video pending…")
+      · a type not in EVENT_TYPE_MAP ends the poll and drops the event
+      · an empty record after the whole poll: DM-only, marked "Possible error"
+  → speeding: speed / limit / location looked up from the Samsara API
+  → save_violation()             (UNIQUE event_id decides: already stored = no second alert)
+  → the alerts group (if not muted and the type is on its filter) + subscribed admin DMs
 ```
 
-Webhook always returns 200 immediately; `_handle_event()` runs in `asyncio.create_task()` so it never blocks.
+The webhook always answers 200 immediately; `_handle_event()` runs as a background task.
 
 ### Key files
 
-- `utils/webhook_handler.py` — all event processing: HMAC, dedup, parsing, formatting, Telegram send with retries
-- `utils/daily_report.py` — midnight ET scheduled report, groups violations by event type
-- `utils/db_api/violations.py` — save and query violations
-- `utils/db_api/companies.py` — route events to the right Telegram groups
-- `utils/db_api/admins.py` — admin permissions and DM subscriptions
-- `utils/db_api/db.py` — asyncpg pool wrapper (`fetch`, `fetchrow`, `execute`)
-- `data/config.py` — all env var loading
-- `loader.py` — Bot + Dispatcher init, optional Redis FSM
+- `utils/webhook_handler.py` — all event processing: auth, dedup, parsing, the alert card, Telegram send with retries, webhook routes
+- `utils/db_api/groups.py` — the one alerts group: seeding, mute, event filter, routing (`get_alert_target`)
+- `utils/db_api/legacy.py` — reading the old multi-company schema on first boot (see Database)
+- `utils/db_api/admins.py` — admins, hidden maintainer accounts, DM subscriptions
+- `utils/db_api/violations.py` — save + every report/panel query
+- `utils/daily_report.py` — midnight ET report; `handlers/users/report.py` — `/report`, `/top`
+- `handlers/groups/group_events.py` — `/help` in the group; logs the bot joining/leaving a chat (nothing else)
+- `handlers/users/support.py` — ✉️ Contact Support relay to the maintainer
+- `utils/webapp/` — the admin Mini App (`api.py` endpoints, `auth.py` initData check, `static/` frontend)
+- `utils/samsara/client.py` — speeding enrichment
+- `data/config.py` — all env var loading; `data/event_catalog.py` — the filterable event types
 
-### Multi-company routing
+### The alerts group
 
-Events are routed based on `company_slug`. `company_groups` maps a company to Telegram groups; `group_event_types` filters which event types each group receives (empty = all types). Admins can be scoped to specific companies or be super-admins with full access.
+A singleton row in `alert_group` (`id` pinned to 1). Seeded once by `ensure_group()`: from the old schema's `company_groups` if this database has one, else from `GROUP_CHAT_ID`. After that the row is authoritative — it is rewritten when Telegram migrates the chat to a supergroup, and the env var is never read again.
 
-### Motive vs. Samsara differences
+`alert_group_event_types` is the group's allowlist; **no rows = every type**. Admins edit it, and the mute, from the panel's Group screen.
 
-Motive sends complete event data in the webhook payload. Samsara webhooks are thin notifications — the handler must make a follow-up API call to `GET /fleet/harsh-events/{id}` to get speed, location, and video URL. This polling happens in a background task (`_fetch_samsara_harsh_event`) with 20s retry intervals: standard harsh events poll up to 3 attempts (~60s), crashes extend to 15 (~5 min) since crash clips upload slowly. Inward-only types (`cell_phone`, `drowsy_driving`, `no_seat_belt`, `inattentive_driving`) short-circuit as soon as the inward clip is ready.
+### Admins and the hidden maintainer
 
-Because the harsh-event *type* (crash vs. hard brake, etc.) only arrives in the first poll response, the violation row is saved then via the `on_first` hook — not after the full poll — so a mid-poll restart can't lose the event. On crash detection the hook also sends the **full details immediately as text** (`_format_crash_initial`, the complete card minus the clip) to every crash target — groups and DMs alike — so the full record is delivered even if no video ever resolves. When the video URLs resolve, the main path sends a follow-up: just the clip with a short caption (`_format_crash_video_caption`). No video → the follow-up is instead a short text closure note (`📹 No video available for this crash.`) to the same crash targets, since the first alert showed "Video pending…" and recipients would otherwise be left waiting. (Edge case: if the location wasn't ready for the first alert but resolved by the time the video did, the follow-up upgrades to the full caption so the location still reaches recipients.) Non-crash harsh events are unchanged (a single card after the poll).
+`ADMINS` (env) are the **maintainer's** ids, not the company's staff — on this deployment, Akbar alone. They are permanent super admins and are hidden from the panel: other admins cannot see, deactivate or remove them (`is_maintainer` / `visible_admins` in `utils/db_api/admins.py`). The company's own admins are added and removed in the panel's Admins screen.
 
-### Motive crash confirmation (false-positive gate)
+The maintainer is also above the company's super admins. A super admin manages regular admins only and cannot touch another super admin; the maintainer can deactivate, demote (`demote_from_super`) and remove any of them (`update_admin` / `delete_admin_route` in `utils/webapp/api.py`). Refusals shown to a company super admin never mention that such an account exists.
 
-Motive fires its crash webhook the instant the detector trips, **before** its own review runs, then **withdraws** a rejected detection from `/v2/driver_performance_events` — it disappears entirely rather than being reclassified. Measured on the multi-company bot 2026-07-29..08-01, 59 of 62 crash webhooks alerted on were gone from the API afterwards. Presence in that API is therefore the only reliable classifier; no payload field is (`coaching_status`, `primary_behavior`, `secondary_behaviors`, `event_intensity` were identical between the real crash and the false ones).
+Crash DMs are on by default for every admin (`admins.crash_dm`); every other type is opt-in under ⚙️ Settings.
 
-A Motive event resolving to `crash` therefore waits `_CRASH_CONFIRM_DELAY` (180s — the review landed 60-85s in every observed case) and then asks `crash_still_listed()` whether it stands:
+### Motive
 
-- **still listed** → alert as a crash, normally
-- **withdrawn** → `_type_override='hard_brake'`, honoured first by `_get_event_type()` so the downgrade survives `_format_event` re-deriving the type; routed to the hard-brake channel instead
-- **lookup failed / no `MOTIVE_API_KEY`** → **fails open**: the crash is sent anyway, with `⚠️ Unconfirmed` on the card. No evidence is not evidence of no crash.
-
-Samsara crashes are excluded (`_source == "samsara"`) — they resolve through their own poll and have already sent their first card.
-
-Because the wait lives in a fire-and-forget task, a row is written to `motive_crash_confirmations` **before** it and the verdict filled in after. That gives an audit trail (a quiet crash channel alone can't distinguish a working gate from a Motive detector that stopped tripping) and recoverability: `resume_pending_crash_confirmations()` runs at startup, picks up anything still undecided, and carries the elapsed time across so a detection held 90s waits 90 more rather than a fresh 180. Past `_CRASH_RESUME_MAX_AGE` (1h) the bot was down rather than restarted, and the row is marked `expired` instead of alerting. All bookkeeping writes go through `_note_crash`, which swallows failures — losing the audit row is acceptable, losing the alert is not.
+HF is a Samsara fleet. The Motive webhook, crash confirmation and clip fetching are kept as they are on `single-company` and are inert with `MOTIVE_WEBHOOK_SECRET` blank.
 
 ## Database
 
-Schema is in `utils/db_api/schemas.sql`. No migrations framework — changes require manual SQL.
+Schema is in `utils/db_api/schemas.sql` and is applied on every boot (`run_migrations`) — all `CREATE … IF NOT EXISTS`, then the additive statements in `db.py::_MIGRATIONS`. No migrations framework.
 
-Key tables:
-- `violations` — all processed events; `event_id` is the unique idempotency key
-- `companies` / `company_groups` / `group_event_types` — routing config
-- `admins` / `admin_companies` / `admin_subscriptions` — admin access + DM preferences
-- `motive_crash_confirmations` — one row per Motive crash detection held for confirmation (see below); `verdict IS NULL` means the wait was cut short by a restart and is resumed at startup
+Key tables: `violations` (`event_id` is the idempotency key), `alert_group` / `alert_group_event_types`, `users` / `admins` / `admin_subscriptions`, `motive_crash_confirmations`, `support_relays`.
 
-All queries use asyncpg `$1, $2` placeholders (never f-strings). Times stored as UTC `timestamptz`, displayed in ET.
+**HF's production database predates this schema.** It still holds `companies`, `company_groups`, `group_event_types`, `admin_companies`, and `violations.company_slug`. On startup:
+
+- `adopt_legacy_violations()` drops NOT NULL on `violations.company_slug` and gives it the company's slug as its default (new inserts don't supply it);
+- `ensure_group()` copies the group's chat id and event filter out of the old tables, once.
+
+The old tables are only ever **read** — never altered or dropped — so the previous build still runs against this database if a deploy is rolled back. Don't "clean them up".
+
+All queries use asyncpg `$1, $2` placeholders (never f-strings for values). Times are stored as UTC `timestamptz` and displayed in ET.
 
 ## Vehicle number normalization
 
-`_clean_vehicle()` in `webhook_handler.py` strips leading `unit`/`UNIT`/`Unit #`/`unit:` etc. prefixes using `^unit[\s:#-]+` (case-insensitive) before saving to DB. Existing records without this fix can be cleaned with:
+`_clean_vehicle()` in `webhook_handler.py` strips a leading `unit` / `Unit #` / `unit:` label with `^unit[\s:#-]+` (case-insensitive) before the row is saved, and the alert card shows the same cleaned value. Older rows can be cleaned with:
 
 ```sql
 UPDATE violations
@@ -107,13 +124,14 @@ WHERE vehicle_number ~* '^unit[\s:#-]+';
 | Var | Purpose |
 |-----|---------|
 | `BOT_TOKEN` | Telegram bot token |
-| `ADMINS` | Super-admin Telegram IDs (space/comma separated) |
+| `ADMINS` | The maintainer's Telegram IDs (comma separated) — hidden, permanent super admins |
 | `DATABASE_URL` | PostgreSQL connection string |
-| `COMPANY_SLUG` | Default company slug |
-| `GROUP_CHAT_ID` | Default fallback Telegram group ID |
-| `SAMSARA_API_KEY` | Samsara REST API key (optional) |
-| `MOTIVE_API_KEY` | Motive REST API key — confirms crash detections before alerting. **Unset = every crash goes out marked "Unconfirmed"** (the gate fails open) |
-| `MOTIVE_WEBHOOK_SECRET` | HMAC secret for Motive (empty = skip verification) |
-| `SAMSARA_WEBHOOK_SECRET` | HMAC secret for Samsara (empty = skip verification) |
-| `REDIS_URL` | Redis for FSM storage (optional; falls back to in-memory) |
-| `ip` | Server IP used in webhook URL construction |
+| `SAMSARA_API_KEY` | Samsara REST API key |
+| `SAMSARA_WEBHOOK_SECRET` | HMAC secret for Samsara — **blank means deliveries are refused** |
+| `GROUP_CHAT_ID` | Seeds the alerts group on a fresh database only (optional) |
+| `COMPANY_SLUG` / `COMPANY_NAME` | Default to `hf` / `HAULAGE FREIGHT LLC` |
+| `SPEEDING_MIN_SEVERITY` | Default `medium` |
+| `WEBAPP_URL` | Panel base URL; blank on Railway (read from `RAILWAY_PUBLIC_DOMAIN`) |
+| `ALLOW_UNSIGNED_WEBHOOKS` | `true` accepts unsigned deliveries — bring-up / emergency only |
+| `MOTIVE_WEBHOOK_SECRET` / `MOTIVE_API_KEY` | Unused for HF — leave blank |
+| `PORT` | Server port (Railway sets it) |

@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+  <!-- Tells the WebView that both palettes are handled, so form controls and scrollbars
+       render dark on a dark theme instead of flashing their light defaults. -->
+  <meta name="color-scheme" content="light dark">
+  <title>Admin Panel</title>
+  <!-- Telegram's bridge. The one external resource on this page, and it can't be
+       vendored: it is how the WebApp object gets wired to the client. -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/panel/app.css">
+</head>
+<body>
+
+<!-- Shown instead of everything else when the page is opened outside Telegram, or when
+     the credential has expired. Both are dead ends for the app, so they get the whole
+     screen rather than an error toast on top of a UI that cannot work. -->
+<div id="blocker" class="blocker" hidden>
+  <div class="blocker-emoji" id="blocker-emoji">🔒</div>
+  <h1 id="blocker-title">Open this from Telegram</h1>
+  <p id="blocker-text">This panel is a Telegram Mini App. Open your bot's chat and tap
+    <b>🖥 Admin Panel</b>.</p>
+  <button class="btn" id="blocker-action" hidden>Close</button>
+  <!-- Filled in when the launch context is wrong. Which of the several reasons applies
+       is invisible from the outside — the screen looks identical whether the bridge
+       script failed to load, the client is too old, or the button type didn't carry a
+       credential — so the answer is put on screen rather than guessed at. -->
+  <pre class="diag" id="blocker-diag" hidden></pre>
+</div>
+
+<div id="app" hidden>
+  <header class="topbar">
+    <div class="topbar-main">
+      <div class="topbar-title" id="screen-title">Dashboard</div>
+      <div class="topbar-sub" id="company-name"></div>
+    </div>
+    <!-- Also the revalidation indicator: a cached screen paints instantly, and this is
+         what says the numbers on it are still being checked. -->
+    <button class="icon-btn" id="refresh" aria-label="Refresh">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M20.5 12a8.5 8.5 0 1 1-2.5-6"/><path d="M20.5 4v5h-5"/>
+      </svg>
+    </button>
+  </header>
+
+  <main id="main">
+    <!-- Screens are rendered into here by app.js; only one is present at a time. -->
+    <div class="loading" id="loading"><span class="spinner"></span></div>
+  </main>
+
+  <!-- Line icons in currentColor rather than emoji, so the selected tab's icon takes the
+       active colour with its label. -->
+  <nav class="tabbar" id="tabbar">
+    <button class="tab is-active" data-tab="dashboard" aria-label="Dashboard">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" aria-hidden="true">
+        <path d="M6 20v-6M12 20V5M18 20v-9"/>
+      </svg>
+      <span class="tab-label">Dashboard</span>
+    </button>
+    <button class="tab" data-tab="group" aria-label="Group">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M15 19v-1.4a3.6 3.6 0 0 0-3.6-3.6H6.6A3.6 3.6 0 0 0 3 17.6V19"/>
+        <circle cx="9" cy="8" r="3.2"/>
+        <path d="M21 19v-1.4a3.6 3.6 0 0 0-2.7-3.5M15.6 5.2a3.2 3.2 0 0 1 0 5.6"/>
+      </svg>
+      <span class="tab-label">Group</span>
+    </button>
+    <button class="tab" data-tab="alerts" aria-label="Alerts">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 8.6a6 6 0 1 0-12 0c0 5.1-2 6.6-2 6.6h16s-2-1.5-2-6.6Z"/>
+        <path d="M10.3 19a2 2 0 0 0 3.4 0"/>
+      </svg>
+      <span class="tab-label">Alerts</span>
+    </button>
+    <button class="tab" data-tab="admins" aria-label="Admins">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 3 5 6v5.4c0 4 3 7.4 7 8.6 4-1.2 7-4.6 7-8.6V6l-7-3Z"/>
+        <path d="m9.2 12 2 2 3.6-3.9"/>
+      </svg>
+      <span class="tab-label">Admins</span>
+    </button>
+  </nav>
+</div>
+
+<script src="/panel/app.js"></script>
+</body>
+</html>

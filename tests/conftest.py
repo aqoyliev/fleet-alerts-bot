@@ -1,45 +1,13 @@
-import sys
-import types
-import unittest.mock as mock
+import os
 
-# Stub data.config before any project module is imported
-_data_pkg = types.ModuleType("data")
-_config_mod = types.ModuleType("data.config")
-_config_mod.MOTIVE_API_KEY = "test"
-_config_mod.COMPANY_SLUG = "mz-cargo"
-_config_mod.GROUP_CHAT_ID = 0
-_config_mod.ADMINS = []
-_config_mod.BOT_TOKEN = "test"
-_config_mod.IP = "localhost"
-_data_pkg.config = _config_mod
-sys.modules["data"] = _data_pkg
-sys.modules["data.config"] = _config_mod
-
-# Stub all heavy/external dependencies
-_stubs = [
-    "aiogram",
-    "aiogram.types",
-    "aiogram.dispatcher",
-    "aiogram.dispatcher.filters",
-    "aiogram.utils",
-    "aiogram.utils.exceptions",
-    "aiohttp",
-    "aiohttp.web",
-    "asyncpg",
-    "loader",
-    "keyboards",
-    "keyboards.inline",
-    "keyboards.inline.violations",
-    "utils.db_api",
-    "utils.db_api.db",
-    "utils.db_api.violations",
-    "utils.db_api.companies",
-    "utils.db_api.admins",
-    "utils.db_api.crash_confirmations",
-    "utils.db_api.users",
-    "utils.motive",
-    "utils.notify_admins",
-    "utils.set_bot_commands",
-]
-for _mod in _stubs:
-    sys.modules[_mod] = mock.MagicMock()
+# data.config reads these at import time; set dummy values so the real module loads
+# during tests. The bot/DB are never contacted — the tests below only exercise pure
+# parsing/formatting helpers and the Samsara poll loop (with a faked HTTP session).
+os.environ.setdefault("BOT_TOKEN", "123:test")
+os.environ.setdefault("ADMINS", "1")
+os.environ.setdefault("DATABASE_URL", "postgresql://u:p@localhost/db")
+os.environ.setdefault("COMPANY_SLUG", "testco")
+os.environ.setdefault("COMPANY_NAME", "Test Co")
+# Optional in production (blank just hides the panel button), but set here so the
+# keyboard test has a URL to assert on.
+os.environ.setdefault("WEBAPP_URL", "https://example.test")

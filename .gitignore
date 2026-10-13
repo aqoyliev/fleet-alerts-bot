@@ -132,7 +132,3 @@ dmypy.json
 
 .env
 .claude/
-
-# Local scratch webhook payloads for manual testing (may contain real fleet data)
-test_payload.json
-test_payload*.json

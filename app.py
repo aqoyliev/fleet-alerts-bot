@@ -1,28 +1,3 @@
-import asyncio
-import logging
-import os
-from logging.handlers import RotatingFileHandler
-
-_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-os.makedirs(_LOG_DIR, exist_ok=True)
-_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-
-# Console (live tail) + rotating file (so HMAC 403s and other warnings survive a
-# restart and can be grepped after the fact). 5 MB per file, 5 backups kept.
-logging.basicConfig(
-    level=logging.INFO,
-    format=_LOG_FORMAT,
-    handlers=[
-        logging.StreamHandler(),
-        RotatingFileHandler(
-            os.path.join(_LOG_DIR, "bot.log"),
-            maxBytes=5 * 1024 * 1024,
-            backupCount=5,
-            encoding="utf-8",
-        ),
-    ],
-)
-
 from aiogram import executor
 
 from loader import dp, bot
@@ -30,24 +5,63 @@ import middlewares, filters, handlers
 from utils.notify_admins import on_startup_notify
 from utils.set_bot_commands import set_default_commands
 from utils.webhook_handler import start_webhook_server, resume_pending_crash_confirmations
-from utils.db_api import init_pool, close_pool
+from utils.db_api import init_pool, close_pool, run_migrations
+from utils.db_api.groups import ensure_group
+from utils.db_api.admins import seed_super_admins
 from utils.daily_report import schedule_daily_reports
+from data import config
+from data.config import ADMINS
+
+# Hold the scheduled loop for the process's lifetime. asyncio only keeps a weak
+# reference to a running task, so a bare ensure_future can be collected mid-await and
+# the nightly report simply stops happening.
+_daily_report_task = None
+
+
+def _admin_ids() -> list[int]:
+    ids = []
+    for a in ADMINS:
+        try:
+            ids.append(int(a))
+        except (TypeError, ValueError):
+            pass
+    return ids
 
 
 async def on_startup(dispatcher):
     await init_pool()
+    await run_migrations()
+    await ensure_group()
+    await seed_super_admins(_admin_ids())
     await set_default_commands(dispatcher)
     await on_startup_notify(dispatcher)
-    await start_webhook_server(bot, port=8080)
+    await start_webhook_server(bot, port=config.WEBHOOK_PORT)
     # Crash detections whose confirmation wait the last shutdown cut short.
     await resume_pending_crash_confirmations(bot)
-    asyncio.create_task(schedule_daily_reports(bot))
+
+    import asyncio
+    global _daily_report_task
+    _daily_report_task = asyncio.ensure_future(schedule_daily_reports(bot))
 
 
 async def on_shutdown(_):
     await close_pool()
 
 
+# Explicitly request the update types the bot handles. Without this, getUpdates inherits
+# whatever allowed_updates was last remembered on the token — which can silently exclude
+# callback_query (inline buttons) and my_chat_member (added-to-group detection). Passing
+# them explicitly makes delivery deterministic and re-arms them on Telegram's side.
+ALLOWED_UPDATES = [
+    "message",
+    "edited_message",
+    "callback_query",
+    "my_chat_member",
+    "chat_member",
+]
+
+
 if __name__ == '__main__':
     executor.start_polling(dp, on_startup=on_startup, on_shutdown=on_shutdown,
-                           skip_updates=True, relax=0.5, timeout=60)
+                           skip_updates=True, relax=0.5, timeout=60,
+                           allowed_updates=ALLOWED_UPDATES)

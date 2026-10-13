@@ -1,10 +1,13 @@
 """Tests for Motive crash confirmation in utils/webhook_handler.py.
 
 Motive fires its crash webhook the instant the detector trips, before review runs, and
-withdraws the detection from its API when review rejects it. Measured on the
-multi-company bot 2026-07-29..08-01: 59 of 62 crash webhooks alerted on were gone from
-the API afterwards. These cover the downgrade that follows from that, driven through a
-faked lookup so nothing sleeps or touches the network.
+withdraws the detection from its API when review rejects it. Measured 2026-07-29..08-01:
+59 of 62 crash webhooks we alerted on were gone from the API afterwards. These cover the
+downgrade that follows from that, driven through a faked lookup so nothing sleeps or
+touches the network.
+
+Single-company build: the Motive token comes from config.MOTIVE_API_KEY rather than a
+per-company DB row, so there is no company slug threaded through any of this.
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -22,20 +25,25 @@ def test_type_override_wins_over_payload_type():
     assert wh._get_event_type(event) == "hard_brake"
 
 
+def test_type_override_blocks_critical_hard_brake_repromotion():
+    """Without the override checked first, the critical-severity rule would put a
+    withdrawn detection straight back into the crash channel."""
+    event = {"type": "hard_brake", "severity": "critical", "_type_override": "hard_brake"}
+    assert wh._get_event_type(event) == "hard_brake"
+    # …and the promotion still works when nothing was withdrawn.
+    assert wh._get_event_type({"type": "hard_brake", "severity": "critical"}) == "crash"
+
+
 def test_motive_native_crash_type_is_unchanged_without_override():
     assert wh._get_event_type({"type": "crash"}) == "crash"
-
-
-def test_override_does_not_disturb_speeding_action_mapping():
-    """_type_override is checked ahead of the action rule; nothing else may shift."""
-    assert wh._get_event_type({"action": "speeding_event_created", "type": ""}) == "speeding"
 
 
 # ── alert wording ──────────────────────────────────────────────────────────────
 
 def test_unconfirmed_crash_card_says_so():
     event = {"type": "crash", "vehicle": {"number": "2460"}, "_crash_unconfirmed": True}
-    assert "Unconfirmed" in wh._format_event(event)
+    text = wh._format_event(event)
+    assert "Unconfirmed" in text
 
 
 def test_confirmed_crash_card_carries_no_unconfirmed_note():
@@ -43,13 +51,12 @@ def test_confirmed_crash_card_carries_no_unconfirmed_note():
     assert "Unconfirmed" not in wh._format_event(event)
 
 
-def test_downgraded_crash_card_is_a_hard_brake_and_says_nothing_about_confirmation():
-    """A withdrawn detection is routed as a hard brake — it must not read as a crash."""
-    event = {"type": "crash", "_type_override": "hard_brake", "vehicle": {"number": "2460"}}
-    text = wh._format_event(event)
-    assert "HARD BRAKE" in text
-    assert "CRASH" not in text
-    assert "Unconfirmed" not in text
+def test_unconfirmed_note_is_crash_only():
+    """A downgraded detection routes on as hard_brake — it must not carry the crash
+    caveat into a hard-brake card."""
+    event = {"type": "hard_brake", "vehicle": {"number": "2460"},
+             "_crash_unconfirmed": True}
+    assert "Unconfirmed" not in wh._format_event(event)
 
 
 # ── confirmation ───────────────────────────────────────────────────────────────
@@ -68,9 +75,7 @@ def no_sleep(monkeypatch):
 
 @pytest.fixture
 def api_key(monkeypatch):
-    async def _key(_slug):
-        return "test-key"
-    monkeypatch.setattr(wh, "get_motive_api_key", _key)
+    monkeypatch.setattr(wh.config, "MOTIVE_API_KEY", "test-key")
 
 
 def _lookup_returning(monkeypatch, value):
@@ -86,12 +91,12 @@ def _lookup_returning(monkeypatch, value):
 
 async def test_still_listed_confirms_the_crash(monkeypatch, no_sleep, api_key):
     _lookup_returning(monkeypatch, True)
-    assert await wh._motive_crash_is_real({"id": 1588349106}, "mz-cargo") is True
+    assert await wh._motive_crash_is_real({"id": 1588349106}) is True
 
 
 async def test_withdrawn_detection_is_rejected(monkeypatch, no_sleep, api_key):
     _lookup_returning(monkeypatch, False)
-    assert await wh._motive_crash_is_real({"id": 1590006245}, "mz-cargo") is False
+    assert await wh._motive_crash_is_real({"id": 1590006245}) is False
 
 
 async def test_decision_is_taken_at_the_final_probe(monkeypatch, no_sleep, api_key):
@@ -103,37 +108,26 @@ async def test_decision_is_taken_at_the_final_probe(monkeypatch, no_sleep, api_k
         return next(results)
 
     monkeypatch.setattr(wh, "crash_still_listed", _fake)
-    assert await wh._motive_crash_is_real({"id": 1}, "mz-cargo") is False
+    assert await wh._motive_crash_is_real({"id": 1}) is False
 
 
 async def test_lookup_failure_fails_open(monkeypatch, no_sleep, api_key):
     """No evidence is not evidence of no crash."""
     _lookup_returning(monkeypatch, None)
-    assert await wh._motive_crash_is_real({"id": 1}, "mz-cargo") is None
+    assert await wh._motive_crash_is_real({"id": 1}) is None
 
 
 async def test_missing_api_key_fails_open_without_calling_the_api(monkeypatch, no_sleep):
-    """MOTIVE_API_KEY unset is the state this deployment starts in — it must still alert."""
-    async def _no_key(_slug):
-        return None
-
-    monkeypatch.setattr(wh, "get_motive_api_key", _no_key)
+    """MOTIVE_API_KEY is optional in .env — an unset one must not swallow crashes."""
+    monkeypatch.setattr(wh.config, "MOTIVE_API_KEY", "")
     calls = _lookup_returning(monkeypatch, True)
-    assert await wh._motive_crash_is_real({"id": 1}, "mz-cargo") is None
+    assert await wh._motive_crash_is_real({"id": 1}) is None
     assert calls == []
-
-
-async def test_api_key_comes_from_the_env(monkeypatch):
-    """Single-company deployment: the key is config, not a per-company DB column."""
-    monkeypatch.setattr(wh.config, "MOTIVE_API_KEY", "abc123", raising=False)
-    assert await wh.get_motive_api_key("mz-cargo") == "abc123"
-    monkeypatch.setattr(wh.config, "MOTIVE_API_KEY", "", raising=False)
-    assert await wh.get_motive_api_key("mz-cargo") is None
 
 
 async def test_fresh_confirmation_waits_through_every_mark(monkeypatch, no_sleep, api_key):
     _lookup_returning(monkeypatch, True)
-    await wh._motive_crash_is_real({"id": 1}, "mz-cargo")
+    await wh._motive_crash_is_real({"id": 1})
     assert no_sleep == [60, 60, 60]  # 0 → 60 → 120 → 180
 
 
@@ -142,7 +136,7 @@ async def test_fresh_confirmation_waits_through_every_mark(monkeypatch, no_sleep
 async def test_resume_only_waits_out_the_time_still_owed(monkeypatch, no_sleep, api_key):
     """A crash held 100s before the restart has 80s of the 180s left, not another 180."""
     calls = _lookup_returning(monkeypatch, True)
-    assert await wh._motive_crash_is_real({"id": 1}, "mz-cargo", 100.0) is True
+    assert await wh._motive_crash_is_real({"id": 1}, 100.0) is True
     assert no_sleep == [20, 60]  # 100 → 120 (observation), 120 → 180 (verdict)
     assert len(calls) == 2
 
@@ -150,7 +144,7 @@ async def test_resume_only_waits_out_the_time_still_owed(monkeypatch, no_sleep, 
 async def test_resume_past_the_delay_decides_immediately(monkeypatch, no_sleep, api_key):
     """Down longer than the whole wait: Motive's review is long since in, so ask now."""
     calls = _lookup_returning(monkeypatch, False)
-    assert await wh._motive_crash_is_real({"id": 1}, "mz-cargo", 900.0) is False
+    assert await wh._motive_crash_is_real({"id": 1}, 900.0) is False
     assert no_sleep == []          # nothing left to wait for
     assert len(calls) == 1         # and no pointless observation look-ups
 
@@ -162,7 +156,7 @@ def test_verdict_names_cover_every_outcome():
 
 
 async def test_bookkeeping_failure_never_reaches_the_alert_path():
-    """schemas.sql is applied by hand, so the table can be missing on a fresh deploy.
+    """A database that missed the migration can be missing the table entirely.
     _handle_event catches everything — an unguarded raise here would take the crash
     alert down with it."""
     async def _fails():
@@ -176,8 +170,8 @@ def captured_resumes(monkeypatch):
     """Stands in for _handle_event + record_verdict so resume can run without a DB."""
     resumed, verdicts = [], []
 
-    async def _handle(bot, event, company_slug, crash_resume_elapsed=None):
-        resumed.append((event, company_slug, crash_resume_elapsed))
+    async def _handle(bot, event, crash_resume_elapsed=None):
+        resumed.append((event, crash_resume_elapsed))
 
     async def _verdict(event_id, verdict):
         verdicts.append((event_id, verdict))
@@ -200,7 +194,6 @@ def _pending(monkeypatch, *rows):
 def _row(event_id, age_seconds, payload):
     return {
         "event_id": event_id,
-        "company_slug": "mz-cargo",
         "payload": payload,
         "detected_at": datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
     }
@@ -215,9 +208,8 @@ async def test_interrupted_confirmation_is_resumed_with_its_elapsed_time(
     await asyncio.sleep(0)  # let the created task run
 
     assert len(resumed) == 1
-    event, slug, elapsed = resumed[0]
+    event, elapsed = resumed[0]
     assert event["id"] == 1588349106
-    assert slug == "mz-cargo"
     assert 90 <= elapsed < 120       # carried across, not restarted from zero
     assert verdicts == []            # still undecided — the resumed run decides it
 
@@ -270,4 +262,4 @@ async def test_one_unreadable_row_does_not_cost_the_others(monkeypatch, captured
     await wh.resume_pending_crash_confirmations(bot=None)
     await asyncio.sleep(0)
 
-    assert [e["id"] for e, _s, _a in resumed] == [2]
+    assert [e["id"] for e, _a in resumed] == [2]

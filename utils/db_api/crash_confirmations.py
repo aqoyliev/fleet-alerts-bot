@@ -4,14 +4,17 @@ _motive_crash_is_real holds a crash detection for _CRASH_CONFIRM_DELAY before as
 Motive's API whether it still stands. That wait lives in a fire-and-forget task, so
 without a row on disk two things are invisible:
 
-  * whether the gate is doing anything. Hosted logs keep hours, and "no crash alerts
-    went out" cannot by itself tell a gate that is catching withdrawals apart from a
-    Motive detector that simply stopped tripping. The verdict tally can.
+  * whether the gate is doing anything. Railway keeps hours of logs, and "no crash
+    alerts went out" cannot by itself tell a gate that is catching withdrawals apart
+    from a Motive detector that simply stopped tripping. The verdict tally can.
   * a crash held mid-wait when the process restarts. It used to vanish — the one place
     the design failed closed rather than open.
 
 A row is written before the wait and its verdict filled in after, so anything still
 undecided at startup is a wait that was interrupted.
+
+This is the single-company build: every row belongs to config.COMPANY_SLUG, so unlike
+the multi-company original there is no company column to scope by.
 """
 import json
 
@@ -23,7 +26,7 @@ VERDICT_UNKNOWN = "unknown"      # no API key or the lookup failed — sent unco
 VERDICT_EXPIRED = "expired"      # found pending at startup but too stale to alert on
 
 
-async def record_pending(event_id: int | None, company_slug: str, payload: dict) -> None:
+async def record_pending(event_id: int | None, payload: dict) -> None:
     """Note that a crash has entered the confirmation wait.
 
     A redelivery that gets past the in-memory dedup lands on the same event_id and is
@@ -33,11 +36,11 @@ async def record_pending(event_id: int | None, company_slug: str, payload: dict)
         return
     await db.execute(
         """
-        INSERT INTO motive_crash_confirmations (event_id, company_slug, payload)
-        VALUES ($1, $2, $3::jsonb)
+        INSERT INTO motive_crash_confirmations (event_id, payload)
+        VALUES ($1, $2::jsonb)
         ON CONFLICT (event_id) DO NOTHING
         """,
-        event_id, company_slug, json.dumps(payload, default=str),
+        event_id, json.dumps(payload, default=str),
     )
 
 
@@ -59,7 +62,7 @@ async def get_pending_confirmations() -> list[dict]:
     """Confirmations that never reached a verdict — i.e. interrupted by a restart."""
     rows = await db.fetch(
         """
-        SELECT event_id, company_slug, payload, detected_at
+        SELECT event_id, payload, detected_at
         FROM motive_crash_confirmations
         WHERE verdict IS NULL
         ORDER BY detected_at

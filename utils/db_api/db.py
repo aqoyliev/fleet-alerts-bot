@@ -1,12 +1,54 @@
+import logging
+from pathlib import Path
+
 import asyncpg
 from data import config
 
+logger = logging.getLogger(__name__)
+
 pool: asyncpg.Pool | None = None
+
+# Idempotent, additive migrations applied on every startup so existing databases pick
+# up new columns/indexes without a manual SQL step (Railway deployments don't run
+# schemas.sql by hand). Fresh databases get everything from schemas.sql first; these
+# ALTERs are the no-ops that upgrade older ones.
+_MIGRATIONS = [
+    # Crash DMs are on for every admin unless they turn them off. A column defaulting to
+    # TRUE is what makes that work on both sides: existing rows get TRUE when it is added,
+    # new admins get TRUE for free, and an admin who opts out stays opted out — seeding
+    # subscription rows instead would silently re-enable them on the next startup.
+    "ALTER TABLE admins ADD COLUMN IF NOT EXISTS crash_dm BOOLEAN NOT NULL DEFAULT TRUE",
+]
 
 
 async def init_pool():
     global pool
     pool = await asyncpg.create_pool(config.DATABASE_URL)
+
+
+async def run_migrations():
+    """Apply schemas.sql (all CREATE ... IF NOT EXISTS) then additive column/index
+    migrations. Every statement is idempotent; failures are logged, not fatal, so a
+    startup is never blocked by a migration that a manual step already covered."""
+    schema_sql = Path(__file__).with_name("schemas.sql").read_text(encoding="utf-8")
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(schema_sql)
+        except Exception as e:
+            logger.warning(f"schema apply failed (continuing): {e}")
+        for stmt in _MIGRATIONS:
+            try:
+                await conn.execute(stmt)
+            except Exception as e:
+                logger.warning(f"migration failed ({stmt!r}): {e}")
+
+    # What a database from the old multi-company schema needs before this build can
+    # write to it. Imported here because legacy.py is built on this module's helpers.
+    from utils.db_api.legacy import adopt_legacy_violations
+    try:
+        await adopt_legacy_violations()
+    except Exception as e:
+        logger.error(f"could not adapt the legacy violations table: {e}", exc_info=True)
 
 
 async def close_pool():
