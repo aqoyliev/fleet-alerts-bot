@@ -1,11 +1,11 @@
--- HF Alerts Bot — Database Schema (one company, one alerts group)
+-- Fleet Alerts Bot — Database Schema (one company, one alerts group)
 --
 -- This deployment serves exactly ONE company and posts to ONE Telegram group; the
 -- company's identity and provider credentials come from the environment (see
 -- data/config.py), so there is no `companies` table and no table of groups here.
 --
 -- Every statement is CREATE ... IF NOT EXISTS, and the whole file runs on every boot.
--- A database that predates this schema — HF's ran the multi-company one — still holds
+-- A database that predates this schema — HF's and MZ CARGO's ran the multi-company one — still holds
 -- `companies`, `company_groups`, `group_event_types` and `admin_companies`. Nothing here
 -- drops or rewrites them: the group and its event filter are copied out once (see
 -- utils/db_api/legacy.py) and the old tables are left exactly as they were, so the
