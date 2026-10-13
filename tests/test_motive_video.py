@@ -1,8 +1,8 @@
 """Tests for the Motive clip follow-up, and for tailgating NOT being an event here.
 
-HF is a Samsara fleet and none of the Motive path runs in production on this branch. It
-is kept, and kept tested, because it is single-company's and this branch follows that
-one: the day a Motive webhook secret is configured here, this is the behaviour.
+MZ CARGO is the one deployment in this family where Motive's deliveries are live, so
+unlike on hf — where this path is carried and never runs — what is tested here is what
+the group sees.
 
 Motive sends the webhook the instant its detector trips, which is before the dashcam clip
 has been transcoded: the delivery says a clip exists and every URL in it is still null.
@@ -91,6 +91,7 @@ def test_without_an_api_key_there_is_nothing_to_ask(monkeypatch):
     assert wh._motive_clip_is_coming(_event()) is False
 
 
+
 # -- the follow-up itself ------------------------------------------------------
 
 @pytest.fixture
@@ -176,13 +177,10 @@ async def test_a_clip_that_never_arrives_costs_the_wait_and_nothing_else(poll):
 
 
 async def test_it_asks_under_the_type_motive_filed_the_event_as(poll):
-    """A critical hard_brake is a crash to the bot and a hard_brake to Motive. Asking
-    for the routed type would look the event up under a name Motive never gave it."""
-    event = _event(metadata={"severity": "critical"})
-    assert wh._get_event_type(event) == "crash"
-
+    """The lookup is narrowed by event type, and the type that narrows it has to be the
+    one in Motive's own payload — whatever the bot ends up calling the event."""
     poll["script"]([("found", _ready_row())])
-    await wh._wait_for_motive_clip(event)
+    await wh._wait_for_motive_clip(_event(type="Hard_Brake"))
 
     assert poll["asked_for"] == "hard_brake"
 
@@ -241,7 +239,7 @@ async def test_the_card_and_the_clip_arrive_as_one_message(alerted):
     assert sent["is_video"] is True
     assert sent["media"] == [b"clip"]
     # The whole card, not a bare caption: there is no earlier message to refer back to.
-    assert "HARSH BRAKE" in sent["text"]
+    assert "HARD BRAKE" in sent["text"]
     assert "1269" in sent["text"]
 
 
@@ -250,7 +248,7 @@ async def test_a_clip_that_never_came_still_sends_the_card_once(alerted):
     await wh._handle_event(object(), _event())
 
     assert len(alerted["sent"]) == 1
-    assert "HARSH BRAKE" in alerted["sent"][0]["text"]
+    assert "HARD BRAKE" in alerted["sent"][0]["text"]
     assert alerted["sent"][0]["media"] == []
 
 
@@ -266,7 +264,7 @@ async def test_an_event_with_no_footage_coming_is_not_delayed(alerted):
 # -- tailgating ----------------------------------------------------------------
 
 def test_tailgating_is_recognised_and_not_alerted_on():
-    """single-company added tailgating to its alerts. HF's list does not have it, and
+    """single-company added tailgating to its alerts. MZ's list does not have it, and
     that is a decision rather than an omission — so the alias stays, which is what lets
     a Samsara "Tailgating" event be recognised and dropped instead of going out as a
     generic harsh event."""

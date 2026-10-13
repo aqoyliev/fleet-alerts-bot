@@ -2,7 +2,9 @@ from aiogram import types
 from aiogram.dispatcher.filters.builtin import CommandHelp
 
 from loader import dp
+from data import config
 from utils.db_api.admins import is_super_admin
+from utils.tg_text import esc
 
 
 @dp.message_handler(CommandHelp(), chat_type=types.ChatType.PRIVATE)
@@ -11,7 +13,7 @@ async def bot_help(message: types.Message):
     the alerts group it would dump all of it into the chat for everyone; the group has
     its own, shorter /help in handlers/groups/group_events.py."""
     text = [
-        "📋 <b>HF Alerts Bot</b>\n",
+        f"📋 <b>{esc(config.COMPANY_NAME)} — Alerts Bot</b>\n",
         "This bot monitors your fleet and reports safety violations.\n",
         "<b>Commands:</b>",
         "/start — Open the main menu",

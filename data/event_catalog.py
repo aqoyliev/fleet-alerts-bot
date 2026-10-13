@@ -27,11 +27,11 @@ together with it, never alone.
 # event_type doubles as its token wherever the UI needs one string per row.
 GROUP_FILTER_TYPES = [
     (("speeding",),                     "🚨", "Speeding"),
-    (("hard_brake",),                   "🛑", "Harsh Brake"),
+    (("hard_brake",),                   "🛑", "Hard Brake"),
     (("harsh_acceleration",),           "🚀", "Harsh Acceleration"),
     (("harsh_turn", "hard_cornering"),  "↩️", "Harsh Turn"),
     (("forward_collision_warning",),    "⚠️", "Forward Collision"),
-    (("stop_sign_violation",),          "🛑", "Rolling Stop"),
+    (("stop_sign_violation",),          "🛑", "Stop Sign Violation"),
     (("cell_phone",),                   "📵", "Cell Phone Usage"),
     (("no_seat_belt",),                 "🚫", "No Seat Belt"),
     (("inattentive_driving",),          "😵", "Inattentive Driving"),

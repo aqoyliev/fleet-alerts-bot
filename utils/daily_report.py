@@ -38,10 +38,10 @@ _EVENT_EMOJI = {
 }
 
 _EVENT_LABEL = {
-    "hard_brake":                    "Harsh Brake",
+    "hard_brake":                    "Hard Brake",
     "crash":                         "Crash",
     "cell_phone":                    "Cell Phone Usage",
-    "stop_sign_violation":           "Rolling Stop",
+    "stop_sign_violation":           "Stop Sign Violation",
     "road_facing_cam_obstruction":   "Road Camera Obstructed",
     "driver_facing_cam_obstruction": "Driver Camera Obstructed",
     "forward_collision_warning":     "Forward Collision Warning",

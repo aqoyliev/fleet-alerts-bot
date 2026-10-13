@@ -25,13 +25,23 @@ def test_type_override_wins_over_payload_type():
     assert wh._get_event_type(event) == "hard_brake"
 
 
-def test_type_override_blocks_critical_hard_brake_repromotion():
-    """Without the override checked first, the critical-severity rule would put a
-    withdrawn detection straight back into the crash channel."""
-    event = {"type": "hard_brake", "severity": "critical", "_type_override": "hard_brake"}
+def test_a_critical_hard_brake_is_still_a_hard_brake():
+    """hf and single-company promote a Motive hard_brake of critical severity to a crash
+    and hold it for the confirmation wait. MZ never did: Motive files its crashes as
+    type `crash`, and a promoted hard brake could only come back out of the wait three
+    minutes late as the hard brake it was, or as an "unconfirmed CRASH" on a day
+    Motive's API is down. A merge from hf must not bring the promotion with it."""
+    for event in (
+        {"type": "hard_brake", "severity": "critical"},
+        {"type": "hard_brake", "metadata": {"severity": "critical"}},
+        {"type": "hard_brake", "severity": "CRITICAL", "_source": "samsara"},
+    ):
+        assert wh._get_event_type(event) == "hard_brake", event
+
+
+def test_a_withdrawn_crash_stays_a_hard_brake_whatever_its_severity():
+    event = {"type": "crash", "severity": "critical", "_type_override": "hard_brake"}
     assert wh._get_event_type(event) == "hard_brake"
-    # …and the promotion still works when nothing was withdrawn.
-    assert wh._get_event_type({"type": "hard_brake", "severity": "critical"}) == "crash"
 
 
 def test_motive_native_crash_type_is_unchanged_without_override():

@@ -1,10 +1,12 @@
 """Layout of the alert card built by utils.webhook_handler._format_event.
 
-HF's cards are the plain ones: the title, a blank line, then one field per row. They are
-meant to stay visibly unlike single-company's, which are ruled into blocks. The wording
-of the measurements is covered elsewhere (test_speeding_enrichment, test_motive_crash,
-test_samsara); what these lock down is the shape — the order of the rows, how the unit
-is written, and which rows are left out when there is nothing to put in them.
+MZ's cards are the ones its group has always been shown: the title, a blank line, the
+unit on a row of its own, one field per row, and under a blank line which provider
+reported it. hf's label the unit and leave the provider off; single-company's are ruled
+into blocks. The wording of the measurements is covered elsewhere
+(test_speeding_enrichment, test_motive_crash, test_samsara); what these lock down is the
+shape — the order of the rows, how the unit is written, which rows are left out when
+there is nothing to put in them, and what comes after the signature.
 """
 
 from utils.webhook_handler import (
@@ -43,7 +45,8 @@ def test_title_is_followed_by_a_blank_line_not_a_rule():
 def test_row_order_is_unit_driver_severity_time_then_the_measurements():
     out = _format_event(SPEEDING)
     order = [_row(out, label) for label in
-             ("Vehicle:", "Driver:", "Severity:", "Time:", "Average Speed:", "Location:")]
+             ("<code>375</code>", "Driver:", "Severity:", "Time:", "Average Speed:",
+              "Location:", "via ")]
     assert order == sorted(order)
 
 
@@ -51,14 +54,16 @@ def test_severity_row_carries_its_label_emoji_and_its_level_emoji():
     assert "📊 <b>Severity:</b> 🔴 High" in _format_event(SPEEDING)
 
 
-def test_hard_brake_is_titled_harsh_brake():
+def test_a_hard_brake_keeps_motives_name_for_it():
+    """hf titles this HARSH BRAKE, after Samsara. MZ's group has read HARD BRAKE since
+    the day it was created, and half of what it reads comes from Motive."""
     out = _format_event({"type": "hard_brake", "vehicle": {"number": "2460"}})
-    assert _rows(out)[0] == "🛑 <b>HARSH BRAKE</b>"
+    assert _rows(out)[0] == "🛑 <b>HARD BRAKE</b>"
 
 
-def test_stop_sign_violation_is_titled_rolling_stop():
+def test_a_stop_sign_violation_is_called_that():
     out = _format_event({"type": "stop_sign_violation", "vehicle": {"number": "2460"}})
-    assert _rows(out)[0] == "🛑 <b>ROLLING STOP</b>"
+    assert _rows(out)[0] == "🛑 <b>STOP SIGN VIOLATION</b>"
 
 
 def test_an_unidentified_driver_gets_no_row_at_all():
@@ -83,21 +88,23 @@ def test_the_time_row_is_always_there():
 
 # ── the unit ───────────────────────────────────────────────────────────────────
 
-def test_a_bare_unit_number_is_one_copyable_span():
+def test_the_unit_is_a_row_of_its_own_with_no_label():
     out = _format_event({"type": "hard_brake", "vehicle": {"number": "2460"}})
-    assert "🚛 <b>Vehicle:</b> <code>2460</code>" in _rows(out)
+    assert _rows(out)[2] == "<code>2460</code>"
+    assert "Vehicle:" not in out
 
 
 def test_the_number_and_what_follows_it_are_separate_spans():
-    """So that a tap copies the number alone, which is what gets pasted into Samsara."""
+    """So that a tap copies the number alone, which is what gets pasted into the
+    provider's dashboard."""
     out = _format_event({"type": "hard_brake", "vehicle": {"number": "1196 - JOHN"}})
-    assert "🚛 <b>Vehicle:</b> <code>1196</code> <code>- JOHN</code>" in _rows(out)
+    assert _rows(out)[2] == "<code>1196</code> <code>- JOHN</code>"
 
 
 def test_a_leading_unit_label_is_dropped_however_it_is_spelled():
     for spelled in ("Unit 1196", "unit:1196", "UNIT #1196", "unit-1196", "Unit # 1196"):
         out = _format_event({"type": "hard_brake", "vehicle": {"number": spelled}})
-        assert "🚛 <b>Vehicle:</b> <code>1196</code>" in _rows(out), spelled
+        assert _rows(out)[2] == "<code>1196</code>", spelled
 
 
 def test_the_card_and_the_stored_row_agree_on_the_unit():
@@ -110,7 +117,7 @@ def test_the_card_and_the_stored_row_agree_on_the_unit():
 
 def test_a_missing_unit_is_a_dash_not_an_empty_span():
     out = _format_event({"type": "hard_brake", "vehicle": {"number": ""}})
-    assert "🚛 <b>Vehicle:</b> —" in _rows(out)
+    assert _rows(out)[2] == "—"
     assert "<code></code>" not in out
 
 
@@ -121,42 +128,51 @@ def test_the_stored_unit_fits_the_column():
 def test_the_crash_video_caption_uses_the_same_unit_markup():
     caption = _format_crash_video_caption({"type": "crash",
                                            "vehicle": {"number": "Unit 2460 ANN"}})
-    assert caption == "💥 <b>CRASH</b> · <code>2460</code> <code>ANN</code>"
+    assert caption == "💥 <b>CRASH</b> — <code>2460</code> <code>ANN</code>"
 
 
-# ── footer notes ───────────────────────────────────────────────────────────────
+# ── the signature, and what follows it ─────────────────────────────────────────
 
-def test_footer_notes_sit_together_under_one_blank_line():
-    out = _format_crash_initial(
-        {"type": "crash", "vehicle": {"number": "2460"}, "location": "I-95 N",
-         "severity": "critical", "_source": "samsara", "_crash_unconfirmed": True},
-        "HAULAGE FREIGHT LLC",
-    )
-    rows = _rows(out)
-    unconfirmed = _row(out, "Unconfirmed")
-    pending = _row(out, "Video pending")
-    assert pending == unconfirmed + 1
-    assert rows[unconfirmed - 1] == ""
-    assert rows[-1] == rows[pending]
-    # The title's blank line and the footer's, and no third.
+def test_every_card_says_which_provider_reported_it():
+    """MZ runs Samsara and Motive side by side into one group. Which of them saw an
+    event decides where an admin goes to look at it, and nothing else on the card says."""
+    samsara = _format_event({"type": "hard_brake", "vehicle": {"number": "2460"},
+                             "_source": "samsara"})
+    motive = _format_event({"type": "hard_brake", "vehicle": {"number": "2460"}})
+    assert _rows(samsara)[-2:] == ["", "<i>via Samsara</i>"]
+    assert _rows(motive)[-2:] == ["", "<i>via Motive</i>"]
+
+
+def test_a_card_with_no_notes_ends_on_its_signature():
+    rows = _rows(_format_event(SPEEDING))
+    assert rows[-1] == "<i>via Motive</i>"
+    # The title's blank line and the signature's, and no third.
     assert rows.count("") == 2
 
 
-def test_no_notes_means_no_trailing_blank_line():
-    rows = _rows(_format_event(SPEEDING))
-    assert rows.count("") == 1
-    assert rows[-1] != ""
+def test_an_unconfirmed_crash_says_so_above_the_signature():
+    out = _format_event({"type": "crash", "vehicle": {"number": "2460"},
+                         "_crash_unconfirmed": True})
+    rows = _rows(out)
+    unconfirmed = _row(out, "Unconfirmed")
+    assert rows[unconfirmed - 1] == ""
+    assert rows[unconfirmed + 1:] == ["", "<i>via Motive</i>"]
 
 
-def test_alerts_are_not_tagged_with_their_provider():
-    """Every alert here comes from Samsara. A "via Samsara" line under each one would be
-    the same four words on every card."""
-    out = _format_event({"type": "hard_brake", "vehicle": {"number": "2460"},
-                         "_source": "samsara"})
-    assert "via Samsara" not in out
+def test_notes_come_last_under_a_blank_line_of_their_own():
+    """"Video pending…" is about the message, not about the event, so it sits below the
+    signature the way it always has in this group."""
+    out = _format_crash_initial(
+        {"type": "crash", "vehicle": {"number": "2460"}, "location": "I-95 N",
+         "severity": "critical", "_source": "samsara"},
+    )
+    assert _rows(out)[-4:] == ["", "<i>via Samsara</i>", "", "📹 <i>Video pending…</i>"]
 
 
-def test_company_name_is_a_subtitle_on_crash_only():
+def test_the_company_is_not_named_on_any_card():
+    """Every card in this group is this company's. hf prints the name under a crash's
+    title; MZ took it off its cards in May and it stays off."""
     crash = {"type": "crash", "vehicle": {"number": "2460"}}
-    assert _rows(_format_event(crash, "HAULAGE FREIGHT LLC"))[2] == "HAULAGE FREIGHT LLC"
-    assert "HAULAGE FREIGHT LLC" not in _format_event(SPEEDING, "HAULAGE FREIGHT LLC")
+    assert "MZ CARGO INC" not in _format_event(crash, "MZ CARGO INC")
+    assert _rows(_format_event(crash, "MZ CARGO INC"))[2] == "<code>2460</code>"
+    assert "MZ CARGO INC" not in _format_event(SPEEDING, "MZ CARGO INC")

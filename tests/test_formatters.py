@@ -1,8 +1,9 @@
 """The report texts: the nightly digest, /report, /top, and the top-10 header.
 
-These are HF's own, kept as they were when the branch took single-company as its base —
-the wording differs from that branch's on purpose ("Unit 1196", "Harsh Brake", "Rolling
-Stop"), and a merge from it must not quietly bring its wording back.
+These are MZ's own, kept as they were when the branch took hf as its base — the wording
+differs from that branch's on purpose ("Hard Brake" where hf says "Harsh Brake", "Stop
+Sign Violation" where it says "Rolling Stop"), and a merge from it must not quietly
+bring its wording back.
 """
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -18,8 +19,8 @@ ET = ZoneInfo("America/New_York")
 # ── _format_daily_report ───────────────────────────────────────────────────────
 
 def test_daily_report_no_violations():
-    result = _format_daily_report("HAULAGE FREIGHT LLC", [], "May 07, 2026")
-    assert "HAULAGE FREIGHT LLC" in result
+    result = _format_daily_report("MZ CARGO INC", [], "May 07, 2026")
+    assert "MZ CARGO INC" in result
     assert "May 07, 2026" in result
     assert "No violations" in result
 
@@ -29,20 +30,20 @@ def test_daily_report_speeding_appears_first():
         {"event_type": "speeding",    "vehicle_number": "1196", "total": 1},
         {"event_type": "cell_phone",  "vehicle_number": "1006", "total": 8},
     ]
-    result = _format_daily_report("HAULAGE FREIGHT LLC", rows, "May 07, 2026")
-    assert result.index("Speeding") < result.index("Harsh Brake")
+    result = _format_daily_report("MZ CARGO INC", rows, "May 07, 2026")
+    assert result.index("Speeding") < result.index("Hard Brake")
 
 def test_daily_report_other_types_are_ordered_by_their_totals():
     rows = [
         {"event_type": "cell_phone",  "vehicle_number": "1006", "total": 2},
         {"event_type": "hard_brake",  "vehicle_number": "1196", "total": 10},
     ]
-    result = _format_daily_report("HAULAGE FREIGHT LLC", rows, "May 07, 2026")
-    assert result.index("Harsh Brake") < result.index("Cell Phone Usage")
+    result = _format_daily_report("MZ CARGO INC", rows, "May 07, 2026")
+    assert result.index("Hard Brake") < result.index("Cell Phone Usage")
 
 def test_daily_report_shows_vehicle_and_count():
     rows = [{"event_type": "speeding", "vehicle_number": "1196 - JOHN", "total": 7}]
-    result = _format_daily_report("HAULAGE FREIGHT LLC", rows, "May 07, 2026")
+    result = _format_daily_report("MZ CARGO INC", rows, "May 07, 2026")
     assert "🚛 Unit 1196 - JOHN — 7" in result
 
 def test_daily_report_multiple_vehicles_sorted_by_count():
@@ -50,20 +51,20 @@ def test_daily_report_multiple_vehicles_sorted_by_count():
         {"event_type": "speeding", "vehicle_number": "low",  "total": 1},
         {"event_type": "speeding", "vehicle_number": "high", "total": 9},
     ]
-    result = _format_daily_report("HAULAGE FREIGHT LLC", rows, "May 07, 2026")
+    result = _format_daily_report("MZ CARGO INC", rows, "May 07, 2026")
     assert result.index("high") < result.index("low")
 
 def test_daily_report_html_bold_company_name():
-    result = _format_daily_report("HAULAGE FREIGHT LLC", [], "May 07, 2026")
-    assert "<b>HAULAGE FREIGHT LLC</b>" in result
+    result = _format_daily_report("MZ CARGO INC", [], "May 07, 2026")
+    assert "<b>MZ CARGO INC</b>" in result
 
 def test_daily_report_uses_the_reports_own_wording_for_a_type():
     """Not the alert card's headline: "SPEEDING OVER POSTED" over a list of units reads
     as if every unit under it were a separate announcement."""
     rows = [{"event_type": "stop_sign_violation", "vehicle_number": "1196", "total": 1},
             {"event_type": "speeding", "vehicle_number": "1196", "total": 1}]
-    result = _format_daily_report("HAULAGE FREIGHT LLC", rows, "May 07, 2026")
-    assert "<b>Rolling Stop</b>" in result
+    result = _format_daily_report("MZ CARGO INC", rows, "May 07, 2026")
+    assert "<b>Stop Sign Violation</b>" in result
     assert "<b>Speeding</b>" in result
     assert "OVER POSTED" not in result
 
@@ -75,23 +76,23 @@ def test_daily_report_has_wording_for_every_type_the_bot_alerts_on():
 def test_daily_report_survives_a_type_it_has_no_wording_for():
     """An old row, or a type added to the alerts and forgotten here."""
     rows = [{"event_type": "near_miss", "vehicle_number": "1196", "total": 1}]
-    result = _format_daily_report("HAULAGE FREIGHT LLC", rows, "May 07, 2026")
+    result = _format_daily_report("MZ CARGO INC", rows, "May 07, 2026")
     assert "<b>Near Miss</b>" in result
 
 
 # ── _format_top_report ─────────────────────────────────────────────────────────
 
 def test_top_report_no_violations():
-    result = _format_top_report("HAULAGE FREIGHT LLC", [], "May 07, 2026", 10)
+    result = _format_top_report("MZ CARGO INC", [], "May 07, 2026", 10)
     assert "No violations" in result
-    assert "HAULAGE FREIGHT LLC" in result
+    assert "MZ CARGO INC" in result
 
 def test_top_report_numbered_ranking():
     rows = [
         {"vehicle_number": "1196", "total": 10},
         {"vehicle_number": "1006", "total": 5},
     ]
-    result = _format_top_report("HAULAGE FREIGHT LLC", rows, "May 07, 2026", 10)
+    result = _format_top_report("MZ CARGO INC", rows, "May 07, 2026", 10)
     assert "1. 🚛 Unit 1196 — 10" in result
     assert "2. 🚛 Unit 1006 — 5" in result
 
@@ -100,17 +101,17 @@ def test_top_report_order_preserved():
         {"vehicle_number": "first",  "total": 10},
         {"vehicle_number": "second", "total": 5},
     ]
-    result = _format_top_report("HAULAGE FREIGHT LLC", rows, "May 07, 2026", 10)
+    result = _format_top_report("MZ CARGO INC", rows, "May 07, 2026", 10)
     assert result.index("first") < result.index("second")
 
 def test_top_report_shows_count():
     rows = [{"vehicle_number": "1196", "total": 42}]
-    result = _format_top_report("HAULAGE FREIGHT LLC", rows, "May 07, 2026", 10)
+    result = _format_top_report("MZ CARGO INC", rows, "May 07, 2026", 10)
     assert "42" in result
 
 def test_top_report_escapes_the_unit():
     rows = [{"vehicle_number": "A&B <1>", "total": 1}]
-    result = _format_top_report("HAULAGE FREIGHT LLC", rows, "May 07, 2026", 10)
+    result = _format_top_report("MZ CARGO INC", rows, "May 07, 2026", 10)
     assert "Unit A&amp;B &lt;1&gt;" in result
 
 
@@ -155,11 +156,11 @@ def test_top10_speeding_lists_every_event_with_no_three_a_day_note():
     says so in the header. HF dropped that rule: every event is listed, so the note
     would describe a filter that is not applied."""
     text = _format_top10_text([{"vehicle_number": "1196", "total": 4}],
-                              "May 04 – May 10, 2026", "HAULAGE FREIGHT LLC", "speeding")
+                              "May 04 – May 10, 2026", "MZ CARGO INC", "speeding")
     assert "Speeding only" in text
     assert "3+" not in text
     assert "1. 🚛 Unit 1196 — 4" in text
 
 def test_top10_empty():
-    text = _format_top10_text([], "May 04 – May 10, 2026", "HAULAGE FREIGHT LLC", "other")
+    text = _format_top10_text([], "May 04 – May 10, 2026", "MZ CARGO INC", "other")
     assert "No violations found" in text

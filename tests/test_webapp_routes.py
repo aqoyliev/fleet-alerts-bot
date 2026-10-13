@@ -198,6 +198,6 @@ async def test_the_alerts_feed_serializes_datetimes(client, monkeypatch):
     assert resp.status == 200
     data = await resp.json()
     assert isinstance(data["items"][0]["occurred_at"], str)
-    assert data["items"][0]["label"] == "HARSH BRAKE"
+    assert data["items"][0]["label"] == "HARD BRAKE"
     # A full page implies more, and the cursor it hands back is a datetime too.
     assert isinstance(data["next"]["before_ts"], str)

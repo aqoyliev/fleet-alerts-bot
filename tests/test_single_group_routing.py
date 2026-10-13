@@ -177,7 +177,7 @@ async def test_a_complete_record_is_not_marked_as_an_error(routed, monkeypatch):
 
     assert routed["sent"] == [[GROUP, ADMIN]]
     assert "Possible error" not in routed["texts"][0]
-    assert "HARSH BRAKE" in routed["texts"][0]
+    assert "HARD BRAKE" in routed["texts"][0]
     assert "No camera media available" in routed["texts"][0]
 
 
