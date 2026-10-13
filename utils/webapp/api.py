@@ -140,6 +140,20 @@ def _period_range(period: str) -> tuple[datetime, datetime, str]:
     return (midnight - timedelta(days=days) if days else midnight), now, label
 
 
+def _chip_token(event_type: str) -> str:
+    """The catalog row a stored event type belongs to, or itself.
+
+    The feed filters by row now (see alerts), so a By-type row on the numbers screen has
+    to link with the row's token rather than with the exact type it counted -- otherwise
+    tapping "Camera Obstructed · 14" on a Samsara fleet asks the feed for
+    obstructed_camera, which is a type the chips do not know.
+    """
+    for types, _, _ in GROUP_FILTER_TYPES:
+        if event_type in types:
+            return types[0]
+    return event_type
+
+
 def _event_label(event_type: str) -> tuple[str, str]:
     """Emoji and title for an event type, from the same map the alert cards use."""
     from utils.webhook_handler import EVENT_TYPE_MAP
@@ -205,7 +219,11 @@ async def bootstrap(request: web.Request) -> web.Response:
         "company": {"name": config.COMPANY_NAME, "slug": config.COMPANY_SLUG},
         "bot_username": await _username(),
         "event_types": [
-            {"type": types[0], "emoji": emoji, "label": label}
+            # `types` as well as the token: a stored event type has to be mapped back to
+            # the row it belongs to in a couple of places on the client -- a group's
+            # filter count, and the feed link under a By-type row -- and without the full
+            # membership the client would have to keep its own copy of the aliases.
+            {"type": types[0], "types": list(types), "emoji": emoji, "label": label}
             for types, emoji, label in GROUP_FILTER_TYPES
         ],
         "main_group_id": config.MAIN_GROUP_ID,
@@ -253,7 +271,8 @@ async def stats(request: web.Request) -> web.Response:
         "totals": dict(totals),
         "by_type": [
             {**row, "emoji": _event_label(row["event_type"])[0],
-             "label": _event_label(row["event_type"])[1]}
+             "label": _event_label(row["event_type"])[1],
+             "token": _chip_token(row["event_type"])}
             for row in by_type
         ],
         "by_day": by_day,
