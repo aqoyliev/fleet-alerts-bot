@@ -1,23 +1,30 @@
-"""Carrying a database from the old multi-company schema over to this one.
+"""Carrying a database that an older build created over to this one.
 
-MZ CARGO's deployment ran the multi-company bot's schema before this branch took hf (and
-through it single-company) as its base: a `companies` table, the alerts group as a
-`company_groups` row with its event filter in `group_event_types`, and a `company_slug`
-on every violation and on every Motive crash confirmation. None of that was ever
-configured in the environment — the group's chat id lives only in the database — so a
-deploy that simply started on the new tables would come up with months of history it
-could no longer write next to and no idea where its alerts go.
+Every company on this branch got here from somewhere else, and its database shows it.
+
+HF's and MZ CARGO's ran the multi-company bot's schema: a `companies` table, the alerts
+group as a `company_groups` row with its event filter in `group_event_types`, and a
+`company_slug` on every violation and on every Motive crash confirmation. None of that
+was ever configured in the environment — the group's chat id lives only in the database
+— so a deploy that simply started on the new tables would come up with months of history
+it could no longer write next to and no idea where its alerts go.
+
+JTR's was created by the single-group template this branch replaces. Its tables are
+already the new ones, less the group's event filter — and that template kept crash
+alerts out of the group in code, which this build does with the filter. So the one thing
+to carry over there is a rule (adopt_single_group_template).
 
 Everything here reads the old tables and leaves them as they are. That is deliberate:
 the previous build keeps working against this database, so rolling a bad deploy back is
 a redeploy and not a restore.
 
-On a database that never had the old schema, every function here finds nothing and does
+On a database none of this applies to, every function here finds nothing and does
 nothing.
 """
 import logging
 
 from data import config
+from data.event_catalog import EVENT_TYPES
 from utils.db_api import db
 
 logger = logging.getLogger(__name__)
@@ -214,3 +221,53 @@ async def legacy_group() -> dict | None:
         # the same group can be in it twice, and that is not a second group.
         "others": sorted({r["telegram_group_id"] for r in rows[1:]} - {chat_id}),
     }
+
+
+async def adopt_single_group_template() -> bool:
+    """Keep crash alerts out of the group on a database the old single-group template made.
+
+    That template sent a crash to the admins' DMs and never to the group, as a rule in
+    its code. Here a crash is routed like every other type and the group's filter decides
+    — and an empty filter means "every type". Started on such a database unprepared, this
+    build would begin posting crashes into a group that has never had one, with nobody
+    having decided that it should.
+
+    So the rule is carried over as what it now is: a filter listing every type except
+    crashes. From then on it is an admin's to change, on the panel's Group screen, like
+    the rest of the filter.
+
+    Every type the build knows, and not only the ones this deployment alerts on today:
+    this runs once, on the first boot, and which optional types the deployment takes is a
+    variable that may be set — or corrected — after it. A filter written from that
+    variable would go on keeping out of the group whatever was added to it later.
+
+    The template's mark is an `alert_group` table with no `alert_group_event_types`
+    beside it. That is why this has to run BEFORE schemas.sql is applied, which creates
+    the filter table on any database that lacks it. The table and its rows are written
+    in one transaction, so there is no moment — and no crash of this process — that
+    leaves the table present and empty, which would read as "every type" for good. Two
+    containers of a rolling deploy cannot both do it: the second one's CREATE fails.
+
+    Returns True if it carried the rule over. A database from any other origin has
+    either both tables or neither, and is left alone.
+    """
+    if not await _has_table("alert_group") or await _has_table("alert_group_event_types"):
+        return False
+    event_types = sorted(set(EVENT_TYPES) - {"crash"})
+    async with db.pool.acquire() as conn:
+        async with conn.transaction():
+            # The same definition schemas.sql gives it; that file's IF NOT EXISTS then
+            # finds it already there.
+            await conn.execute(
+                "CREATE TABLE alert_group_event_types (event_type VARCHAR(50) PRIMARY KEY)"
+            )
+            await conn.executemany(
+                "INSERT INTO alert_group_event_types (event_type) VALUES ($1)",
+                [(t,) for t in event_types],
+            )
+    logger.info(
+        f"This database is from the single-group template: crash alerts stay out of the "
+        f"group, as they did there. The group's filter now lists every other event "
+        f"type; an admin can change it on the Group screen."
+    )
+    return True

@@ -425,3 +425,105 @@ async def test_nothing_in_the_old_tables_is_ever_written(use):
                     "ALTER TABLE motive_crash_confirmations ALTER COLUMN company_slug"))
     for name in ("companies", "company_groups", "group_event_types", "admin_companies"):
         assert not any(name in s for s in db.executed)
+
+
+# ── a database the single-group template made ──────────────────────────────────
+
+class _Conn:
+    def __init__(self, log, fail_on=None):
+        self.log, self.fail_on = log, fail_on
+
+    def transaction(self):
+        return self
+
+    async def __aenter__(self):
+        self.log.append("BEGIN")
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.log.append("ROLLBACK" if exc_type else "COMMIT")
+        return False
+
+    async def execute(self, query, *args):
+        self.log.append(" ".join(query.split()))
+
+    async def executemany(self, query, rows):
+        if self.fail_on == "insert":
+            raise RuntimeError("connection lost")
+        self.log.append((" ".join(query.split()), [r[0] for r in rows]))
+
+
+class _Pool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _template_db(tables, fail_on=None):
+    db = _Db(tables=tables)
+    db.log = []
+    db.pool = _Pool(_Conn(db.log, fail_on))
+    return db
+
+
+async def test_the_templates_database_keeps_crashes_out_of_the_group(use):
+    """JTR's. That build never posted a crash to the group, as a rule in its code; here
+    the group's filter decides, and no filter at all means every type."""
+    db = use(_template_db({"alert_group", "violations", "admins"}))
+
+    assert await legacy.adopt_single_group_template() is True
+
+    create, (insert, types) = db.log[1], db.log[2]
+    assert create.startswith("CREATE TABLE alert_group_event_types")
+    assert insert.startswith("INSERT INTO alert_group_event_types")
+    assert "crash" not in types
+    assert {"speeding", "hard_brake", "cell_phone", "harsh_event"} <= set(types)
+
+
+async def test_the_carried_filter_does_not_depend_on_what_is_alerted_today(use, monkeypatch):
+    """It is written once. EXTRA_EVENT_TYPES may be set after that boot, and a type
+    added then must not find itself filtered out of the group by a list made earlier."""
+    monkeypatch.setattr(config, "EXTRA_EVENT_TYPES", frozenset())
+    db = use(_template_db({"alert_group"}))
+
+    await legacy.adopt_single_group_template()
+
+    types = set(db.log[2][1])
+    assert {"near_miss", "road_facing_cam_obstruction", "seat_belt_violation",
+            "drowsiness", "tailgating"} <= types
+
+
+async def test_the_table_and_its_rows_are_written_as_one(use):
+    """A filter table that exists and is empty means "every type", for good: the
+    template's mark is gone and nothing would ever fill it. So the two are one
+    transaction, and a failure between them leaves the database as it was."""
+    db = use(_template_db({"alert_group"}, fail_on="insert"))
+
+    with pytest.raises(RuntimeError):
+        await legacy.adopt_single_group_template()
+
+    assert db.log[0] == "BEGIN"
+    assert db.log[-1] == "ROLLBACK"
+
+
+@pytest.mark.parametrize("tables", [
+    (),                                                   # fresh
+    ("alert_group", "alert_group_event_types"),           # already this build's
+    OLD_TABLES,                                           # the multi-company schema
+    OLD_TABLES + ("alert_group", "alert_group_event_types"),   # that, already upgraded
+])
+async def test_no_other_database_is_taken_for_the_templates(use, tables):
+    """A group that receives crashes today — HF's, MZ CARGO's, a new company's — must
+    not lose them to a rule that was never its own."""
+    db = use(_template_db(set(tables)))
+
+    assert await legacy.adopt_single_group_template() is False
+    assert db.log == []

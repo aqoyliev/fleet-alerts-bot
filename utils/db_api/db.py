@@ -30,6 +30,18 @@ async def run_migrations():
     """Apply schemas.sql (all CREATE ... IF NOT EXISTS) then additive column/index
     migrations. Every statement is idempotent; failures are logged, not fatal, so a
     startup is never blocked by a migration that a manual step already covered."""
+    # Before the schema, not after: what marks a database as the single-group template's
+    # is a table schemas.sql is about to create. Imported here, as below, because
+    # legacy.py is built on this module's helpers.
+    from utils.db_api.legacy import adopt_single_group_template
+    try:
+        await adopt_single_group_template()
+    except Exception as e:
+        # Said as an error and not a warning: what follows is the filter table being
+        # created empty, and on that database empty means crashes go to the group.
+        logger.error(f"could not carry the single-group template's crash rule over: {e}",
+                     exc_info=True)
+
     schema_sql = Path(__file__).with_name("schemas.sql").read_text(encoding="utf-8")
     async with pool.acquire() as conn:
         try:
