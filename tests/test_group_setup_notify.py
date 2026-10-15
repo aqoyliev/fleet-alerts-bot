@@ -187,3 +187,55 @@ async def test_join_auto_registration_notifies_admins(monkeypatch):
     await ge.on_bot_chat_member_update(_Update())
 
     assert calls == [(-100555, "unit571 driver group", "unit571", None)]
+
+
+# ── the two notices added later ──────────────────────────────────────────────────
+
+async def test_a_roster_outage_reaches_every_active_admin(monkeypatch):
+    bot = _Bot()
+    monkeypatch.setattr(ge, "bot", bot)
+    monkeypatch.setattr(config, "ADMINS", ["999"])
+    monkeypatch.setattr(ge, "get_all_admins", _admins([
+        {"telegram_id": 111, "is_active": True},
+        {"telegram_id": 333, "is_active": False},
+    ]))
+
+    await ge._notify_admins_roster_unavailable(_Chat(-100555, "UNIT 571"), "UNIT 571", "571")
+
+    assert {chat_id for chat_id, _ in bot.sent} == {111, 999}
+    assert all("571" in text and "-100555" in text for _, text in bot.sent)
+
+
+async def test_a_departure_reaches_every_active_admin(monkeypatch):
+    bot = _Bot()
+    monkeypatch.setattr(ge, "bot", bot)
+    monkeypatch.setattr(config, "ADMINS", ["999"])
+    monkeypatch.setattr(ge, "get_all_admins", _admins([
+        {"telegram_id": 111, "is_active": True},
+        {"telegram_id": 333, "is_active": False},
+    ]))
+
+    await ge._notify_admins_group_left(_Chat(-100555, "UNIT 571"))
+
+    assert {chat_id for chat_id, _ in bot.sent} == {111, 999}
+    assert all("UNIT 571" in text and "-100555" in text for _, text in bot.sent)
+
+
+async def test_one_unreachable_admin_does_not_stop_the_rest(monkeypatch):
+    class _FlakyBot(_Bot):
+        async def send_message(self, chat_id, text, parse_mode=None):
+            if chat_id == 111:
+                raise RuntimeError("chat not found")
+            await super().send_message(chat_id, text, parse_mode)
+
+    bot = _FlakyBot()
+    monkeypatch.setattr(ge, "bot", bot)
+    monkeypatch.setattr(config, "ADMINS", [])
+    monkeypatch.setattr(ge, "get_all_admins", _admins([
+        {"telegram_id": 111, "is_active": True},
+        {"telegram_id": 222, "is_active": True},
+    ]))
+
+    await ge._notify_admins_group_left(_Chat(-100555, "UNIT 571"))
+
+    assert {chat_id for chat_id, _ in bot.sent} == {222}

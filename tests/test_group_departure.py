@@ -40,7 +40,19 @@ def _left(chat, old="member", new="kicked"):
 
 
 @pytest.fixture
-def departures(monkeypatch):
+def told(monkeypatch):
+    """The chats the admins were DMed about."""
+    seen = []
+
+    async def _notify(chat):
+        seen.append(chat.id)
+
+    monkeypatch.setattr(ge, "_notify_admins_group_left", _notify)
+    return seen
+
+
+@pytest.fixture
+def departures(monkeypatch, told):
     seen = []
 
     async def _mark(chat_id):
@@ -62,20 +74,29 @@ async def test_the_bot_leaving_a_group_is_recorded(departures, status):
     assert departures == [-100555]
 
 
-async def test_a_blocked_dm_is_not_a_group_departure(departures):
+@pytest.mark.parametrize("status", ["left", "kicked"])
+async def test_the_admins_are_told_the_bot_was_removed(departures, told, status):
+    await ge.on_bot_chat_member_update(_left(_Chat(-100555, "UNIT 571"), new=status))
+
+    assert told == [-100555]
+
+
+async def test_a_blocked_dm_is_not_a_group_departure(departures, told):
     """The same update fires when a person blocks the bot. There is no row to retire, and
     every branch here would be treating a private chat as a group."""
     await ge.on_bot_chat_member_update(_left(_Chat(555, None, type="private")))
 
     assert departures == []
+    assert told == []
 
 
-async def test_a_demotion_is_not_a_departure(departures):
+async def test_a_demotion_is_not_a_departure(departures, told):
     """administrator → member means the bot lost its admin rights, not the chat."""
     await ge.on_bot_chat_member_update(
         _left(_Chat(-100555, "UNIT 571"), old="administrator", new="member"))
 
     assert departures == []
+    assert told == []
 
 
 # ── what it writes, and what the panel then asks for ───────────────────────────

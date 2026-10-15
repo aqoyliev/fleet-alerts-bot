@@ -248,6 +248,47 @@ async def _notify_admins_unknown_unit(chat: types.Chat, title: str, unit: str,
             logger.error(f"Failed to notify admin {admin_id} of unknown unit: {e}")
 
 
+async def _notify_admins_roster_unavailable(chat: types.Chat, title: str, unit: str):
+    """DM the admins that a group named a unit but the roster could not be reached to
+    confirm it, so the group was listed without one.
+
+    The other two failure paths tell the admins; this one used to tell only the group,
+    and a group whose title parses is exactly the one nobody thinks to look at.
+    """
+    text = (
+        "⚠️ <b>Group needs a unit</b>\n\n"
+        f"I was added to <b>{esc(title) or 'a group'}</b> (id <code>{chat.id}</code>) and read "
+        f"unit <code>{esc(unit)}</code> from its name, but {roster_names()} didn't answer, "
+        "so I couldn't check it and the group isn't receiving anything yet.\n\n"
+        "It's in the admin panel under <b>Unpaired</b> — pick its truck there once the "
+        "roster is back, or set it in the group with <code>/setunit &lt;truck unit&gt;</code>."
+    )
+    for admin_id in await _admin_ids():
+        try:
+            await bot.send_message(admin_id, text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to notify admin {admin_id} of roster outage: {e}")
+
+
+async def _notify_admins_group_left(chat: types.Chat):
+    """DM the admins that the bot is no longer in a group.
+
+    Being removed silences that chat without a sound — its alerts simply stop — and the
+    row is kept, so this says how to undo it.
+    """
+    text = (
+        "🚪 <b>Bot removed from a group</b>\n\n"
+        f"I'm no longer in <b>{esc(chat.title) or 'a group'}</b> (id <code>{chat.id}</code>), "
+        "so it has stopped receiving alerts and is gone from the admin panel.\n\n"
+        "Add the bot back to the chat to restore it with the same unit and filter."
+    )
+    for admin_id in await _admin_ids():
+        try:
+            await bot.send_message(admin_id, text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to notify admin {admin_id} of group departure: {e}")
+
+
 async def _notify_admins_group_registered(chat: types.Chat, title: str, unit: str,
                                           by: str | None = None):
     """DM the admins that a group is now set up and will start receiving a unit's alerts.
@@ -346,6 +387,7 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
                            f"but the roster could not be reached — registering it unassigned")
             await register_unassigned_group(chat.id, title)
             await _say(chat.id, group_texts.joined_roster_unavailable(vehicle, roster_names()))
+            await _notify_admins_roster_unavailable(chat, title, vehicle)
             return
         if status == "missing":
             logger.warning(f"Group '{title}' (id={chat.id}) parsed unit {vehicle}, "
@@ -370,6 +412,7 @@ async def on_bot_chat_member_update(update: types.ChatMemberUpdated):
         # Out of the panel and off the routing. The row survives, so putting the bot back
         # brings the group's unit and filter with it — see mark_group_left.
         await mark_group_left(chat.id)
+        await _notify_admins_group_left(chat)
 
 
 # ── Manual group management ─────────────────────────────────────────────────────────

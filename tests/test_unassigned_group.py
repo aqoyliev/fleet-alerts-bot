@@ -70,6 +70,9 @@ def joined(monkeypatch):
     async def _notify_registered(chat, title, unit, by=None):
         seen["notified"].append(("registered", chat.id))
 
+    async def _notify_outage(chat, title, unit):
+        seen["notified"].append(("roster_unavailable", chat.id))
+
     async def _get_chat(chat_id):
         return _Chat(chat_id, "")
 
@@ -82,6 +85,7 @@ def joined(monkeypatch):
     monkeypatch.setattr(ge, "_notify_admins_parse_failure", _notify_parse)
     monkeypatch.setattr(ge, "_notify_admins_unknown_unit", _notify_unknown)
     monkeypatch.setattr(ge, "_notify_admins_group_registered", _notify_registered)
+    monkeypatch.setattr(ge, "_notify_admins_roster_unavailable", _notify_outage)
     monkeypatch.setattr(ge, "suggest_units_any", _suggest)
     monkeypatch.setattr(ge.bot, "get_chat", _get_chat)
     monkeypatch.setattr(config, "MAIN_GROUP_ID", None)
@@ -152,6 +156,19 @@ async def test_an_unknown_unit_still_gets_its_did_you_mean(joined, monkeypatch):
     await ge.on_bot_chat_member_update(_update(_Chat(-100555, "UNIT 9999 somebody")))
 
     assert joined["notified"] == [("unknown_unit", -100555)]
+    assert len(joined["said"]) == 1
+
+
+async def test_a_roster_outage_now_tells_the_admins_too(joined, monkeypatch):
+    """The group was told and the admins were not — the one failure path with no DM."""
+    async def _resolve(vehicle):
+        return "unavailable", vehicle
+
+    monkeypatch.setattr(ge, "resolve_unit", _resolve)
+
+    await ge.on_bot_chat_member_update(_update(_Chat(-100555, "UNIT 571 driver")))
+
+    assert joined["notified"] == [("roster_unavailable", -100555)]
     assert len(joined["said"]) == 1
 
 
