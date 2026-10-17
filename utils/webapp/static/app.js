@@ -387,12 +387,18 @@ const DETAIL_KINDS = { group: 'Group', admin: 'Admin', addadmin: 'Admins' };
 
 /** The bar, the back button and the page's bottom edge for whatever is on screen. A detail
  *  screen is a page you walked into: it has its own way out, and no tab bar under it. */
-function chrome() {
+/* Not called `chrome`, which it was for a day: a top-level function declaration becomes a
+ * property of `window`, so that name replaced window.chrome -- and Telegram Desktop's bridge
+ * on Windows talks to the host through window.chrome.webview. The panel opened as a blank
+ * screen there and fine on a phone. Nothing at this level may be named after something the
+ * browser already owns. */
+function syncChrome() {
   const d = state.detail;
   $('#screen-title').textContent = d ? DETAIL_KINDS[d.type] : TITLES[state.tab];
   $('#company-name').textContent = d ? d.title
     : (state.boot ? state.boot.company.name : '');
-  $('#back').hidden = !d;
+  const back = $('#back');
+  if (back) back.hidden = !d;
   document.body.classList.toggle('in-detail', !!d);
   document.body.classList.remove('has-savebar');
 }
@@ -629,7 +635,7 @@ const TAB_VIEWS = {
 
 function renderCurrent(opts) {
   opts = opts || {};
-  chrome();
+  syncChrome();
 
   const view = state.detail ? DETAIL_VIEWS[state.detail.type] : TAB_VIEWS[state.tab];
   if (!view) { popDetail(); return; }
@@ -2153,7 +2159,8 @@ async function boot() {
     btn.onclick = () => { hapticSelect(); selectTab(btn.dataset.tab); };
   });
   $('#refresh').onclick = refreshAll;
-  $('#back').onclick = () => { haptic(); popDetail(); };
+  const back = $('#back');
+  if (back) back.onclick = () => { haptic(); popDetail(); };
 
   // Shown before the first request rather than after it. Bootstrap over a truck-stop
   // connection is a second or two, and a blank white screen for that long is the part

@@ -5,6 +5,7 @@ than usual here, because every path under /panel/api is authenticated and any ro
 without a decorator is a hole. Reading the table is how you check that.
 """
 
+import hashlib
 import logging
 from pathlib import Path
 
@@ -34,6 +35,30 @@ def _file(name: str, content_type: str):
     return handler
 
 
+def _index():
+    """The shell, with its two assets named by what is in them.
+
+    app.css and app.js are served no-store, but a client that holds on to the shell for any
+    reason then asks for the same two URLs and gets whatever is current -- a page written for
+    one version running a script written for another, which on a phone is a blank screen with
+    no way to say why. A query string that changes whenever either file does removes that
+    pairing from the list of things that can go wrong.
+    """
+    async def handler(_request: web.Request) -> web.Response:
+        digest = hashlib.sha1()
+        for name in ("app.css", "app.js"):
+            digest.update((_STATIC / name).read_bytes())
+        version = digest.hexdigest()[:10]
+        html = (_STATIC / "index.html").read_text(encoding="utf-8")
+        html = (html.replace('/panel/app.css"', f'/panel/app.css?v={version}"')
+                    .replace('/panel/app.js"', f'/panel/app.js?v={version}"'))
+        return web.Response(text=html, content_type="text/html", charset="utf-8", headers={
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+        })
+    return handler
+
+
 def setup_routes(app: web.Application) -> None:
     """Mount the panel on the aiohttp app that already serves the provider webhooks.
 
@@ -41,8 +66,8 @@ def setup_routes(app: web.Application) -> None:
     and if a future route ever does collide, aiohttp raises at startup rather than
     shadowing one silently.
     """
-    app.router.add_get("/panel", _file("index.html", "text/html; charset=utf-8"))
-    app.router.add_get("/panel/", _file("index.html", "text/html; charset=utf-8"))
+    app.router.add_get("/panel", _index())
+    app.router.add_get("/panel/", _index())
     app.router.add_get("/panel/app.css", _file("app.css", "text/css; charset=utf-8"))
     app.router.add_get("/panel/app.js", _file("app.js", "application/javascript; charset=utf-8"))
 

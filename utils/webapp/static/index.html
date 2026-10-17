@@ -119,6 +119,41 @@
   </nav>
 </div>
 
+<!-- If the panel dies before it paints, the page used to stay a flat colour with nothing on
+     it -- indistinguishable, from the outside, from a page that never loaded, and no way to
+     tell a client that cannot run it from a bug. This says what happened instead. It is
+     inline and sits ahead of app.js so it also catches app.js failing to parse. Once the
+     app is on screen it stands down: the panel reports its own errors from there. -->
+<script>
+(function () {
+  function say(message) {
+    var app = document.getElementById('app');
+    var blocker = document.getElementById('blocker');
+    if (!blocker || (app && !app.hidden)) return;
+    var wa = window.Telegram && window.Telegram.WebApp;
+    document.getElementById('blocker-emoji').textContent = '⚠️';
+    document.getElementById('blocker-title').textContent = 'The panel did not start';
+    document.getElementById('blocker-text').textContent =
+      'Close it and open it again. If this stays, send a screenshot of this screen.';
+    var diag = document.getElementById('blocker-diag');
+    diag.textContent = [
+      'error    : ' + String(message).slice(0, 300),
+      'platform : ' + ((wa && wa.platform) || '—'),
+      'version  : ' + ((wa && wa.version) || '—'),
+      'agent    : ' + navigator.userAgent.slice(0, 160),
+    ].join('\n');
+    diag.hidden = false;
+    blocker.hidden = false;
+  }
+  window.addEventListener('error', function (e) {
+    say((e.message || 'script error') + (e.filename ? ' @ ' + e.filename.split('/').pop()
+      + ':' + e.lineno : ''));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    say((e.reason && e.reason.message) || e.reason || 'unhandled rejection');
+  });
+})();
+</script>
 <script src="/panel/app.js"></script>
 </body>
 </html>

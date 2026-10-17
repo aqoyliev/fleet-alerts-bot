@@ -128,6 +128,44 @@ async def test_the_shell_is_not_cached(client):
     assert "no-store" in resp.headers.get("Cache-Control", "")
 
 
+async def test_the_shell_names_its_assets_by_what_is_in_them(client):
+    """A page written for one version of app.js must not be able to run another: the shell
+    names both files with a query string that changes when either does."""
+    import re
+
+    text = await (await client.get("/panel/")).text()
+    versions = re.findall(r'/panel/app\.(?:css|js)\?v=([0-9a-f]{10})"', text)
+
+    assert len(versions) == 2 and versions[0] == versions[1]
+    # and the files the query string points at are still served, query or not
+    for path in (f"/panel/app.css?v={versions[0]}", f"/panel/app.js?v={versions[0]}"):
+        assert (await client.get(path)).status == 200
+
+
+def test_the_script_declares_no_global_named_after_something_the_browser_owns():
+    """app.js is a classic script, so every top-level function and var is a property of
+    window. One named `chrome` replaced window.chrome, which Telegram Desktop on Windows
+    reaches its host through -- a blank panel there, and nothing wrong on a phone."""
+    import re
+    from pathlib import Path
+
+    source = (Path(api.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+    declared = set(re.findall(r"^(?:async\s+)?function\s+(\w+)", source, re.M))
+    declared |= set(re.findall(r"^(?:var)\s+(\w+)", source, re.M))
+
+    owned = {"chrome", "external", "webkit", "Telegram", "TelegramWebviewProxy", "name",
+             "status", "event", "history", "location", "open", "close", "top", "parent",
+             "screen", "length", "stop", "focus", "blur", "print", "find", "origin"}
+    assert not declared & owned, declared & owned
+
+
+async def test_the_shell_carries_the_error_net_ahead_of_the_app(client):
+    """If app.js cannot start, the screen has to say so rather than stay a flat colour."""
+    text = await (await client.get("/panel/")).text()
+
+    assert text.index("The panel did not start") < text.index("/panel/app.js")
+
+
 async def test_the_panel_does_not_shadow_the_webhook_paths(client):
     """The panel shares an application with the provider webhooks. Nothing it registers
     may sit on their paths."""
