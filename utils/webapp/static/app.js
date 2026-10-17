@@ -24,26 +24,17 @@ const state = {
   boot: null,          // /bootstrap payload
   tab: 'fleet',
   detail: null,        // the detail view on top, or null when a tab is showing
-  details: [],         // the stack under it: More -> Admins -> one admin is two deep
-  // The Report tab's two controls. Last week rather than a rolling window by default:
+  details: [],         // the stack under it: Admins -> one admin is two deep
+  // The Report tab's one control. Last week rather than a rolling window by default:
   // this screen's purpose is the file at the bottom of it, and last week is the only
   // period that is both complete and the one a safety manager is asked about.
   period: 'last_week',
-  scope: '',
   groupsQuery: '',
   groupsFilter: 'active',  // which of the three Groups sections is showing
-  alertFilter: { type: '', unit: '' },
-  // The feed has more event types than fit on a phone in one row. Collapsed, the bar
-  // shows the handful that are actually used plus whatever is selected; this is the
-  // "show the rest" switch.
-  alertChipsOpen: false,
   // Expanded state of the "show the rest" control on the Report screen.
   typesOpen: false,
   // An unsaved event-type selection on a group screen: {id, picked}. See groupDetail.
   filterDraft: null,
-  alertItems: [],
-  alertNext: null,
-  alertLoaded: false,  // the feed is paged, so it caches itself rather than by URL
   scroll: {},          // tab -> last scroll offset, restored when you come back to it
   // Bumped on every navigation. A background re-check that resolves after the user has
   // moved on compares this before touching the DOM, so a slow response can't repaint a
@@ -114,6 +105,65 @@ function esc(value) {
 
 function num(value) {
   return Number(value || 0).toLocaleString('en-US');
+}
+
+// ── icons ───────────────────────────────────────────────────────────────────────
+// Line icons in currentColor at one stroke weight, so a tile takes its colour from CSS and
+// nothing here depends on an emoji font. The emoji stay in the bot's own messages.
+
+const svg = (body, w) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+  stroke-width="${w || 2}" stroke-linecap="round" stroke-linejoin="round"
+  aria-hidden="true">${body}</svg>`;
+
+const ICON = {
+  warn:    svg('<path d="M12 3.5 2.8 19.5h18.4L12 3.5Z"/><path d="M12 10v4.2M12 17.2v.1"/>'),
+  gauge:   svg('<path d="M4 16a8 8 0 1 1 16 0"/><path d="m12 16 4-5"/>'),
+  stop:    svg('<path d="M8.5 3.5h7l5 5v7l-5 5h-7l-5-5v-7l5-5Z"/>'),
+  accel:   svg('<path d="M5 19 19 5"/><path d="M10 5h9v9"/>'),
+  turn:    svg('<path d="M9 7H4v5"/><path d="M4 7c4-4 12-3 14 3v7"/>'),
+  car:     svg('<path d="M5 16V12l2-5h10l2 5v4"/><path d="M3 16h18"/><circle cx="8" cy="17" r="1.6"/><circle cx="16" cy="17" r="1.6"/>'),
+  phone:   svg('<rect x="7" y="3" width="10" height="18" rx="2"/><path d="M11 18h2"/>'),
+  lock:    svg('<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/>'),
+  ban:     svg('<circle cx="12" cy="12" r="8.5"/><path d="m6 6 12 12"/>'),
+  eye:     svg('<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.8"/>'),
+  moon:    svg('<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z"/>'),
+  camera:  svg('<path d="M4 8h3l1.5-2h7L17 8h3v11H4V8Z"/><circle cx="12" cy="13.5" r="3.2"/>'),
+  parking: svg('<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M10 16V8h3a2.5 2.5 0 0 1 0 5h-3"/>'),
+  link:    svg('<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>'),
+  chevron: svg('<path d="m9 6 6 6-6 6"/>'),
+  check:   svg('<path d="m5 12.5 4.5 4.5L19 7.5"/>', 2.6),
+  plus:    svg('<path d="M12 5v14M5 12h14"/>', 2.4),
+  pause:   svg('<circle cx="12" cy="12" r="8.5"/><path d="M9.5 9.5v5M14.5 9.5v5"/>'),
+  up:      svg('<path d="M12 19V5M6 11l6-6 6 6"/>'),
+  down:    svg('<path d="M12 5v14M6 13l6 6 6-6"/>'),
+  trash:   svg('<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12.2a1 1 0 0 0 1 .8h8a1 1 0 0 0 1-.8L18 7M9 7V4.8A.8.8 0 0 1 9.8 4h4.4a.8.8 0 0 1 .8.8V7"/>'),
+};
+
+/** [icon, colour token] per catalog row. Colour is a hue, not a severity: red is anything
+ *  that can hurt somebody, orange is how the truck is being driven, purple is the driver,
+ *  teal is the hardware. A type that is not listed gets a plain warning in the accent. */
+const EVENT_STYLE = {
+  speeding:                    ['gauge',   '--ev-red'],
+  crash:                       ['warn',    '--ev-red'],
+  forward_collision_warning:   ['warn',    '--ev-red'],
+  near_miss:                   ['warn',    '--ev-red'],
+  stop_sign_violation:         ['stop',    '--ev-red'],
+  hard_brake:                  ['stop',    '--ev-orange'],
+  harsh_acceleration:          ['accel',   '--ev-orange'],
+  harsh_turn:                  ['turn',    '--ev-orange'],
+  harsh_event:                 ['warn',    '--ev-orange'],
+  cell_phone:                  ['phone',   '--ev-purple'],
+  seat_belt_violation:         ['lock',    '--ev-purple'],
+  no_seat_belt:                ['ban',     '--ev-purple'],
+  inattentive_driving:         ['eye',     '--ev-purple'],
+  drowsy_driving:              ['moon',    '--ev-purple'],
+  road_facing_cam_obstruction: ['camera',  '--ev-teal'],
+  tailgating:                  ['car',     '--ev-blue'],
+  unsafe_parking:              ['parking', '--ev-blue'],
+};
+
+function eventStyle(type) {
+  return EVENT_STYLE[chipTokenFor(type)] || EVENT_STYLE[type] || ['warn', '--ev-blue'];
 }
 
 function haptic(style) {
@@ -329,8 +379,23 @@ function dayLabel(iso) {
 // ── screen chrome ───────────────────────────────────────────────────────────────
 
 const TITLES = {
-  fleet: 'Fleet', alerts: 'Alerts', report: 'Report', more: 'More',
+  fleet: 'Fleet', report: 'Report', admins: 'Admins', settings: 'Settings',
 };
+
+/** What a detail screen is called in the eyebrow; its own name is the title under it. */
+const DETAIL_KINDS = { group: 'Group', admin: 'Admin', addadmin: 'Admins' };
+
+/** The bar, the back button and the page's bottom edge for whatever is on screen. A detail
+ *  screen is a page you walked into: it has its own way out, and no tab bar under it. */
+function chrome() {
+  const d = state.detail;
+  $('#screen-title').textContent = d ? DETAIL_KINDS[d.type] : TITLES[state.tab];
+  $('#company-name').textContent = d ? d.title
+    : (state.boot ? state.boot.company.name : '');
+  $('#back').hidden = !d;
+  document.body.classList.toggle('in-detail', !!d);
+  document.body.classList.remove('has-savebar');
+}
 
 function showBlocker(kind) {
   $('#app').hidden = true;
@@ -419,9 +484,7 @@ const SKELETONS = {
   fleet: () => `<div><div class="sk" style="height:52px;border-radius:12px;
       margin-bottom:12px"></div>${skRows(5)}</div>`,
   report: () => SKELETONS.dashboard(),
-  more: () => `<div>${skRows(2)}</div>`,
-  alerts: () => `<div><div class="sk" style="height:34px;border-radius:17px;width:70%;
-      margin-bottom:14px"></div>${skRows(6)}</div>`,
+  settings: () => `<div>${skRows(4)}</div>`,
   admins: () => `<div>${skRows(3)}</div>`,
   detail: () => `<div>
       <div class="card"><div class="sk sk-line"></div><div class="sk sk-line"
@@ -548,14 +611,11 @@ function selectTab(tab) {
 
 const DETAIL_VIEWS = {
   group: groupDetail, admin: adminDetail, addadmin: addAdminScreen,
-  admins: adminsScreen, settings: settingsScreen,
 };
 
 /** What each screen reads, so the skeleton is honest: a screen whose data is not in the
  *  cache yet must show one, and one whose data is must not flash one. */
 const DETAIL_PATHS = {
-  settings: () => ['/settings'],
-  admins: () => ['/admins'],
   admin: () => ['/admins'],
   // Not /units. The Fleet screen and the group detail both paint without the roster and
   // fill it in when it arrives — see fleetScreen.
@@ -563,13 +623,13 @@ const DETAIL_PATHS = {
 };
 
 const TAB_VIEWS = {
-  fleet: fleetScreen, alerts: alertsScreen,
-  report: reportScreen, more: moreScreen,
+  fleet: fleetScreen, report: reportScreen,
+  admins: adminsScreen, settings: settingsScreen,
 };
 
 function renderCurrent(opts) {
   opts = opts || {};
-  $('#screen-title').textContent = state.detail ? state.detail.title : TITLES[state.tab];
+  chrome();
 
   const view = state.detail ? DETAIL_VIEWS[state.detail.type] : TAB_VIEWS[state.tab];
   if (!view) { popDetail(); return; }
@@ -598,13 +658,14 @@ function hasCachedScreen() {
     // in the app.
     return paths ? paths().every((path) => cache.has(path)) : false;
   }
-  if (state.tab === 'alerts') return state.alertLoaded;
   return screenPaths().every((p) => cache.has(p));
 }
 
 function screenPaths() {
   if (state.tab === 'fleet') return ['/groups'];
   if (state.tab === 'report') return [statsPath()];
+  if (state.tab === 'admins') return ['/admins'];
+  if (state.tab === 'settings') return ['/settings'];
   return [];
 }
 
@@ -621,7 +682,6 @@ function errorScreen(message) {
 function refreshAll() {
   haptic();
   cache.clear();
-  resetFeed();
   state.epoch++;
   busy(true);
   setSkeleton(state.detail ? 'detail' : state.tab);
@@ -679,41 +739,27 @@ function hideMainButton() {
  * can turn into a file (period.downloadable) rather than the client knowing a second
  * time. */
 const PERIODS = [
-  ['today', 'Today'], ['7d', '7 days'], ['30d', '30 days'],
+  ['today', 'Today'], ['yesterday', 'Yesterday'],
   ['last_week', 'Last week'], ['last_month', 'Last month'],
 ];
-const SCOPES = [['', 'All'], ['speeding', 'Speeding'], ['other', 'Other']];
 
 /* How many type rows the screen shows before "More". The catalog is sixteen; a landing
  * card that is sixteen bar rows tall is a picker nobody asked for. */
 const PRIMARY_TYPES = 6;
 
 function statsPath() {
-  return `/stats?period=${encodeURIComponent(state.period)}`
-       + `&type=${encodeURIComponent(state.scope)}`;
-}
-
-/** A segmented control that re-renders the screen when it changes. */
-function segmented(options, current, pick) {
-  const bar = el('<div class="segmented" role="tablist"></div>');
-  options.forEach(([key, label]) => {
-    const on = key === current;
-    const b = el(`<button${on ? ' class="is-active"' : ''} aria-selected="${on}"
-        >${esc(label)}</button>`);
-    b.onclick = () => { hapticSelect(); pick(key); state.epoch++; renderCurrent(); };
-    bar.appendChild(b);
-  });
-  return bar;
+  return `/stats?period=${encodeURIComponent(state.period)}`;
 }
 
 async function reportScreen(opts) {
   const [data] = await screenData([statsPath()], opts);
   const wrap = el('<div></div>');
 
-  // A wrapping chip row rather than a segmented control: five labels do not fit one
-  // segmented row at 360px without clipping "Last month", and the same control that
-  // scrolls sideways on a phone is unreachable on the desktop client.
-  const periods = el('<div class="filter-bar"></div>');
+  // One row, four chips. Each is a window somebody is actually asked about; the rolling
+  // 7- and 30-day ones are still answered by the server but are not offered, because a
+  // dispatcher who reads "last 7 days" and then downloads "last week" gets two answers to
+  // one question.
+  const periods = el('<div class="period-bar"></div>');
   PERIODS.forEach(([key, label]) => {
     const on = key === state.period;
     const chip = el(`<button class="chip${on ? ' is-on' : ''}"
@@ -727,71 +773,54 @@ async function reportScreen(opts) {
     periods.appendChild(chip);
   });
   wrap.appendChild(periods);
-  wrap.appendChild(segmented(SCOPES, state.scope, (k) => { state.scope = k; }));
 
-  // The feed can be filtered to one event type, never to "everything except speeding",
-  // so under that scope the headline is a statement rather than a link. A number that
-  // looks tappable and lands somewhere that disagrees with it is worse than one that
-  // does not move.
-  const linkable = state.scope !== 'other';
+  // The number and the days behind it share a card. Nothing here opens anything: the alerts
+  // themselves are in Telegram, and a figure that looks tappable and goes nowhere is worse
+  // than one that does not move.
   const panel = el('<section class="panel"></section>');
-  const hero = el(`<${linkable ? 'button' : 'div'} class="panel-hero">
+  panel.appendChild(el(`<div class="panel-hero panel-hero-static">
       <span class="panel-hero-main">
         <span class="panel-hero-num">${num(data.totals.total)}</span>
-        <span class="panel-hero-label">${esc(data.scope_label.toLowerCase())}
-          · ${esc(data.period.range)}</span>
-      </span>
-      ${linkable ? '<span class="row-chevron" aria-hidden="true"></span>' : ''}
-    </${linkable ? 'button' : 'div'}>`);
-  if (linkable) {
-    hero.onclick = () => { haptic(); openAlerts({ type: state.scope }); };
-  }
-  panel.appendChild(hero);
+        <span class="panel-hero-label">alerts · ${esc(data.period.range)}</span>
+      </span></div>`));
+  if (data.by_day && data.by_day.length > 1) panel.appendChild(trendBlock(data.by_day));
+  wrap.appendChild(panel);
 
   markAttention(data.groups.unpaired + data.groups.muted);
 
-  const tiles = el('<div class="panel-tiles"></div>');
-  [
-    // Not "Units". That tile used to show COUNT(DISTINCT vehicle_number) of the
-    // violations in the window — trucks that did something, sitting next to a tile
-    // called Speeding and reading as fleet size. This is the number that was missing:
-    // how much of the fleet is wired up at all.
-    [`${num(data.groups.with_unit)}/${num(data.groups.total)}`, 'Paired', false,
-     () => selectTab('fleet')],
-    [num(data.totals.speeding), 'Speeding', false, () => openAlerts({ type: 'speeding' })],
-    [num(data.totals.crashes), 'Crashes', data.totals.crashes > 0,
-     () => openAlerts({ type: 'crash' })],
-  ].forEach(([value, label, alarm, go]) => {
-    const tile = el(`<button class="tile${alarm ? ' tile-alarm' : ''}">
-        <span class="tile-value">${value}</span>
-        <span class="tile-label">${label}</span></button>`);
-    tile.onclick = () => { haptic(); go(); };
-    tiles.appendChild(tile);
-  });
-  panel.appendChild(tiles);
-  wrap.appendChild(panel);
-
-  if (data.by_day && data.by_day.length > 1) wrap.appendChild(trendCard(data.by_day));
+  const tiles = el('<div class="tiles"></div>');
+  // Not "Units". That tile used to show COUNT(DISTINCT vehicle_number) of the violations in
+  // the window -- trucks that did something, sitting next to a tile called Speeding and
+  // reading as fleet size. This is the number that was missing: how much of the fleet is
+  // wired up at all. It is also the only tile that goes anywhere.
+  const paired = el(`<button class="tile">
+      <span class="tile-value">${num(data.groups.with_unit)}<small>/${num(data.groups.total)}</small></span>
+      <span class="tile-label">Paired</span></button>`);
+  paired.onclick = () => { haptic(); selectTab('fleet'); };
+  tiles.appendChild(paired);
+  tiles.appendChild(el(`<div class="tile is-static">
+      <span class="tile-value">${num(data.totals.speeding)}</span>
+      <span class="tile-label">Speeding</span></div>`));
+  tiles.appendChild(el(`<div class="tile is-static${data.totals.crashes > 0 ? ' tile-alarm' : ''}">
+      <span class="tile-value">${num(data.totals.crashes)}</span>
+      <span class="tile-label">Crashes</span></div>`));
+  wrap.appendChild(tiles);
 
   if (data.top_units.length) {
     const peak = data.top_units[0].total || 1;
     const card = el(`<div class="card"><div class="card-head">
-        <div class="card-title">Worst units</div>
-        <span class="card-head-note">tap to filter</span></div></div>`);
-    // How a fleet spells its units decides the shape of this card. A unit number fits
-    // the name column beside its bar; a roster that spells them out — Elegant Express
-    // sends "TRUCK #002 JAVOKHIR AZIZOV" — does not, and every row truncated at the
-    // same place. Those rankings put the name on its own line with the bar under it.
-    const spelledOut = data.top_units.some((u) => (u.vehicle_number || '').length > 14);
+        <div class="card-title">Worst units</div></div></div>`);
+    // The name takes its own line with the bar underneath. A unit number fits the column
+    // beside a bar; a roster that spells them out -- Elegant Express sends "TRUCK #002
+    // JAVOKHIR AZIZOV" -- does not, and every row truncated at the same place. Stacked is
+    // right for both, so it is no longer chosen per roster.
     data.top_units.forEach((u, i) => {
-      const row = el(`<button class="bar-row${spelledOut ? ' is-stacked' : ''}">
+      card.appendChild(el(`<div class="bar-row is-stacked">
           <span class="bar-rank">${i + 1}</span>
           <span class="bar-name">${esc(u.vehicle_number)}</span>
           <span class="bar-track"><span class="bar-fill"
                 style="width:${Math.round((u.total / peak) * 100)}%"></span></span>
-          <span class="bar-count">${num(u.total)}</span></button>`);
-      row.onclick = () => { haptic(); openAlerts({ unit: u.vehicle_number }); };
-      card.appendChild(row);
+          <span class="bar-count">${num(u.total)}</span></div>`));
     });
     wrap.appendChild(card);
   }
@@ -800,23 +829,19 @@ async function reportScreen(opts) {
     const peak = data.by_type[0].total || 1;
     const shown = state.typesOpen ? data.by_type : data.by_type.slice(0, PRIMARY_TYPES);
     const card = el(`<div class="card"><div class="card-head">
-        <div class="card-title">By type</div>
-        <span class="card-head-note">tap to filter</span></div></div>`);
+        <div class="card-title">By event type</div></div></div>`);
     shown.forEach((t) => {
-      const row = el(`<button class="bar-row">
-          <span class="bar-name">${esc(t.emoji)} ${esc(t.label)}</span>
-          <span class="bar-track"><span class="bar-fill"
+      const tone = eventStyle(t.token || t.event_type)[1];
+      card.appendChild(el(`<div class="type-row" style="--c:var(${tone})">
+          <span class="type-dot"></span>
+          <span class="type-name">${esc(t.label)}</span>
+          <span class="type-track"><span class="type-fill"
                 style="width:${Math.round((t.total / peak) * 100)}%"></span></span>
-          <span class="bar-count">${num(t.total)}</span></button>`);
-      // The row's own stored type, not the chip token: the feed filter expands a token
-      // into every provider spelling behind it, and a stored type that is one of those
-      // spellings would otherwise select nothing. The server sends the token for this.
-      row.onclick = () => { haptic(); openAlerts({ type: t.token || t.event_type }); };
-      card.appendChild(row);
+          <span class="type-count">${num(t.total)}</span></div>`));
     });
     if (data.by_type.length > PRIMARY_TYPES) {
       const more = el(`<button class="link-row">${state.typesOpen ? 'Show fewer'
-        : `Show all ${data.by_type.length} types`}</button>`);
+        : `Show ${data.by_type.length - PRIMARY_TYPES} more types`}</button>`);
       more.onclick = () => {
         hapticSelect();
         state.typesOpen = !state.typesOpen;
@@ -835,9 +860,8 @@ async function reportScreen(opts) {
   const send = el(`<button class="btn btn-block section-gap"
       >📥 Send full report to my chat</button>`);
   if (!data.period.downloadable) {
-    // The file is built from the same calendar windows the DM report offers. Saying so
-    // on a disabled button is better than hiding it and leaving the screen looking like
-    // it does less than it does.
+    // Said by the server, not guessed here: only Today, Last week and Last month have a
+    // file behind them, and which those are is the backend's to say.
     disable(send, 'A file can be built for Today, Last week or Last month — pick '
                 + 'one of those periods.');
   } else if (!data.totals.total) {
@@ -847,7 +871,7 @@ async function reportScreen(opts) {
       busy(true);
       send.textContent = 'Sending…';
       try {
-        await post('/report/send', { period: state.period, type: state.scope });
+        await post('/report/send', { period: state.period, type: '' });
         hapticResult(true);
         toast('Report sent to your chat');
       } catch (e) {
@@ -860,8 +884,8 @@ async function reportScreen(opts) {
     };
   }
   wrap.appendChild(control(send));
-  // Said before it is tapped, not after: a file that silently appears in another chat
-  // while you are looking at this screen reads as nothing having happened.
+
+  // The file is not on this screen on purpose, so say where it goes.
   wrap.appendChild(el(`<div class="note">The full report lists every event under every
     unit, so it arrives as a file in your chat with the bot rather than on this
     screen.</div>`));
@@ -869,35 +893,31 @@ async function reportScreen(opts) {
   render(wrap, opts);
 }
 
-/** Alerts per day, with the value for one column readable underneath it.
- *
- *  The columns used to carry a `title` attribute, which needs a mouse to show. On the
- *  device this panel is actually used on, the number behind a bar was unreachable. */
-function trendCard(byDay) {
+/** The days behind the headline number, inside the same card. The busiest day is the one
+ *  filled; tapping or hovering a column reads its day and count out underneath, which is
+ *  the only route to the figure on a phone, where there is no hover. */
+function trendBlock(byDay) {
   const peak = Math.max(...byDay.map((d) => d.total), 1);
-  const card = el('<div class="card"><div class="card-title">Per day</div></div>');
-  const trend = el('<div class="trend"></div>');
+  const block = el('<div class="panel-trend"></div>');
+  const trend = el(`<div class="trend${byDay.length <= 10 ? ' is-sparse' : ''}"></div>`);
   const readout = el('<div class="trend-read" aria-live="polite"></div>');
-  // What the readout says when nothing is hovered: the busiest day until a column is
-  // tapped, that column afterwards.
   let pinned = () => { };
 
-  // 30 columns cannot each carry a legible label, and "M T W T F S S M T W…" repeated
-  // four times says nothing anyway. Roughly six markers, evenly spaced.
+  // A week's days are named (Mon, Tue); anything longer would not fit seven-plus labels
+  // across a phone, so a month is labelled with the date at about six places.
   const every = Math.max(1, Math.round(byDay.length / 6));
+  const busiest = byDay.reduce((a, b) => (b.total > a.total ? b : a), byDay[0]);
 
   byDay.forEach((d, i) => {
     const when = new Date(d.day + 'T12:00:00');
-    const narrow = when.toLocaleDateString('en-US', { weekday: 'narrow' });
+    const weekday = when.toLocaleDateString('en-US',
+      { weekday: byDay.length <= 7 ? 'short' : 'narrow' });
     const short = when.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    const label = byDay.length <= 10 ? narrow
+    const label = byDay.length <= 10 ? weekday
       : (i % every === 0 || i === byDay.length - 1 ? String(when.getDate()) : '');
 
-    // Three ways to the same number, because this panel runs on three kinds of
-    // client: the tooltip for a mouse, the tap for a phone, and aria-label for a
-    // screen reader. The tooltip is CSS-only and sits inside the column, so nothing
-    // has to be positioned in JavaScript as the chart resizes.
-    const col = el(`<button class="trend-col" aria-label="${esc(short)}: ${d.total}">
+    const col = el(`<button class="trend-col${d === busiest ? ' is-peak' : ''}"
+        aria-label="${esc(short)}: ${d.total}">
         <span class="trend-tip">${esc(short)} · ${num(d.total)}</span>
         <div class="trend-bar" style="height:${Math.round((d.total / peak) * 100)}%"></div>
         <div class="trend-day">${esc(label)}</div></button>`);
@@ -911,109 +931,53 @@ function trendCard(byDay) {
       pinned = say;
       say();
     };
-    // The readout follows the pointer too, and falls back to whatever was last pinned
-    // when it leaves — so moving across the chart with a mouse never leaves the line
-    // under it describing a column the pointer is no longer on.
+    // Hover previews and restores; a tap pins. The tooltip itself is CSS.
     col.onmouseenter = say;
     col.onmouseleave = () => pinned();
     trend.appendChild(col);
   });
 
-  const busiest = byDay.reduce((a, b) => (b.total > a.total ? b : a), byDay[0]);
   pinned = () => {
     readout.textContent = `Busiest: ${new Date(busiest.day + 'T12:00:00')
       .toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} · ${num(busiest.total)}`;
   };
   pinned();
 
-  card.appendChild(trend);
-  card.appendChild(readout);
-  return card;
+  block.appendChild(trend);
+  block.appendChild(readout);
+  return block;
 }
 
-// ── screen: more ──────────────────────────────────────────────────────────
-
-/** Everything rare: who can manage the bot, what reaches your own chat, and what this
- *  deployment is wired to.
+/** The admin's own DM switches -- the bot's settings menu, in the panel -- and, under
+ *  them, what this deployment is.
  *
- *  It exists so those two screens cost one tap instead of a permanent slot in a four-tab
- *  bar — a tab is a promise about how often you will go somewhere, and adding an admin
- *  happens a handful of times in a deployment's life. The facts underneath come from
- *  /bootstrap, which was already being fetched and whose answers to "is there a
- *  fleet-wide chat" and "is there a crash chat" had nowhere to be read. */
-async function moreScreen(opts) {
+ *  Deliberately only this. "Settings" in a fleet tool sounds like it should hold the
+ *  group filters and the company's configuration; the group filters are per group and live
+ *  on that group's page, and the configuration is environment variables on the deployment,
+ *  which no panel should be able to edit. The second card is a read-out of that
+ *  configuration -- it was the More screen's, and there is no More any more. */
+async function settingsScreen(opts) {
+  const [data] = await screenData(['/settings'], opts);
   const boot = state.boot;
   const wrap = el('<div></div>');
 
-  const rows = el('<div class="rows"></div>');
-  [
-    ['settings', '🔔 My notifications', 'Which alerts reach your own chat'],
-    ['admins', '🛡 Admins', 'Who can manage this bot'],
-  ].forEach(([type, title, sub]) => {
-    const row = el(`<button class="row">
-        <div class="row-main">
-          <div class="row-title">${title}</div>
-          <div class="row-sub">${sub}</div>
-        </div>
-        <span class="row-chevron" aria-hidden="true"></span></button>`);
-    row.onclick = () => {
-      haptic();
-      pushDetail({ type, title: type === 'admins' ? 'Admins' : 'My notifications' });
-    };
-    rows.appendChild(row);
-  });
-  wrap.appendChild(rows);
-
-  const role = boot.me.is_owner ? 'Deployment owner'
-    : boot.me.is_super ? 'Super admin' : 'Admin';
-  const card = el('<div class="card"><div class="card-title">This deployment</div></div>');
-  [
-    ['Company', boot.company.name],
-    ['Bot', boot.bot_username ? `@${boot.bot_username}` : '—'],
-    ['You', role],
-    // Both of these are the difference between an alert having somewhere to go and
-    // having nowhere, and neither was visible anywhere in the panel before.
-    ['Fleet-wide chat', boot.main_group_id ? 'Connected' : 'Not set up'],
-    ['Crash chat', boot.crash_group_id ? 'Connected' : 'Not set up'],
-  ].forEach(([label, value]) => {
-    card.appendChild(el(`<div class="field">
-        <span class="field-label">${esc(label)}</span>
-        <span class="field-value">${esc(value)}</span></div>`));
-  });
-  wrap.appendChild(card);
-
-  if (!boot.crash_group_id) {
-    wrap.appendChild(el(`<div class="note">With no crash chat, a crash detection reaches
-      only the admins who have crash DMs switched on. That switch is under
-      <b>My notifications</b>.</div>`));
-  }
-
-  render(wrap, opts);
-}
-
-/** The admin's own DM switches — the bot's ⚙️ Settings menu, in the panel.
- *
- *  Deliberately only this. "Settings" in a fleet tool sounds like it should hold the
- *  group filters and the company's configuration; the group filters are per group and
- *  live on that group's screen, and the configuration is environment variables on the
- *  deployment, which no panel should be able to edit. */
-async function settingsScreen(opts) {
-  const [data] = await screenData(['/settings'], opts);
-  const wrap = el('<div></div>');
-
-  const card = el(`<div class="card">
-      <div class="card-head"><div class="card-title">My notifications</div></div></div>`);
+  const card = el(`<div class="card notif-card"><div class="notif-head">
+      <div class="notif-title">My notifications</div>
+      <div class="notif-sub">Which alerts reach your own chat</div></div></div>`);
   data.notifications.forEach((n) => {
-    const field = el(`<div class="field">
-        <div><span class="field-label">${esc(n.emoji)} ${esc(n.label)}</span>
-        ${n.note ? `<div class="row-sub">${esc(n.note)}</div>` : ''}</div></div>`);
+    const [icon, tone] = eventStyle(n.type);
+    const row = el(`<div class="notif-row">
+        <span class="ev-icon is-lg${n.type === 'crash' ? ' is-solid' : ''}"
+              style="--c:var(${tone})">${ICON[icon]}</span>
+        <div class="notif-text"><div class="notif-label">${esc(n.label)}</div>
+        ${n.note ? `<div class="notif-note">${esc(n.note)}</div>` : ''}</div></div>`);
     const sw = el(`<button class="switch${n.on ? ' is-on' : ''}" role="switch"
         aria-checked="${!!n.on}" aria-label="${esc(n.label)}"></button>`);
     sw.onclick = async () => {
       const next = !sw.classList.contains('is-on');
-      // Flipped first and put back on failure. A switch that waits for a round trip
-      // before moving feels broken on a phone, and this one is idempotent server-side:
-      // it sends the state it is now in, not "toggle".
+      // Flipped first and put back on failure. A switch that waits for a round trip before
+      // moving feels broken on a phone, and this one is idempotent server-side: it sends
+      // the state it is now in, not "toggle".
       sw.classList.toggle('is-on', next);
       sw.setAttribute('aria-checked', String(next));
       sw.disabled = true;
@@ -1032,13 +996,40 @@ async function settingsScreen(opts) {
         busy(false);
       }
     };
-    field.appendChild(sw);
-    card.appendChild(field);
+    row.appendChild(sw);
+    card.appendChild(row);
   });
   wrap.appendChild(card);
   wrap.appendChild(el(`<div class="note">These are your personal alerts and nobody
-    else's. What a driver group receives is set on that group's screen, under
-    <b>Groups</b>.</div>`));
+    else's. What a driver group receives is set on that group's page, under
+    <b>Fleet</b>.</div>`));
+
+  const role = boot.me.is_owner ? 'Deployment owner'
+    : boot.me.is_super ? 'Super admin' : 'Admin';
+  const deploy = el(`<div class="card deploy-card section-gap">
+      <div class="card-title">This deployment</div></div>`);
+  [
+    ['Company', boot.company.name, ''],
+    ['Bot', boot.bot_username ? `@${boot.bot_username}` : '—', ''],
+    ['You', role, ''],
+    // Both of these are the difference between an alert having somewhere to go and having
+    // nowhere, and neither was visible anywhere in the panel before.
+    ['Fleet-wide chat', boot.main_group_id ? 'Connected' : 'Not set up',
+     boot.main_group_id ? '' : ' is-warn'],
+    ['Crash chat', boot.crash_group_id ? 'Connected' : 'Not set up',
+     boot.crash_group_id ? '' : ' is-warn'],
+  ].forEach(([label, value, tone]) => {
+    deploy.appendChild(el(`<div class="field">
+        <span class="field-label">${esc(label)}</span>
+        <span class="field-value${tone}">${esc(value)}</span></div>`));
+  });
+  wrap.appendChild(deploy);
+
+  if (!boot.crash_group_id) {
+    wrap.appendChild(el(`<div class="note-card">With no crash chat, a crash detection
+      reaches only the admins who have crash DMs switched on. That switch is
+      <b>Crash</b>, under My notifications.</div>`));
+  }
 
   render(wrap, opts);
 }
@@ -1095,17 +1086,38 @@ function isUnpaired(g) { return !g.is_main && !g.vehicle_number; }
  *  count of muted ones is called out above the list instead. */
 function isActive(g) { return !isUnpaired(g); }
 
-/** A dot on the Fleet tab while something there needs doing.
+/** The part of a unit you would say aloud, for the 44px tile.
  *
- *  Fleet is the only screen that shows an unpaired or muted group, and somebody can sit
- *  on Alerts all day. Set from whichever screen last had the numbers — Fleet from the
- *  group list, Report from the coverage block — rather than from a poll of its own. */
+ *  "TRUCK #002 JAVOKHIR AZIZOV" is 002, "unit571" is 571, "G8PZ-7X5-FF2" -- which has no
+ *  number in it -- is its first block. Short units are shown whole. */
+function tileText(unit) {
+  const v = String(unit || '').trim();
+  if (!v) return '—';
+  if (v.length <= 5) return v.toUpperCase();
+  const tokens = v.split(/[^A-Za-z0-9]+/).filter(Boolean);
+  const whole = tokens.find((t) => /^\d{2,}$/.test(t));
+  if (whole) return whole.slice(-4);
+  const trailing = tokens.map((t) => (t.match(/(\d{2,})$/) || [])[1]).find(Boolean);
+  return (trailing || tokens[0] || v).slice(0, 4).toUpperCase();
+}
+
+
+/** A count on the Fleet tab while something there needs doing.
+ *
+ *  Fleet is the only screen that shows an unpaired or muted group, and somebody can sit on
+ *  Report all day. A number rather than a dot: "4" says how much, a dot only says that
+ *  something is somewhere. Set from whichever screen last had the numbers -- Fleet from the
+ *  group list, Report from the coverage block -- rather than from a poll of its own. */
 function markAttention(count) {
-  const tab = document.querySelector('.tab[data-tab="fleet"]');
-  if (!tab) return;
-  const dot = tab.querySelector('.tab-dot');
-  if (count > 0 && !dot) tab.appendChild(el('<span class="tab-dot"></span>'));
-  if (!count && dot) dot.remove();
+  const icon = document.querySelector('.tab[data-tab="fleet"] .tab-icon');
+  if (!icon) return;
+  let badge = icon.querySelector('.tab-badge');
+  if (!count) { if (badge) badge.remove(); return; }
+  if (!badge) {
+    badge = el('<span class="tab-badge" aria-hidden="true"></span>');
+    icon.appendChild(badge);
+  }
+  badge.textContent = count > 99 ? '99+' : String(count);
 }
 
 /** The link that hands the user Telegram's own chat picker with this bot preloaded.
@@ -1211,11 +1223,32 @@ async function fleetScreen(opts) {
     unconnected: strayUnits.length,
   };
 
-  // One card, before the numbers, for the reason the muted warning always came first:
-  // these are states the counts underneath cannot show, because a group that receives
-  // nothing contributes nothing to them. Two amber cards stacked would be twice as loud
-  // for a problem that is not twice as bad, so both states share one line and the card
-  // goes wherever the bigger of them lives.
+  // The coverage card comes first because "is my fleet covered" is the question this screen
+  // exists to answer, and a list only answers it by being counted. Groups, not trucks: a
+  // truck with no group is below, under No group, and the roster may not have answered.
+  const pct = groups.length ? Math.round((counts.active / groups.length) * 100) : 0;
+  const week = groups.reduce((n, g) => n + (g.alerts_7d || 0), 0);
+  // The paired-but-quiet ones are the visible symptom of a unit the provider spells
+  // differently -- the failure utils/units.py exists to prevent.
+  const silent = groups.filter((g) => !g.is_main && g.vehicle_number && g.enabled
+                                      && !g.alerts_7d).length;
+  wrap.appendChild(el(`<section class="hero" aria-label="Coverage">
+      <div class="ring" style="--pct:${pct}"><div class="ring-in">
+        <span class="ring-num">${num(counts.active)}</span>
+        <span class="ring-of">of ${num(groups.length)}</span></div></div>
+      <div class="hero-main">
+        <div class="hero-kicker">Groups with a unit</div>
+        <div class="hero-line">${pct === 100 ? 'Every group is set up'
+          : `${pct}% of groups are set up`}</div>
+        <div class="hero-stats">
+          <span class="hero-stat"><b>${num(week)}</b> alerts · 7d</span>
+          ${silent ? `<span class="hero-stat is-warn"><b>${num(silent)}</b> silent</span>` : ''}
+        </div></div></section>`));
+
+  // One card for both states the counts underneath cannot show: a group that receives
+  // nothing contributes nothing to them. Two amber cards stacked would be twice as loud for
+  // a problem that is not twice as bad, so both share one line, and the card goes
+  // wherever the bigger of them lives.
   markAttention(unpairedGroups.length + mutedGroups.length);
   if (unpairedGroups.length || mutedGroups.length) {
     const parts = [];
@@ -1226,16 +1259,12 @@ async function fleetScreen(opts) {
       .map((g) => g.title || String(g.telegram_group_id)).join(', ');
 
     const card = el(`<button class="warn-card">
-        <span class="warn-card-icon" aria-hidden="true">${
-          unpairedGroups.length ? '⚠️' : '🔕'}</span>
+        <span class="warn-card-icon" aria-hidden="true">${ICON.warn}</span>
         <span class="warn-card-main">
           <b>${esc(parts.join(' · '))}</b>
           <small>${esc(names)}</small>
-          <small>${unpairedGroups.length
-            ? 'Nothing is sent to an unpaired group until a unit is set.'
-            : 'A muted group receives nothing until it is switched back on.'}</small>
         </span>
-        <span class="row-chevron" aria-hidden="true"></span></button>`);
+        <span class="chev" aria-hidden="true">${ICON.chevron}</span></button>`);
     card.onclick = () => {
       haptic();
       state.groupsQuery = '';
@@ -1449,9 +1478,6 @@ async function fleetScreen(opts) {
    *  and the mute switch on the row itself — muting used to cost two taps and a screen
    *  change, which is a lot for the control people reach for most. */
   function groupRow(g) {
-    const badge = g.is_main
-      ? '<span class="badge badge-main">ALL UNITS</span>'
-      : `<span class="badge badge-unit">${esc(g.vehicle_number || 'no unit')}</span>`;
     // Rows in the catalog, not stored event types: "Camera Obstructed" is three of the
     // latter, so counting those reported numbers no chip on any screen agrees with.
     const rowsOn = g.filter_mode === 'all' ? 0
@@ -1459,20 +1485,30 @@ async function fleetScreen(opts) {
     const filter = g.filter_mode === 'all' ? 'All events'
       : `${rowsOn} event type${rowsOn === 1 ? '' : 's'}`;
 
-    // A paired, unmuted group that has received nothing all week is the visible symptom
-    // of a unit the provider spells differently — the failure utils/units.py exists to
+    // A paired, unmuted group that has received nothing all week is the visible symptom of
+    // a unit the provider spells differently -- the failure utils/units.py exists to
     // prevent, and one that otherwise shows up as a quiet 0 in a subtitle.
     const silent = !g.is_main && g.vehicle_number && g.enabled && !g.alerts_7d;
     const week = silent
-      ? '<span class="row-flag">⚠️ nothing in 7 days</span>'
+      ? '<span class="row-flag">No alerts in 7 days</span>'
       : `${num(g.alerts_7d)} this week`;
 
-    const row = el(`<div class="row"></div>`);
-    const main = el(`<button class="row-main">
-        <div class="row-title">${esc(g.title || 'Untitled group')}</div>
-        <div class="row-meta">${badge}
-          <span class="row-sub">${filter} · ${week}</span></div>
-      </button>`);
+    // The tile is the unit at a glance. A roster that spells its units out ("TRUCK #002
+    // JAVOKHIR AZIZOV") is shortened to the part you would say aloud; the whole name is on
+    // the group's own page, and the line under the title stays for what the list is about --
+    // what the group receives and whether it is hearing anything.
+    const unit = g.is_main ? '' : (g.vehicle_number || '');
+    const tile = g.is_main
+      ? '<span class="unit-tile">ALL</span>'
+      : unit
+        ? `<span class="unit-tile${g.enabled ? '' : ' is-off'}">${esc(tileText(unit))}</span>`
+        : `<span class="unit-tile is-open">${ICON.link}</span>`;
+    const lead = g.enabled ? '' : 'Muted · ';
+
+    const row = el(`<div class="row has-tile${g.enabled ? '' : ' is-muted'}"></div>`);
+    const main = el(`<button class="row-main">${tile}<span class="row-text">
+        <span class="row-title">${esc(g.title || 'Untitled group')}</span>
+        <span class="row-sub">${lead}${filter} · ${week}</span></span></button>`);
     main.onclick = () => {
       haptic();
       pushDetail({ type: 'group', id: g.telegram_group_id, title: g.title || 'Group' });
@@ -1482,7 +1518,7 @@ async function fleetScreen(opts) {
     const sw = el(`<button class="switch${g.enabled ? ' is-on' : ''}" role="switch"
         aria-checked="${!!g.enabled}" aria-label="Alerts for this group"></button>`);
     // Redrawing the list keeps the "N muted" count above it honest. The search field is
-    // outside listWrap, so whatever was typed — and the focus — survives.
+    // outside listWrap, so whatever was typed -- and the focus -- survives.
     sw.onclick = () => toggleGroupEnabled(g, sw, () => renderList(search.value));
     row.appendChild(sw);
     return row;
@@ -1538,28 +1574,39 @@ async function groupDetail(opts) {
       if (!stale(opts) && !isTyping()) renderCurrent({ keep: true });
     }).catch(() => { /* the picker says so itself */ });
   }
-  // Checked before the row is looked up, not just before the paint: this screen answers
-  // a missing row by navigating, and a stale instance doing that would throw the user
-  // out of whatever they had opened in the meantime.
+  // Checked before the row is looked up, not just before the paint: this screen answers a
+  // missing row by navigating, and a stale instance doing that would throw the user out of
+  // whatever they had opened in the meantime.
   if (stale(opts)) return;
   const g = groups.find((x) => x.telegram_group_id === id);
   if (!g) { popDetail(); return; }
 
   const wrap = el('<div></div>');
 
+  // — who this is —
+  const tile = g.is_main ? '<span class="unit-tile is-lg">ALL</span>'
+    : g.vehicle_number
+      ? `<span class="unit-tile is-lg${g.enabled ? '' : ' is-off'}">${esc(tileText(g.vehicle_number))}</span>`
+      : `<span class="unit-tile is-lg is-open">${ICON.link}</span>`;
+  const status = el(`<div class="identity-status ${g.enabled ? 'is-on' : 'is-off'}"
+      >${g.enabled ? 'Receiving alerts' : 'Muted'}</div>`);
+  const who = el(`<div class="card identity">${tile}<div class="identity-main">
+      <div class="identity-name">${esc(g.is_main ? 'All units'
+        : g.vehicle_number || 'No unit yet')}</div>
+      <div class="identity-sub">Chat ID ${esc(String(id))}</div></div></div>`);
+  who.querySelector('.identity-name').after(status);
+  wrap.appendChild(who);
+
   // — alerts on/off —
   const card = el('<div class="card"></div>');
   const field = el(`<div class="field"><span class="field-label">Alerts</span></div>`);
-  const status = el(`<span class="field-value ${g.enabled ? 'is-on' : 'is-off'}"
-      >${g.enabled ? 'On' : 'Muted'}</span>`);
   const sw = el(`<button class="switch${g.enabled ? ' is-on' : ''}" role="switch"
       aria-checked="${!!g.enabled}" aria-label="Alerts"></button>`);
   sw.onclick = async () => {
     await toggleGroupEnabled(g, sw);
-    status.textContent = g.enabled ? 'On' : 'Muted';
-    status.className = `field-value ${g.enabled ? 'is-on' : 'is-off'}`;
+    status.textContent = g.enabled ? 'Receiving alerts' : 'Muted';
+    status.className = `identity-status ${g.enabled ? 'is-on' : 'is-off'}`;
   };
-  field.appendChild(status);
   field.appendChild(sw);
   card.appendChild(field);
   card.appendChild(el(`<div class="field"><span class="field-label">Alerts this week</span>
@@ -1568,10 +1615,9 @@ async function groupDetail(opts) {
 
   // — unit —
   //
-  // Directly under the on/off switch, because it is the only field on this screen that
-  // can be wrong and it is the reason the screen exists: an admin opens a group from a
-  // DM that says its unit is not in the roster. It used to sit below the week's count
-  // and the chat id.
+  // Directly under the on/off switch, because it is the only field on this screen that can
+  // be wrong and it is the reason the screen exists: an admin opens a group from a DM that
+  // says its unit is not in the roster.
   if (!g.is_main) {
     const unitCard = el('<div class="card"><div class="card-title">Unit</div></div>');
     if (!roster) {
@@ -1607,58 +1653,83 @@ async function groupDetail(opts) {
 
   // — event filter —
   //
-  // The chips are a local selection and one button saves it. Every tap used to be its
-  // own round trip, so going from "everything" to "speeding only" was fifteen taps and
-  // fifteen requests on a truck-stop connection. What is sent is the rows that are lit,
-  // never a computed allowlist: the collapse rule — an allowlist covering every type
-  // becomes the empty "all types" state — stays in data/event_catalog.py, where one
-  // implementation of it can't drift from another.
+  // The tiles are a local selection and one button saves it. Every tap used to be its own
+  // round trip, so going from "everything" to "speeding only" was fifteen taps and fifteen
+  // requests on a truck-stop connection. What is sent is the rows that are lit, never a
+  // computed allowlist: the collapse rule -- an allowlist covering every type becomes the
+  // empty "all types" state -- stays in data/event_catalog.py, where one implementation of
+  // it can't drift from another.
   const rows = state.boot.event_types;
   const stored = g.filter_mode === 'all'
     ? new Set(rows.map((t) => t.type))
     : new Set(g.event_types.map(chipTokenFor));
-  // The selection lives in state, not in this closure. A background load finishing —
-  // the roster above, or a revalidation — re-runs this function, and a half-made
-  // selection that vanished when it did would be worse than no batching at all.
+  // The selection lives in state, not in this closure. A background load finishing -- the
+  // roster above, or a revalidation -- re-runs this function, and a half-made selection
+  // that vanished when it did would be worse than no batching at all.
   const draft = state.filterDraft && state.filterDraft.id === id
     ? new Set(state.filterDraft.picked) : null;
   const picked = draft || new Set(stored);
 
-  const evCard = el('<div class="card"><div class="card-title">Event types</div></div>');
-  const chips = el('<div class="chips"></div>');
+  const evCard = el(`<div class="card"><div class="events-head">
+      <div><div class="card-title">Event types</div>
+      <div class="events-count"></div></div>
+      <div class="events-quick"></div></div></div>`);
+  const count = evCard.querySelector('.events-count');
+  const quick = evCard.querySelector('.events-quick');
+  const grid = el('<div class="event-grid"></div>');
   const note = el('<div class="note"></div>');
-  const save = el('<button class="btn btn-block section-gap">Save event types</button>');
-  evCard.appendChild(chips);
+  evCard.appendChild(grid);
   evCard.appendChild(note);
+  evCard.appendChild(el(`<div class="note">Crash alerts bypass this filter and always go to
+    the crash chat and to admins who have crash DMs on.</div>`));
+
+  // Pinned to the bottom of the screen while a selection is unsaved, and nowhere else.
+  const bar = el(`<div class="savebar" hidden>
+      <div class="savebar-note"></div>
+      <button class="btn btn-block">Save event types</button></div>`);
+  const barNote = bar.querySelector('.savebar-note');
+  const save = bar.querySelector('button');
 
   const sameAsStored = () => picked.size === stored.size
     && [...picked].every((t) => stored.has(t));
 
   function drawChips() {
-    chips.innerHTML = '';
+    grid.innerHTML = '';
+    quick.innerHTML = '';
     const all = picked.size === rows.length;
 
-    const allChip = el(`<button class="chip${all ? ' is-on' : ''}"
-        aria-pressed="${all}">All types</button>`);
-    allChip.onclick = () => {
+    const allBtn = el(`<button class="chip" aria-pressed="${all}">All</button>`);
+    allBtn.onclick = () => {
       hapticSelect();
       rows.forEach((t) => picked.add(t.type));
       drawChips();
     };
-    chips.appendChild(allChip);
+    const noneBtn = el(`<button class="chip" aria-pressed="${!picked.size}">None</button>`);
+    noneBtn.onclick = () => {
+      hapticSelect();
+      picked.clear();
+      drawChips();
+    };
+    quick.appendChild(allBtn);
+    quick.appendChild(noneBtn);
 
     rows.forEach((t) => {
       const on = picked.has(t.type);
-      const chip = el(`<button class="chip${on ? ' is-on' : ''}" aria-pressed="${on}"
-          >${esc(t.emoji)} ${esc(t.label)}</button>`);
-      chip.onclick = () => {
+      const [icon, tone] = eventStyle(t.type);
+      const tileEl = el(`<button class="event-tile${on ? ' is-on' : ''}"
+          aria-pressed="${on}">
+          <span class="ev-icon" style="--c:var(${tone})">${ICON[icon]}</span>
+          <span class="event-tile-label">${esc(t.label)}</span>
+          <span class="event-tile-check">${ICON.check}</span></button>`);
+      tileEl.onclick = () => {
         hapticSelect();
         if (on) picked.delete(t.type); else picked.add(t.type);
         drawChips();
       };
-      chips.appendChild(chip);
+      grid.appendChild(tileEl);
     });
 
+    count.textContent = `${picked.size} of ${rows.length} on`;
     note.textContent = all
       ? 'Receiving every event type, including any added later.'
       : picked.size
@@ -1666,14 +1737,15 @@ async function groupDetail(opts) {
         : 'Nothing is selected. Pick at least one type, or mute the group above.';
     const dirty = !sameAsStored();
     state.filterDraft = dirty ? { id, picked: [...picked] } : null;
-    save.hidden = !dirty;
+    bar.hidden = !dirty;
+    document.body.classList.toggle('has-savebar', dirty);
+    barNote.textContent = `Unsaved changes · ${picked.size} of ${rows.length} on`;
     save.disabled = !picked.size;
   }
 
   save.onclick = async () => {
-    // A full selection is sent as "all" rather than as a list of every row: the two mean
-    // the same thing to the server, and "all" is the state that keeps receiving event
-    // types added to the catalog later.
+    // Every type lit is "all", not an allowlist that happens to list everything: the
+    // server collapses the two, and sending the honest intent keeps that rule in one place.
     const body = picked.size === rows.length
       ? { action: 'all' }
       : { action: 'set', event_types: [...picked] };
@@ -1692,19 +1764,13 @@ async function groupDetail(opts) {
   };
 
   drawChips();
-  evCard.appendChild(save);
   wrap.appendChild(evCard);
+  wrap.appendChild(bar);
 
-  // Kept, and kept last: a once-per-deployment debugging value that used to sit directly
-  // under the mute switch with the same weight as it.
-  wrap.appendChild(el(`<div class="card">
-      <div class="field"><span class="field-label">Chat ID</span>
-        <span class="field-value">${esc(String(id))}</span></div></div>`));
-
-  // — danger zone —
+  // Super admins only, and never the all-fleet group: it is recreated on every boot.
   if (state.boot.me.is_super && !g.is_main) {
-    const zone = el('<div class="danger-zone"></div>');
-    const btn = el('<button class="btn btn-danger btn-block">Remove group</button>');
+    const zone = el('<div class="card danger-zone"></div>');
+    const btn = el(`<button class="btn btn-danger btn-block">${ICON.trash} Remove group</button>`);
     btn.onclick = async () => {
       const ok = await confirmAction(
         `Remove "${g.title || 'this group'}"? It will stop receiving alerts until the bot is re-added.`);
@@ -1765,256 +1831,29 @@ async function toggleEvent(g, body, redraw) {
   } catch (e) { hapticResult(false); alertMessage(e.message); }
 }
 
-// ── screen 3: alerts ────────────────────────────────────────────────────────────
+// ── admins ──────────────────────────────────────────────────────────────────────
 
-// The feed is the one screen that pages, so it keeps its own loaded items rather than
-// caching by URL. These hold the nodes a "load more" appends into, so a second page is
-// added to the list instead of rebuilding it — rebuilding meant the list you were
-// reading jumped back to the top the moment it grew.
-let feedNode = null;
-let feedMore = null;
-let feedRows = null;
-let feedDay = null;
-let feedLoading = false;
-let feedObserver = null;
+const AVATAR_COLORS = ['#2f5bea', '#7c4ddb', '#0e7490', '#b45309', '#a21caf', '#15803d'];
 
-function resetFeed() {
-  state.alertItems = [];
-  state.alertNext = null;
-  state.alertLoaded = false;
+/** Two letters for the avatar: first and last word of the name. */
+function initials(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return '?';
+  return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
 }
 
-function openAlerts(filter) {
-  state.alertFilter = Object.assign({ type: '', unit: '' }, filter || {});
-  resetFeed();
-  state.scroll.alerts = 0;
-  // Not selectTab: changing the filter while already on this tab has to re-render, and
-  // selectTab treats "the tab you are on" as a scroll-to-top and returns.
-  if (state.tab === 'alerts' && !state.detail) {
-    state.epoch++;
-    setSkeleton('alerts');
-    renderCurrent();
-  } else {
-    selectTab('alerts');
-  }
+function avatarHtml(a, large) {
+  const color = AVATAR_COLORS[Math.abs(Number(a.telegram_id) || 0) % AVATAR_COLORS.length];
+  return `<span class="avatar${large ? ' is-lg' : ''}${a.is_active ? '' : ' is-off'}"
+      style="--av:${color}" aria-hidden="true">${esc(initials(a.full_name))}</span>`;
 }
 
-/** "All", then the four types that account for nearly every alert, then the rest of the
- *  catalog. Crash is named literally because it is deliberately absent from
- *  GROUP_FILTER_TYPES — a crash is never a per-group filter — but it is the one alert
- *  anybody opens this feed to find.
- *
- *  The first PRIMARY_CHIPS of them are the ones the bar shows closed; see alertsScreen. */
-function alertFilterChips() {
-  const catalog = (state.boot && state.boot.event_types) || [];
-  const byType = new Map(catalog.map((t) => [t.type, t]));
-  const out = [{ type: '', label: 'All', emoji: '' },
-               { type: 'crash', label: 'Crash', emoji: '💥' }];
-  const seen = new Set(['', 'crash']);
-  ['speeding', 'hard_brake', 'cell_phone'].forEach((t) => {
-    if (byType.has(t)) { out.push(byType.get(t)); seen.add(t); }
-  });
-  catalog.forEach((t) => { if (!seen.has(t.type)) out.push(t); });
-  return out;
+function rolePills(a, withActive) {
+  return (a.is_owner ? '<span class="pill pill-owner">OWNER</span>' : '')
+    + (a.is_super && !a.is_owner ? '<span class="pill pill-super">SUPER</span>' : '')
+    + (a.is_active ? (withActive ? '<span class="pill pill-on">ACTIVE</span>' : '')
+                   : '<span class="pill">INACTIVE</span>');
 }
-
-/* How many chips the bar shows before "More". Four, because five put "Cell Phone Usage"
- * on a third row on a 375px phone -- and a filter bar that costs three rows of the feed
- * to avoid a sideways scroll has not improved anything. */
-const PRIMARY_CHIPS = 4;
-
-/** Four tones over sixteen event types. The point is not to encode the type in colour —
- *  the label already does that — it is that a crash cannot look like a phone call in a
- *  column of sixty rows. */
-function alertTone(type) {
-  if (type === 'crash') return 'crash';
-  if (type === 'speeding') return 'speeding';
-  if (/brake|harsh|collision|stop_sign|near_miss|unsafe/.test(type)) return 'brake';
-  if (/cell_phone|inattentive|drowsy|drowsiness|seat_belt|cam/.test(type)) return 'phone';
-  return '';
-}
-
-function alertRow(item) {
-  const sev = item.severity
-    ? ` · ${esc(String(item.severity).replace(/^./, (c) => c.toUpperCase()))}` : '';
-  const filtered = !!state.alertFilter.unit;
-  const tag = filtered ? 'div' : 'button';
-
-  const row = el(`<${tag} class="row alert-row" data-tone="${alertTone(item.event_type)}">
-      <span class="alert-icon" aria-hidden="true">${esc(item.emoji)}</span>
-      <div class="row-main" style="pointer-events:none">
-        <div class="row-title">${esc(item.label)}</div>
-        <div class="row-sub"><span class="alert-unit">${esc(item.vehicle_number)}</span>${sev}</div>
-      </div>
-      <span class="row-side">${esc(fmtTime(item.occurred_at))}</span>
-    </${tag}>`);
-  // Tapping a row narrows the feed to that unit, which is the follow-up question the
-  // row itself raises. Already filtered by unit, there is nothing to narrow to.
-  if (!filtered) row.onclick = () => { haptic(); openAlerts({ unit: item.vehicle_number }); };
-  return row;
-}
-
-function appendAlerts(items) {
-  items.forEach((item) => {
-    const day = dayLabel(item.occurred_at);
-    if (day !== feedDay) {
-      feedDay = day;
-      feedNode.appendChild(el(`<div class="day-header">${esc(day)}</div>`));
-      feedRows = el('<div class="rows"></div>');
-      feedNode.appendChild(feedRows);
-    }
-    feedRows.appendChild(alertRow(item));
-  });
-}
-
-async function alertsScreen(opts) {
-  if (!state.alertLoaded) {
-    const params = new URLSearchParams({ limit: '50' });
-    if (state.alertFilter.type) params.set('type', state.alertFilter.type);
-    if (state.alertFilter.unit) params.set('unit', state.alertFilter.unit);
-    const data = await api(`/alerts?${params.toString()}`);
-    state.alertItems = data.items;
-    state.alertNext = data.next;
-    state.alertLoaded = true;
-  }
-
-  const wrap = el('<div></div>');
-
-  // The bar used to be one row that scrolled sideways, with its scrollbar hidden. On a
-  // phone that is a swipe; on the desktop client it is a row of chips with no visible
-  // way to reach the ones past the edge. So it wraps, and the long tail of the catalog
-  // is behind "More" rather than behind a gesture.
-  const bar = el('<div class="filter-bar"></div>');
-  // First, not last: appended after sixteen type chips, the one filter the user set
-  // themselves ended up on a line of its own at the bottom, read as part of the tail.
-  if (state.alertFilter.unit) {
-    const chip = el(`<button class="chip is-on">🚛 ${esc(state.alertFilter.unit)} ✕</button>`);
-    chip.onclick = () => { haptic(); openAlerts({ type: state.alertFilter.type }); };
-    bar.appendChild(chip);
-  }
-
-  const all = alertFilterChips();
-  // Whatever is selected is always drawn, wherever it sits in the catalog: a collapsed
-  // bar that hides the active filter is a feed showing a subset for no visible reason.
-  const shown = state.alertChipsOpen ? all
-    : all.filter((f, i) => i < PRIMARY_CHIPS || state.alertFilter.type === f.type);
-
-  shown.forEach((f) => {
-    const on = state.alertFilter.type === f.type;
-    const label = f.emoji ? `${esc(f.emoji)} ${esc(f.label)}` : esc(f.label);
-    const chip = el(`<button class="chip${on ? ' is-on' : ''}" aria-pressed="${on}">${label}</button>`);
-    chip.onclick = () => {
-      hapticSelect();
-      openAlerts({ type: f.type, unit: state.alertFilter.unit });
-    };
-    bar.appendChild(chip);
-  });
-
-  if (all.length > shown.length || state.alertChipsOpen) {
-    const hidden = all.length - shown.length;
-    const more = el(`<button class="chip chip-more">${state.alertChipsOpen
-      ? 'Less ▴' : `More ${hidden} ▾`}</button>`);
-    more.onclick = () => {
-      hapticSelect();
-      state.alertChipsOpen = !state.alertChipsOpen;
-      // keep: the feed below must not jump while the bar above it grows.
-      renderCurrent({ keep: true });
-    };
-    bar.appendChild(more);
-  }
-  wrap.appendChild(bar);
-
-  if (!state.alertItems.length) {
-    wrap.appendChild(el(`<div class="empty"><span class="empty-emoji">🔕</span>
-      No alerts match this filter.</div>`));
-    render(wrap, opts);
-    return;
-  }
-
-  // Before the module-level feed nodes are touched, not just before the paint: a stale
-  // instance that reassigned them would leave "Load more" appending rows into a node
-  // that is no longer on the page.
-  if (stale(opts)) return;
-
-  feedNode = el('<div></div>');
-  feedMore = el('<div></div>');
-  feedDay = null;
-  feedRows = null;
-  wrap.appendChild(feedNode);
-  wrap.appendChild(feedMore);
-
-  appendAlerts(state.alertItems);
-  drawMore();
-  render(wrap, opts);
-}
-
-function drawMore() {
-  feedMore.innerHTML = '';
-  if (!state.alertNext) {
-    if (state.alertItems.length > 20) {
-      feedMore.appendChild(el(`<div class="note" style="text-align:center">
-        That's every alert in this filter.</div>`));
-    }
-    return;
-  }
-
-  const more = el(`<button class="btn btn-secondary btn-block"
-      style="margin-top:14px">Load more</button>`);
-  more.onclick = () => loadMoreAlerts(more);
-  feedMore.appendChild(more);
-
-  // Auto-load when the button comes into view, so reading down a long feed doesn't stop
-  // every fifty rows. The button is still a button: it is the control on a client
-  // without IntersectionObserver, and the one that works when the WebView is in the
-  // background, where the observer is suspended along with every animation frame.
-  if (typeof IntersectionObserver === 'function') {
-    // The previous one is dropped first. It watches a button that has just been replaced,
-    // so it can never fire and disconnect itself, and a long feed left one behind per
-    // page.
-    if (feedObserver) feedObserver.disconnect();
-    feedObserver = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting)) {
-        feedObserver.disconnect();
-        loadMoreAlerts(more);
-      }
-    }, { rootMargin: '300px' });
-    feedObserver.observe(more);
-  }
-}
-
-async function loadMoreAlerts(button) {
-  if (feedLoading || !state.alertNext) return;
-  feedLoading = true;
-  // The filter this page belongs to. Changing a chip mid-load used to append the old
-  // filter's rows underneath the new filter's, and save a cursor from the wrong query —
-  // after which "Load more" paged through a list nobody had asked for.
-  const forFilter = JSON.stringify(state.alertFilter);
-  button.textContent = 'Loading…';
-  busy(true);
-  try {
-    const params = new URLSearchParams({ limit: '50' });
-    if (state.alertFilter.type) params.set('type', state.alertFilter.type);
-    if (state.alertFilter.unit) params.set('unit', state.alertFilter.unit);
-    params.set('before_ts', state.alertNext.before_ts);
-    params.set('before_id', state.alertNext.before_id);
-
-    const data = await api(`/alerts?${params.toString()}`);
-    if (JSON.stringify(state.alertFilter) !== forFilter) return;
-    state.alertItems = state.alertItems.concat(data.items);
-    state.alertNext = data.next;
-    // Appended, not re-rendered: the rows already on screen stay exactly where they are.
-    appendAlerts(data.items);
-    drawMore();
-  } catch (e) {
-    button.textContent = 'Load more';
-    alertMessage(e.message);
-  } finally {
-    feedLoading = false;
-    busy(false);
-  }
-}
-
-// ── screen 4: admins ────────────────────────────────────────────────────────────
 
 async function adminsScreen(opts) {
   const [admins] = await screenData(['/admins'], opts);
@@ -2027,14 +1866,12 @@ async function adminsScreen(opts) {
 
   const rows = el('<div class="rows"></div>');
   admins.forEach((a) => {
-    const badges = (a.is_owner ? '<span class="badge badge-owner">OWNER</span>' : '')
-      + (a.is_super && !a.is_owner ? '<span class="badge badge-super">SUPER</span>' : '')
-      + (a.is_active ? '' : '<span class="badge badge-muted">INACTIVE</span>');
     const handle = a.username ? `@${esc(a.username)}` : `ID ${esc(String(a.telegram_id))}`;
-    const row = el(`<button class="row">
-        <div class="row-main">
-          <div class="row-title">${esc(a.full_name || 'Unknown')}</div>
-          <div class="row-meta">${badges}<span class="row-sub">${handle}</span></div>
+    const row = el(`<button class="row has-avatar${a.is_active ? '' : ' is-inactive'}">
+        ${avatarHtml(a)}
+        <div class="row-main" style="pointer-events:none">
+          <div class="row-title"><span>${esc(a.full_name || 'Unknown')}</span>${rolePills(a)}</div>
+          <div class="row-sub">${handle}</div>
         </div>
         <span class="row-chevron" aria-hidden="true"></span>
       </button>`);
@@ -2047,12 +1884,21 @@ async function adminsScreen(opts) {
   wrap.appendChild(rows);
 
   if (state.boot.me.is_super) {
-    const add = el('<button class="btn btn-block section-gap">+ Add admin</button>');
+    const add = el(`<button class="btn btn-block btn-add">${ICON.plus} Add admin</button>`);
     add.onclick = () => { haptic(); pushDetail({ type: 'addadmin', title: 'Add admin' }); };
     wrap.appendChild(add);
   } else {
     wrap.appendChild(el('<div class="note">Only a super admin can change this list.</div>'));
   }
+
+  wrap.appendChild(el(`<div class="card section-gap">
+      <div class="card-title">Roles</div>
+      <div class="role-line"><span class="pill pill-owner">OWNER</span>
+        <span>Named in the deployment's own config. Can't be removed here.</span></div>
+      <div class="role-line"><span class="pill pill-super">SUPER</span>
+        <span>Manages admins, groups and units.</span></div>
+      <div class="role-line"><span class="pill">ADMIN</span>
+        <span>Receives alerts and reads reports.</span></div></div>`));
   render(wrap, opts);
 }
 
@@ -2064,25 +1910,29 @@ async function adminDetail(opts) {
 
   const isSuper = state.boot.me.is_super;
   const isSelf = a.telegram_id === state.boot.me.telegram_id;
-  /* Two tiers, not one. Any super admin can hand the role out; only the deployment's
-   * own account — the one named in the deployment config — can take it back, deactivate
-   * a super admin or remove one. Peers stripping each other is a race nobody wins, and
-   * the loser has no way back into the panel that isn't a hand-written SQL statement.
+  /* Two tiers, not one. Any super admin can hand the role out; only the deployment's own
+   * account -- the one named in the deployment config -- can take it back, deactivate a
+   * super admin or remove one. Peers stripping each other is a race nobody wins, and the
+   * loser has no way back into the panel that isn't a hand-written SQL statement.
    *
-   * The rules are the server's (update_admin in utils/webapp/api.py). These are the
-   * same rules stated in buttons, so the panel refuses before the request rather than
-   * after it. */
+   * The rules are the server's (update_admin in utils/webapp/api.py). These are the same
+   * rules stated in buttons, so the panel refuses before the request rather than after
+   * it. */
   const owner = !!state.boot.me.is_owner;
   const ownerRow = "This account is named in the deployment's own config — change it "
     + 'there, not here.';
   const ownerOnly = (verb) => `Only the deployment's own account can ${verb} a super admin.`;
   const wrap = el('<div></div>');
 
+  const handle = a.username ? `@${esc(a.username)}` : `ID ${esc(String(a.telegram_id))}`;
+  wrap.appendChild(el(`<div class="card identity-card">
+      ${avatarHtml(a, true)}
+      <div class="identity-name">${esc(a.full_name || 'Unknown')}</div>
+      <div class="identity-handle">${handle}</div>
+      <div class="pills">${rolePills(a, true).replace(/class="pill/g, 'class="pill pill-lg')}</div>
+    </div>`));
+
   wrap.appendChild(el(`<div class="card">
-      <div class="field"><span class="field-label">Name</span>
-        <span class="field-value">${esc(a.full_name || '—')}</span></div>
-      <div class="field"><span class="field-label">Username</span>
-        <span class="field-value">${a.username ? '@' + esc(a.username) : '—'}</span></div>
       <div class="field"><span class="field-label">Telegram ID</span>
         <span class="field-value">${esc(String(a.telegram_id))}</span></div>
       <div class="field"><span class="field-label">Role</span>
@@ -2101,11 +1951,11 @@ async function adminDetail(opts) {
 
   // Guards render as disabled buttons with the reason spelled out, rather than being
   // hidden. The bot answers with these exact sentences, so the rules are already known to
-  // exist — hiding the control just makes the panel look broken.
-  const actions = el('<div class="card"></div>');
+  // exist -- hiding the control just makes the panel look broken.
+  const actions = el('<div class="card stack-actions"></div>');
 
   const activeBtn = el(`<button class="btn btn-secondary btn-block"
-      style="margin-bottom:10px">${a.is_active ? 'Deactivate' : 'Activate'}</button>`);
+      >${ICON.pause} ${a.is_active ? 'Deactivate' : 'Activate'}</button>`);
   if (isSelf && a.is_active) disable(activeBtn, "You can't deactivate yourself.");
   else if (a.is_owner) disable(activeBtn, ownerRow);
   else if (a.is_super && !owner) disable(activeBtn, ownerOnly('deactivate'));
@@ -2114,7 +1964,8 @@ async function adminDetail(opts) {
   actions.appendChild(control(activeBtn));
 
   if (!a.is_super) {
-    const promote = el('<button class="btn btn-secondary btn-block" style="margin-bottom:10px">⭐ Make super admin</button>');
+    const promote = el(`<button class="btn btn-secondary btn-block"
+        >${ICON.up} Make super admin</button>`);
     if (!a.is_active) disable(promote, 'Activate this admin before promoting them.');
     else promote.onclick = async () => {
       if (await confirmAction(`Make ${a.full_name || 'this admin'} a super admin?`)) {
@@ -2124,24 +1975,27 @@ async function adminDetail(opts) {
     actions.appendChild(control(promote));
   } else {
     const demote = el(`<button class="btn btn-secondary btn-block"
-        style="margin-bottom:10px">⬇️ Remove super admin</button>`);
+        >${ICON.down} Remove super admin</button>`);
     if (isSelf) disable(demote, "You can't take away your own super-admin role.");
     else if (a.is_owner) disable(demote, ownerRow);
     else if (!owner) disable(demote, ownerOnly('demote'));
     else demote.onclick = async () => {
-      // Named as what it leaves behind, not as what it takes: the usual reason to press
-      // this is that somebody was promoted by mistake, and the question in their head is
-      // whether it also throws the person out of the panel. It does not.
+      // Named as what it leaves behind, not as what it takes: the usual reason to press this
+      // is that somebody was promoted by mistake, and the question in their head is whether
+      // it also throws the person out of the panel. It does not.
       if (await confirmAction(`${a.full_name || 'This admin'} stays an admin but loses `
           + 'super-admin rights — no managing admins, groups or units. Continue?')) {
         mutateAdmin(a.id, { is_super: false }, 'Super admin removed');
       }
     };
     actions.appendChild(control(demote));
+    actions.appendChild(el(`<div class="note" style="margin:0">They stay an admin but lose
+      super-admin rights: no managing admins, groups or units.</div>`));
   }
   wrap.appendChild(actions);
 
-  const remove = el('<button class="btn btn-danger btn-block">Remove admin</button>');
+  const remove = el(`<button class="btn btn-danger btn-block"
+      >${ICON.trash} Remove admin</button>`);
   if (isSelf) disable(remove, "You can't remove yourself.");
   else if (a.is_owner) disable(remove, ownerRow);
   else if (a.is_super && !owner) disable(remove, ownerOnly('remove'));
@@ -2155,7 +2009,7 @@ async function adminDetail(opts) {
       popDetail();
     } catch (e) { hapticResult(false); alertMessage(e.message); }
   };
-  const zone = el('<div class="danger-zone"></div>');
+  const zone = el('<div class="card danger-zone"></div>');
   zone.appendChild(control(remove));
   wrap.appendChild(zone);
 
@@ -2299,6 +2153,7 @@ async function boot() {
     btn.onclick = () => { hapticSelect(); selectTab(btn.dataset.tab); };
   });
   $('#refresh').onclick = refreshAll;
+  $('#back').onclick = () => { haptic(); popDetail(); };
 
   // Shown before the first request rather than after it. Bootstrap over a truck-stop
   // connection is a second or two, and a blank white screen for that long is the part

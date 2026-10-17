@@ -123,7 +123,9 @@ def _int_param(request: web.Request, name: str) -> int | None:
 # answers to one question -- so the panel offers both windows explicitly and labels which
 # is which, instead of choosing silently.
 _ROLLING = {"today": (0, "Today"), "7d": (6, "Last 7 days"), "30d": (29, "Last 30 days")}
-PANEL_PERIODS = ("today", "7d", "30d", "last_week", "last_month")
+# "yesterday" is a calendar day, not a rolling one: the full day that just ended, which is
+# the window somebody opens the panel on a morning to ask about.
+PANEL_PERIODS = ("today", "yesterday", "7d", "30d", "last_week", "last_month")
 # What the scope control over the whole screen may say; the same three get_top_violators
 # has always taken.
 PANEL_SCOPES = ("", "speeding", "other")
@@ -134,10 +136,26 @@ def _period_range(period: str) -> tuple[datetime, datetime, str]:
     if period in ("last_week", "last_month"):
         since, until = period_range(period)
         return since, until, period_label(period)
-    days, label = _ROLLING.get(period, _ROLLING["today"])
     now = datetime.now(tz=ET)
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if period == "yesterday":
+        return midnight - timedelta(days=1), midnight, "Yesterday"
+    days, label = _ROLLING.get(period, _ROLLING["today"])
     return (midnight - timedelta(days=days) if days else midnight), now, label
+
+
+def _range_text(period: str, since: datetime, until: datetime) -> str:
+    """The dates a window covers, as a person would write them.
+
+    The calendar windows end at the midnight that *starts* the next one, so printing
+    `until` as-is says the week of Oct 5 ran to Oct 12. The last day shown is the last
+    day inside the window.
+    """
+    if period in ("yesterday", "last_week", "last_month"):
+        until = until - timedelta(seconds=1)
+        if until.date() == since.date():
+            return since.strftime("%b %d, %Y")
+    return date_range_label(since, until)
 
 
 def _chip_token(event_type: str) -> str:
@@ -264,7 +282,7 @@ async def stats(request: web.Request) -> web.Response:
 
     return _ok({
         "period": {"key": period, "label": label,
-                   "range": date_range_label(since, until),
+                   "range": _range_text(period, since, until),
                    "downloadable": period in PERIOD_LABELS},
         "type": scope,
         "scope_label": EVENT_SCOPES[scope],

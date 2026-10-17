@@ -12,6 +12,7 @@ import json
 import hashlib
 import hmac
 import time
+from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
 import pytest
@@ -193,12 +194,39 @@ async def test_the_calendar_periods_the_report_file_supports_are_marked(panel):
     panel.setattr(api, "get_top_violators", _top)
     panel.setattr(api, "get_groups_overview", _groups)
 
-    for period, downloadable in (("today", True), ("7d", False), ("30d", False),
-                                 ("last_week", True), ("last_month", True)):
+    for period, downloadable in (("today", True), ("yesterday", False), ("7d", False),
+                                 ("30d", False), ("last_week", True),
+                                 ("last_month", True)):
         data = _payload(await api.stats(_Request(query={"period": period})))
         assert data["period"]["key"] == period
         assert data["period"]["downloadable"] is downloadable, period
         assert data["period"]["range"]
+
+
+def test_yesterday_is_the_whole_of_the_day_that_just_ended():
+    """Midnight to midnight, not "the last 24 hours" -- the second is what a person
+    asking about yesterday morning means, and it is also what the date label says."""
+    since, until, label = api._period_range("yesterday")
+
+    assert label == "Yesterday"
+    assert (since.hour, since.minute, since.second) == (0, 0, 0)
+    assert (until.hour, until.minute, until.second) == (0, 0, 0)
+    assert until - since == timedelta(days=1)
+    assert until.date() == datetime.now(tz=api.ET).date()
+
+
+def test_a_calendar_window_names_the_last_day_inside_it_not_the_next_one():
+    """The windows end at the midnight that begins the next one, so printing that
+    midnight said the week of Oct 5 ran to Oct 12."""
+    since = datetime(2026, 10, 5, tzinfo=api.ET)
+    week = api._range_text("last_week", since, datetime(2026, 10, 12, tzinfo=api.ET))
+    day = api._range_text("yesterday", datetime(2026, 10, 16, tzinfo=api.ET),
+                          datetime(2026, 10, 17, tzinfo=api.ET))
+    rolling = api._range_text("7d", since, datetime(2026, 10, 11, 14, 30, tzinfo=api.ET))
+
+    assert week == "Oct 05 — Oct 11, 2026"
+    assert day == "Oct 16, 2026"
+    assert rolling == "Oct 05 — Oct 11, 2026"
 
 
 async def test_the_report_file_goes_to_the_caller_and_nobody_else(panel):
