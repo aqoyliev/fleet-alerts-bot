@@ -17,9 +17,9 @@ async def _edit_or_send(call: types.CallbackQuery, text: str, reply_markup, pars
 
 @dp.message_handler(text="⚙️ Settings")
 async def btn_settings(message: types.Message):
-    if not await is_admin(message.from_user.id):
-        return
-    await message.answer("⚙️ <b>Settings</b>", reply_markup=settings_menu_keyboard())
+    # The keyboard button is gone; this answers a stale copy of it. See tell_menu_moved.
+    from handlers.users.start import tell_menu_moved
+    await tell_menu_moved(message)
 
 
 @dp.callback_query_handler(lambda c: c.data == "settings_menu")

@@ -29,16 +29,64 @@ def test_the_reply_keyboard_carries_no_panel_button(monkeypatch):
     buttons = _buttons(main_menu_keyboard())
 
     assert not any("web_app" in b for b in buttons)
-    assert [b["text"] for b in buttons] == [
-        "📊 Violations Report", "⚙️ Settings", "✉️ Contact Support",
-    ]
+    assert [b["text"] for b in buttons] == ["✉️ Contact Support"]
 
 
 def test_the_keyboard_is_the_same_without_a_url(monkeypatch):
     monkeypatch.setattr(config, "WEBAPP_URL", "")
-    assert [b["text"] for b in _buttons(main_menu_keyboard())] == [
-        "📊 Violations Report", "⚙️ Settings", "✉️ Contact Support",
-    ]
+    assert [b["text"] for b in _buttons(main_menu_keyboard())] == ["✉️ Contact Support"]
+
+
+async def test_a_stale_report_or_settings_button_says_where_it_went(monkeypatch):
+    """Reply keyboards stay on screen until replaced. An admin who still has the old
+    buttons is told the panel has them now, and that answer carries the new keyboard."""
+    from handlers.users import settings, start
+
+    sent = []
+
+    class _Message:
+        class from_user:
+            id = 1
+
+        async def answer(self, text, parse_mode=None, reply_markup=None):
+            sent.append((text, reply_markup))
+
+    async def _yes(_telegram_id):
+        return True
+
+    monkeypatch.setattr(config, "WEBAPP_URL", "https://fleet.example")
+    monkeypatch.setattr(start, "is_admin", _yes)
+
+    for press in (start.btn_violations, settings.btn_settings):
+        sent.clear()
+        await press(_Message())
+
+        assert len(sent) == 2
+        assert "Admin Panel" in sent[0][0]
+        assert [b["text"] for b in _buttons(sent[0][1])] == ["✉️ Contact Support"]
+        assert sent[1][1].to_python()["inline_keyboard"][0][0]["web_app"]["url"] \
+            == "https://fleet.example/panel/"
+
+
+async def test_a_stale_button_from_a_non_admin_gets_nothing(monkeypatch):
+    from handlers.users import start
+
+    sent = []
+
+    class _Message:
+        class from_user:
+            id = 2
+
+        async def answer(self, *a, **k):
+            sent.append(a)
+
+    async def _no(_telegram_id):
+        return False
+
+    monkeypatch.setattr(start, "is_admin", _no)
+    await start.btn_violations(_Message())
+
+    assert sent == []
 
 
 # ── the inline button on /start ─────────────────────────────────────────────────

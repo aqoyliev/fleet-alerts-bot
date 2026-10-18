@@ -97,7 +97,7 @@ async def bot_start(message: types.Message):
     panel = _panel_button()
     if panel is not None:
         await message.answer(
-            "Fleet at a glance — groups, alerts and admins in one place.\n"
+            "Fleet at a glance — groups, reports and admins in one place.\n"
             "Also on the ☰ <b>Menu</b> button, any time.",
             parse_mode="HTML",
             reply_markup=panel,
@@ -105,11 +105,31 @@ async def bot_start(message: types.Message):
 
 
 
-@dp.message_handler(text="📊 Violations Report")
-async def btn_violations(message: types.Message):
+async def tell_menu_moved(message: types.Message) -> None:
+    """Answer a press of a keyboard button that no longer exists.
+
+    A reply keyboard stays on somebody's screen until the bot sends them a new one, so
+    admins who last pressed /start before the report and settings buttons were taken off it
+    still have both. Pressing one used to open the old chat menu; it now says where that
+    went, and the message that says so carries the current keyboard, which is what finally
+    removes the stale buttons.
+    """
     if not await is_admin(message.from_user.id):
         return
-    from handlers.users.violations import show_violations_menu
-    await show_violations_menu(message)
+    await message.answer(
+        "Reports and your notification switches moved into the Admin Panel — "
+        "the <b>Report</b> and <b>Settings</b> tabs.",
+        parse_mode="HTML",
+        reply_markup=main_menu_keyboard(),
+    )
+    panel = _panel_button()
+    if panel is not None:
+        await message.answer("Open it here, or from the ☰ <b>Menu</b> button.",
+                             parse_mode="HTML", reply_markup=panel)
+
+
+@dp.message_handler(text="📊 Violations Report")
+async def btn_violations(message: types.Message):
+    await tell_menu_moved(message)
 
 

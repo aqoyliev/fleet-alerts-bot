@@ -25,11 +25,10 @@ async def bot_help(message: types.Message):
         "/events — Choose which event types this group gets (admins)",
         "/disable · /enable — Mute or unmute this group's alerts (anyone in that group)",
         "/removegroup — Unregister this group (admins)\n",
-        "<b>Violations Report</b>",
-        "From the main menu, tap <b>Violations Report</b> to view top offending units.",
-        "• Choose <b>Speeding</b> or <b>Other Violations</b>",
-        "• Toggle between <b>Last Week</b> and <b>Last Month</b>",
-        "• Download a full detailed report as a text file\n",
+        "<b>Reports</b>",
+        "Open the <b>Admin Panel</b> (the ☰ Menu button) and go to the <b>Report</b> tab to see "
+        "top offending units for Today, Yesterday, Last week or Last month.",
+        "• Send the full detailed report to this chat as a text file\n",
         "<b>Speeding report note:</b> The download only lists days where a unit had <b>3 or more</b> speeding events.",
     ]
     if await is_super_admin(message.from_user.id):
