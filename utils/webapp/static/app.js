@@ -1896,15 +1896,6 @@ async function adminsScreen(opts) {
   } else {
     wrap.appendChild(el('<div class="note">Only a super admin can change this list.</div>'));
   }
-
-  wrap.appendChild(el(`<div class="card section-gap">
-      <div class="card-title">Roles</div>
-      <div class="role-line"><span class="pill pill-owner">OWNER</span>
-        <span>Named in the deployment's own config. Can't be removed here.</span></div>
-      <div class="role-line"><span class="pill pill-super">SUPER</span>
-        <span>Manages admins, groups and units.</span></div>
-      <div class="role-line"><span class="pill">ADMIN</span>
-        <span>Receives alerts and reads reports.</span></div></div>`));
   render(wrap, opts);
 }
 

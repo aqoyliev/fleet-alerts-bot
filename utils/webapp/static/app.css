@@ -1912,11 +1912,6 @@ div.bar-row { cursor: default; }
 .btn-add { margin-top: var(--s-12); min-height: 52px; font-size: 16px; font-weight: var(--fw-bold); border-radius: 14px; }
 .btn-add svg { width: 20px; height: 20px; display: block; }
 
-.role-line { display: flex; gap: var(--s-10); align-items: flex-start; }
-.role-line + .role-line { margin-top: var(--s-10); }
-.role-line .pill { flex: 0 0 52px; text-align: center; margin-top: var(--s-2); padding: 0; }
-.role-line span:last-child { font-size: var(--fs-small); line-height: var(--lh-small); color: var(--text-2); }
-
 .identity-card { display: flex; flex-direction: column; align-items: center; text-align: center; padding: var(--s-20) var(--s-16) 18px; }
 .identity-card .identity-name { margin-top: var(--s-12); font-size: 18px; line-height: 24px; }
 .identity-card .identity-handle { margin-top: var(--s-2); font-size: 14px; line-height: 20px; color: var(--text-2); }
