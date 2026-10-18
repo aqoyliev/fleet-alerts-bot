@@ -240,7 +240,7 @@ async def test_the_report_file_goes_to_the_caller_and_nobody_else(panel):
     assert len(sent) == 1
     chat_id, filename, _ = sent[0]
     assert chat_id == ADMIN
-    assert filename.endswith("_today_report.txt")
+    assert filename.endswith("_today_report.pdf")
 
 
 async def test_a_bad_period_is_refused_before_anything_is_built(panel):

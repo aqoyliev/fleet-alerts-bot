@@ -28,7 +28,7 @@ async def bot_help(message: types.Message):
         "<b>Reports</b>",
         "Open the <b>Admin Panel</b> (the ☰ Menu button) and go to the <b>Report</b> tab to see "
         "top offending units for Today, Yesterday, Last week or Last month.",
-        "• Send the full report to this chat as a text file — every violation, grouped by unit",
+        "• Send the report to this chat as a PDF — the ten units with the most alerts, every event listed",
     ]
     if await is_super_admin(message.from_user.id):
         text += [

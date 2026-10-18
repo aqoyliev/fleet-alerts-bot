@@ -10,3 +10,6 @@ aiohttp~=3.8.6
 # ZoneInfo has no tz database of its own on some slim images; every report and alert
 # timestamp goes through America/New_York, so this is not optional.
 tzdata
+# The violations report is a PDF drawn with the built-in fonts, so this is the only
+# thing it needs; pure Python, no system libraries on the image.
+reportlab>=4.2,<5

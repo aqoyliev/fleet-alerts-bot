@@ -868,7 +868,7 @@ async function reportScreen(opts) {
   if (!data.period.downloadable) {
     // Said by the server, not guessed here: only Today, Last week and Last month have a
     // file behind them, and which those are is the backend's to say.
-    disable(send, 'A file can be built for Today, Last week or Last month — pick '
+    disable(send, 'A PDF can be built for Today, Last week or Last month — pick '
                 + 'one of those periods.');
   } else if (!data.totals.total) {
     disable(send, 'There is nothing to put in a report for this period.');
@@ -892,9 +892,9 @@ async function reportScreen(opts) {
   wrap.appendChild(control(send));
 
   // The file is not on this screen on purpose, so say where it goes.
-  wrap.appendChild(el(`<div class="note">The full report lists every event under every
-    unit, so it arrives as a file in your chat with the bot rather than on this
-    screen.</div>`));
+  wrap.appendChild(el(`<div class="note">The report is a PDF of the ten units with the most
+    alerts, every event listed under each. It arrives in your chat with the bot rather than
+    on this screen.</div>`));
 
   render(wrap, opts);
 }
