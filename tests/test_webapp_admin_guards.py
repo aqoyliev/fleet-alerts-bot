@@ -104,6 +104,10 @@ def panel(monkeypatch):
     async def _ensure_user(*a, **k):
         return None
 
+    async def _everyone():
+        return list(ADMINS.values())
+
+    monkeypatch.setattr(api, "get_all_admins", _everyone)
     monkeypatch.setattr(api, "get_admin_by_id", _by_id)
     monkeypatch.setattr(api, "set_admin_active", _set_active)
     monkeypatch.setattr(api, "promote_to_super", _promote)
@@ -239,6 +243,33 @@ async def test_a_new_admin_is_added(panel):
     resp = await api.create_admin(_Request({"telegram_id": 555}))
     assert resp.status == 200
     assert panel["added"] == [555]
+
+
+async def test_adding_somebody_who_is_already_an_admin_says_so(panel):
+    """It used to answer "added" and change nothing, so adding the same id four times looked
+    like four successes and a list that never grew."""
+    resp = await api.create_admin(_Request({"telegram_id": 222}))
+
+    assert resp.status == 409
+    assert json.loads(resp.body)["error"] == "already_admin"
+    assert panel["added"] == []
+
+
+async def test_the_deployment_owner_adding_their_own_id_is_told_too(panel):
+    """The case that was reported: the owner's own id typed into the box. It is a row they
+    can see, so the honest answer costs nothing -- unlike a company admin typing it, who is
+    still told "added" (see the concealment test above)."""
+    resp = await api.create_admin(_Request({"telegram_id": MAINTAINER}, user_id=MAINTAINER))
+
+    assert resp.status == 409
+    assert panel["added"] == []
+
+
+async def test_adding_a_deactivated_admin_switches_them_back_on(panel):
+    resp = await api.create_admin(_Request({"telegram_id": 444}))
+
+    assert resp.status == 200
+    assert panel["added"] == [444]
 
 
 @pytest.mark.parametrize("value", ["", "abc", None])

@@ -680,6 +680,17 @@ async def create_admin(request: web.Request) -> web.Response:
     if is_maintainer(telegram_id) and not is_maintainer(request["telegram_id"]):
         return _ok({"ok": True})
 
+    # Somebody who already is an admin has nothing to be added to. Answering "added" anyway
+    # left the list unchanged and the person at the panel with no way to tell a failed add
+    # from a successful one -- four identical "Admin added" toasts and a list that never
+    # grew. An inactive row is different: adding them again switches them back on.
+    existing = next((a for a in await get_all_admins()
+                     if a["telegram_id"] == telegram_id), None)
+    if existing and existing["is_active"]:
+        return _fail("already_admin",
+                     "That person is already an admin, so there is nothing to add.",
+                     status=409)
+
     # admins.telegram_id is a foreign key into users, so the row has to exist first.
     await ensure_user(telegram_id)
     await add_admin(telegram_id, added_by=request["telegram_id"])
