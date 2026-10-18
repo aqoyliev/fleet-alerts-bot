@@ -139,20 +139,14 @@ async def test_an_unknown_event_type_is_refused(panel):
 
 async def test_an_unknown_period_falls_back_rather_than_failing(panel):
     """A read, from a query string, on the screen that is useless while it errors. The
-    periods and scopes are closed sets, so anything else is simply not one of them — and
-    the scope reaches a SQL fragment, so "not one of them" has to mean the empty one."""
-    scopes = []
-
-    async def _totals(since, until, scope=None):
-        scopes.append(scope)
+    periods are a closed set, so anything else is simply not one of them."""
+    async def _totals(since, until):
         return {"total": 0, "speeding": 0, "crashes": 0, "units": 0}
 
-    async def _rows(since, until, scope=None):
-        scopes.append(scope)
+    async def _rows(since, until):
         return []
 
-    async def _top(since=None, until=None, event_type=None, limit=10):
-        scopes.append(event_type)
+    async def _top(since=None, until=None, limit=10):
         return []
 
     async def _groups():
@@ -165,24 +159,22 @@ async def test_an_unknown_period_falls_back_rather_than_failing(panel):
     panel.setattr(api, "get_groups_overview", _groups)
 
     data = _payload(await api.stats(
-        _Request(query={"period": "../etc", "type": "' OR 1=1"})))
+        _Request(query={"period": "../etc"})))
 
     assert data["period"]["key"] == "today"
-    assert data["type"] == ""
-    assert set(scopes) <= {"", None}
 
 
 async def test_the_calendar_periods_the_report_file_supports_are_marked(panel):
     """The screen offers five windows and the downloadable file supports two of them.
     Which is which is the server's to say, not something the client should hard-code a
     second time."""
-    async def _totals(since, until, scope=None):
+    async def _totals(since, until):
         return {"total": 0, "speeding": 0, "crashes": 0, "units": 0}
 
-    async def _rows(since, until, scope=None):
+    async def _rows(since, until):
         return []
 
-    async def _top(since=None, until=None, event_type=None, limit=10):
+    async def _top(since=None, until=None, limit=10):
         return []
 
     async def _groups():
@@ -236,13 +228,13 @@ async def test_the_report_file_goes_to_the_caller_and_nobody_else(panel):
         async def send_document(self, chat_id, document, caption=None):
             sent.append((chat_id, document.filename, caption))
 
-    async def _build(period, scope, company, **kw):
+    async def _build(period, company, **kw):
         return b"report body"
 
     panel.setattr(api, "bot", _Bot())
     panel.setattr(api, "build_report_file", _build)
     resp = await api.send_report(
-        _Request({"period": "today", "type": "speeding", "telegram_id": 999}))
+        _Request({"period": "today", "telegram_id": 999}))
 
     assert resp.status == 200
     assert len(sent) == 1
@@ -259,8 +251,7 @@ async def test_a_bad_period_is_refused_before_anything_is_built(panel):
         return b""
 
     panel.setattr(api, "build_report_file", _build)
-    for body in ({"period": "forever"}, {"period": "today", "type": "everything"}):
-        assert (await api.send_report(_Request(body))).status == 400
+    assert (await api.send_report(_Request({"period": "forever"}))).status == 400
     assert built == []
 
 

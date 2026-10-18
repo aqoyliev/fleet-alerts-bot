@@ -2,8 +2,8 @@
 
 It used to live inside the DM callback handler, which meant the Mini App could only have
 had a second copy of it. These tests pin the parts that were easy to get subtly wrong in
-such a copy: which days a window covers, and the rule that a speeding report lists only
-the days a unit sped three or more times.
+such a copy: which days a window covers, and that one report holds every violation of every
+type, speeding included, rather than a separate file per kind.
 """
 
 from datetime import datetime, timedelta
@@ -22,10 +22,10 @@ def rows(monkeypatch):
     """One unit, whose events the test sets."""
     store = {"top": [], "events": []}
 
-    async def _top(since, until=None, event_type=None, limit=10):
+    async def _top(since, until=None, limit=10):
         return store["top"]
 
-    async def _events(vehicle_number, since, until=None, event_type=None):
+    async def _events(vehicle_number, since, until=None):
         return store["events"]
 
     monkeypatch.setattr(vr, "get_top_violators", _top)
@@ -66,64 +66,51 @@ def test_an_unknown_period_is_labelled_as_the_default():
 
 # ── the file ────────────────────────────────────────────────────────────────────
 
-async def test_a_speeding_report_lists_only_days_with_three_or_more(rows):
-    rows["top"] = [{"vehicle_number": "1269", "total": 4}]
+async def test_one_report_holds_every_type_of_violation_together(rows):
+    """Speeding used to be a file of its own, filtered to days with three or more, and the
+    rest another. A dispatcher asking for last week gets all of it in one."""
+    rows["top"] = [{"vehicle_number": "1269", "total": 3}]
     rows["events"] = [
         {"event_type": "speeding", "occurred_at": _at("2026-10-06", 8), "severity": None},
-        {"event_type": "speeding", "occurred_at": _at("2026-10-06", 9), "severity": None},
-        {"event_type": "speeding", "occurred_at": _at("2026-10-06", 10), "severity": None},
-        # A day on its own is not a pattern, and the report exists to show patterns.
-        {"event_type": "speeding", "occurred_at": _at("2026-10-07", 11), "severity": None},
+        {"event_type": "hard_brake", "occurred_at": _at("2026-10-06", 9), "severity": None},
+        {"event_type": "tailgating", "occurred_at": _at("2026-10-07", 9), "severity": None},
     ]
-    text = (await vr.build_report_file("last_week", "speeding", "Test Co")).decode()
+    text = (await vr.build_report_file("last_week", "Test Co")).decode()
 
-    assert "Oct 06" in text and "3 times" in text
-    assert "Oct 07" not in text
-    assert "Only days with 3+ speeding events per unit are listed." in text
+    assert "1. Unit 1269 — 3 events" in text
+    assert "SPEEDING" in text.upper() and "HARD BRAKE" in text and "TAILGATING" in text
 
 
-async def test_a_unit_with_no_qualifying_day_is_left_out_entirely(rows):
-    rows["top"] = [{"vehicle_number": "1269", "total": 2}]
+async def test_a_single_speeding_event_is_not_dropped(rows):
+    """The old speeding file listed only days a unit sped three or more times, so a lone
+    event vanished from the report even though the panel counted it."""
+    rows["top"] = [{"vehicle_number": "1269", "total": 1}]
     rows["events"] = [
         {"event_type": "speeding", "occurred_at": _at("2026-10-06", 8), "severity": None},
-        {"event_type": "speeding", "occurred_at": _at("2026-10-07", 9), "severity": None},
     ]
-    text = (await vr.build_report_file("last_week", "speeding", "Test Co")).decode()
+    text = (await vr.build_report_file("last_week", "Test Co")).decode()
 
-    assert "1269" not in text
+    assert "1. Unit 1269 — 1 event\n" in text
+    assert "Oct 06" in text
+    assert "3+" not in text
 
 
 async def test_severity_is_a_super_admin_detail(rows):
-    rows["top"] = [{"vehicle_number": "1269", "total": 3}]
+    rows["top"] = [{"vehicle_number": "1269", "total": 1}]
     rows["events"] = [
-        {"event_type": "speeding", "occurred_at": _at("2026-10-06", h), "severity": "high"}
-        for h in (8, 9, 10)
+        {"event_type": "speeding", "occurred_at": _at("2026-10-06", 8), "severity": "high"},
     ]
 
-    plain = (await vr.build_report_file("last_week", "speeding", "Test Co")).decode()
-    detailed = (await vr.build_report_file("last_week", "speeding", "Test Co",
+    plain = (await vr.build_report_file("last_week", "Test Co")).decode()
+    detailed = (await vr.build_report_file("last_week", "Test Co",
                                            show_severity=True)).decode()
     assert "High" not in plain
     assert "(High)" in detailed
 
 
-async def test_other_violations_name_the_event_on_every_line(rows):
-    """Without the type, "Other violations" is a list of timestamps that says nothing
-    about what happened at them."""
-    rows["top"] = [{"vehicle_number": "1269", "total": 2}]
-    rows["events"] = [
-        {"event_type": "hard_brake", "occurred_at": _at("2026-10-06", 8), "severity": None},
-        {"event_type": "tailgating", "occurred_at": _at("2026-10-06", 9), "severity": None},
-    ]
-    text = (await vr.build_report_file("last_week", "other", "Test Co")).decode()
-
-    assert "HARD BRAKE" in text and "TAILGATING" in text
-    assert "1. Unit 1269 — 2 events" in text
-
-
 async def test_the_header_carries_the_company_and_the_dates(rows):
     rows["top"] = []
-    text = (await vr.build_report_file("today", "", "NVS Logistics LLC")).decode()
+    text = (await vr.build_report_file("today", "NVS Logistics LLC")).decode()
 
     assert text.startswith("NVS Logistics LLC — Today (")
     assert "Generated:" in text

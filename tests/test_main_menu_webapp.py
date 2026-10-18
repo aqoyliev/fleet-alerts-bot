@@ -167,3 +167,19 @@ async def test_a_failed_menu_button_does_not_break_start(monkeypatch):
     monkeypatch.setattr(start.bot, "request", _boom)
 
     await start._set_menu_button(12345, to_panel=True)   # must not raise
+
+
+async def test_a_button_on_an_old_report_message_points_at_the_panel():
+    """The chat report flow is gone, but its messages are still scrolled up in admins'
+    chats. Tapping one of their buttons gets an answer rather than a spinner."""
+    from handlers.users import start
+
+    answered = []
+
+    class _Call:
+        async def answer(self, text=None, show_alert=False):
+            answered.append((text, show_alert))
+
+    await start.cb_violations_moved(_Call())
+
+    assert answered and "Admin Panel" in answered[0][0] and answered[0][1] is True

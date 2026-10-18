@@ -1,9 +1,8 @@
 """The violations report, independent of which surface asked for it.
 
-Two places ask for the same numbers now: the DM flow (handlers/users/violations.py) and
-the Mini App's Report screen. The period windows, the ranking and the downloadable text
-file live here so those two cannot drift apart — a report that says something different
-depending on which button produced it is worse than having only one button.
+The Mini App's Report screen asks for these numbers; the period windows, the ranking and
+the downloadable text file live here, away from the HTTP handlers, so the formatting can
+be tested on its own.
 
 Free of aiogram, so the formatting can be tested without a bot token, the same reason
 utils/group_texts.py is its own module.
@@ -17,20 +16,13 @@ from utils.db_api.violations import get_top_violators, get_vehicle_events
 # Eastern, like every other timestamp this bot prints. See utils/webapp/api.py.
 ET = ZoneInfo("America/New_York")
 
-# The DM keyboard offers two of these (keyboards/inline/violations.py owns that choice);
-# the panel offers all three. Both read their labels from here.
+# The windows a report can be built for. Every report covers every event type: there used
+# to be a speeding-only and an other-only variant, and a dispatcher asking for last week's
+# violations got to choose which half of them to see.
 PERIOD_LABELS = {
     "today": "Today",
     "last_week": "Last Week",
     "last_month": "Last Month",
-}
-
-# None is the third option — "every type" — and is spelled as the empty string wherever a
-# value has to survive a query string or a callback payload.
-EVENT_SCOPES = {
-    "": "All violations",
-    "speeding": "Speeding only",
-    "other": "Other violations (excl. speeding)",
 }
 
 
@@ -60,24 +52,17 @@ def date_range_label(since: datetime, until: datetime) -> str:
     return f"{since.strftime('%b %d')} — {until.strftime('%b %d, %Y')}"
 
 
-async def top_units(period: str, event_type: str | None, limit: int = 10) -> list[dict]:
-    """The ranked list both surfaces show. `event_type` is '', 'speeding' or 'other'."""
-    since, until = period_range(period)
-    return await get_top_violators(since, until=until, event_type=event_type or None,
-                                   limit=limit)
+async def build_report_file(period: str, company_name: str, *,
+                            show_severity: bool = False) -> bytes:
+    """The full .txt report: every unit that had a violation in the window, ranked, with
+    every event under it and what each one was.
 
-
-async def build_report_file(period: str, event_type: str | None, company_name: str,
-                            *, show_severity: bool = False) -> bytes:
-    """The full .txt report, one unit per rank with every event under it.
-
-    `show_severity` is the super-admin extra the DM flow has always applied: a speeding
-    event's severity is only annotated for them. Passed in rather than looked up here so
-    this module stays free of the admin tables.
+    `show_severity` is the super-admin extra: a speeding event's severity is only
+    annotated for them. Passed in rather than looked up here so this module stays free of
+    the admin tables.
     """
     since, until = period_range(period)
-    rows = await get_top_violators(since, until=until, event_type=event_type or None,
-                                   limit=50)
+    rows = await get_top_violators(since, until=until, limit=50)
 
     now = datetime.now(tz=ET)
     lines = [
@@ -85,55 +70,23 @@ async def build_report_file(period: str, event_type: str | None, company_name: s
         f"Generated: {now.strftime('%b %d, %Y %I:%M %p ET')}",
         "",
     ]
-    if event_type == "speeding":
-        lines.append("Filter: Speeding only")
-        lines.append("Note: Only days with 3+ speeding events per unit are listed.")
-        lines.append("")
-    elif event_type == "other":
-        lines.append("Filter: Other violations (excl. speeding)")
-        lines.append("")
 
     from utils.webhook_handler import EVENT_TYPE_MAP
 
-    rank = 1
-    for row in rows:
+    for rank, row in enumerate(rows, 1):
         unit = row["vehicle_number"]
-        events = await get_vehicle_events(unit, since, until=until,
-                                          event_type=event_type or None)
+        events = await get_vehicle_events(unit, since, until=until)
 
-        if event_type == "speeding":
-            by_date: dict[str, list[str]] = {}
-            for e in events:
-                local = e["occurred_at"].astimezone(ET)
-                day = local.strftime("%b %d")
-                time_str = local.strftime("%I:%M %p").lstrip("0")
-                if show_severity and e.get("severity"):
-                    time_str += f" ({e['severity'].title()})"
-                by_date.setdefault(day, []).append(time_str)
-            day_lines = []
-            for day, times in by_date.items():
-                if len(times) >= 3:
-                    day_lines.append(f"     • {day}, {', '.join(times)} — {len(times)} times")
-            if not day_lines:
-                continue
-            total_shown = sum(len(by_date[d]) for d in by_date if len(by_date[d]) >= 3)
-            lines.append(f"{rank}. Unit {unit} — {total_shown} speeding events")
-            lines.extend(day_lines)
-        else:
-            total = row["total"]
-            lines.append(f"{rank}. Unit {unit} — {total} event{'s' if total != 1 else ''}")
-            for e in events:
-                local = e["occurred_at"].astimezone(ET)
-                ts = local.strftime("%b %d, %I:%M %p ET")
-                if not event_type or event_type == "other":
-                    _, title = EVENT_TYPE_MAP.get(
-                        e["event_type"], ("🚨", e["event_type"].upper()))
-                    lines.append(f"     • {ts} — {title}")
-                else:
-                    lines.append(f"     • {ts}")
-
+        total = row["total"]
+        lines.append(f"{rank}. Unit {unit} — {total} event{'s' if total != 1 else ''}")
+        for e in events:
+            local = e["occurred_at"].astimezone(ET)
+            ts = local.strftime("%b %d, %I:%M %p ET")
+            _, title = EVENT_TYPE_MAP.get(e["event_type"], ("🚨", e["event_type"].upper()))
+            if show_severity and e["event_type"] == "speeding" and e.get("severity"):
+                title += f" ({e['severity'].title()})"
+            lines.append(f"     • {ts} — {title}")
         lines.append("")
-        rank += 1
 
     return "\n".join(lines).encode("utf-8")
 

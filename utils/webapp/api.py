@@ -48,7 +48,7 @@ from utils.units import (
     clean_unit, list_units_any, resolve_unit, roster_names, suggest_units_any,
 )
 from utils.violation_report import (
-    EVENT_SCOPES, PERIOD_LABELS, build_report_file, date_range_label, period_label,
+    PERIOD_LABELS, build_report_file, date_range_label, period_label,
     period_range, report_filename,
 )
 from utils.webapp.auth import require_admin, require_super
@@ -126,9 +126,6 @@ _ROLLING = {"today": (0, "Today"), "7d": (6, "Last 7 days"), "30d": (29, "Last 3
 # "yesterday" is a calendar day, not a rolling one: the full day that just ended, which is
 # the window somebody opens the panel on a morning to ask about.
 PANEL_PERIODS = ("today", "yesterday", "7d", "30d", "last_week", "last_month")
-# What the scope control over the whole screen may say; the same three get_top_violators
-# has always taken.
-PANEL_SCOPES = ("", "speeding", "other")
 
 
 def _period_range(period: str) -> tuple[datetime, datetime, str]:
@@ -252,7 +249,7 @@ async def bootstrap(request: web.Request) -> web.Response:
 
 @require_admin
 async def stats(request: web.Request) -> web.Response:
-    """Everything the numbers screen shows, for one window and one scope.
+    """Everything the numbers screen shows, for one window.
 
     One endpoint rather than two. The panel used to read this for its dashboard and a
     second endpoint for its report, which is how it ended up showing two rankings of the
@@ -261,16 +258,12 @@ async def stats(request: web.Request) -> web.Response:
     period = request.query.get("period", "today")
     if period not in PANEL_PERIODS:
         period = "today"
-    scope = request.query.get("type", "")
-    if scope not in PANEL_SCOPES:
-        scope = ""
 
     since, until, label = _period_range(period)
-    totals = await get_totals(since, until, scope)
-    by_type = await get_type_counts(since, until, scope)
-    top_units = await get_top_violators(since=since, until=until,
-                                        event_type=scope or None, limit=10)
-    by_day = (await get_daily_counts(since, until, scope)
+    totals = await get_totals(since, until)
+    by_type = await get_type_counts(since, until)
+    top_units = await get_top_violators(since=since, until=until, limit=10)
+    by_day = (await get_daily_counts(since, until)
               if since.date() != until.date() else [])
 
     groups = await get_groups_overview()
@@ -284,8 +277,6 @@ async def stats(request: web.Request) -> web.Response:
         "period": {"key": period, "label": label,
                    "range": _range_text(period, since, until),
                    "downloadable": period in PERIOD_LABELS},
-        "type": scope,
-        "scope_label": EVENT_SCOPES[scope],
         "totals": dict(totals),
         "by_type": [
             {**row, "emoji": _event_label(row["event_type"])[0],
@@ -788,13 +779,10 @@ async def send_report(request: web.Request) -> web.Response:
     period = body.get("period", "last_week")
     if period not in PERIOD_LABELS:
         return _fail("bad_period", "That isn't a report period.")
-    scope = body.get("type", "") or ""
-    if scope not in EVENT_SCOPES:
-        return _fail("bad_type", "That isn't a report filter.")
 
     telegram_id = request["telegram_id"]
     content = await build_report_file(
-        period, scope, config.COMPANY_NAME,
+        period, config.COMPANY_NAME,
         show_severity=await is_super_admin(telegram_id),
     )
 
@@ -813,7 +801,7 @@ async def send_report(request: web.Request) -> web.Response:
         return _fail("send_failed",
                      "Couldn't send the file to your chat. Open the bot and press "
                      "/start, then try again.", status=502)
-    logger.info(f"[webapp] sent {period}/{scope or 'all'} report to {telegram_id}")
+    logger.info(f"[webapp] sent {period} report to {telegram_id}")
     return _ok({"ok": True})
 
 

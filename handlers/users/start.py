@@ -133,3 +133,9 @@ async def btn_violations(message: types.Message):
     await tell_menu_moved(message)
 
 
+@dp.callback_query_handler(lambda c: c.data.startswith("viol_"))
+async def cb_violations_moved(call: types.CallbackQuery):
+    """A button on an old report message. The chat flow it belonged to is gone; the Report
+    tab of the Admin Panel has the same numbers, for every event type together."""
+    await call.answer("Reports moved into the Admin Panel — open its Report tab.",
+                      show_alert=True)

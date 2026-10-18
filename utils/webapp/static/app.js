@@ -877,7 +877,7 @@ async function reportScreen(opts) {
       busy(true);
       send.textContent = 'Sending…';
       try {
-        await post('/report/send', { period: state.period, type: '' });
+        await post('/report/send', { period: state.period });
         hapticResult(true);
         toast('Report sent to your chat');
       } catch (e) {
