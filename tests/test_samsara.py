@@ -288,9 +288,9 @@ async def test_download_media_downloads_each_url_once(monkeypatch):
     assert is_video is False                     # images, not video
 
 
-async def test_handle_event_downloads_media_once_for_all_recipients(monkeypatch):
-    """The expensive provider download happens a single time and the bytes are reused
-    for every recipient — not re-downloaded per chat."""
+async def test_handle_event_sends_media_by_url_without_downloading(monkeypatch):
+    """Telegram fetches the clip itself, so the bot holds no video bytes: nothing is
+    downloaded here, and every recipient gets the clip."""
     downloads = []
 
     async def _fake_download(url):
@@ -316,5 +316,5 @@ async def test_handle_event_downloads_media_once_for_all_recipients(monkeypatch)
     }
     await wh._handle_event(bot, event)
 
-    assert len(downloads) == 1                   # ONE download for the single clip...
-    assert bot.video_calls == [1, 2, 3]          # ...delivered to all three recipients
+    assert downloads == []                       # no download on this process...
+    assert bot.video_calls == [1, 2, 3]          # ...and all three recipients get the clip

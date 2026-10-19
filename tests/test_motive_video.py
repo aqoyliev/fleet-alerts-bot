@@ -243,15 +243,11 @@ def alerted(monkeypatch, api_key):
         state["waited"] += 1
         return state.get("urls", (["https://x/f.mp4"], []))
 
-    async def _download(video_urls, image_urls):
-        return ([b"clip"] if video_urls or image_urls else []), bool(video_urls)
-
     monkeypatch.setattr(wh, "save_violation", _save_violation)
     monkeypatch.setattr(wh, "get_groups_for_event", _groups)
     monkeypatch.setattr(wh, "get_subscribed_admins", _admins)
     monkeypatch.setattr(wh, "_send_all", _send_all)
     monkeypatch.setattr(wh, "_wait_for_motive_clip", _wait)
-    monkeypatch.setattr(wh, "_download_media", _download)
     return state
 
 
@@ -262,7 +258,7 @@ async def test_the_card_and_the_clip_arrive_as_one_message(alerted):
     assert len(alerted["sent"]) == 1
     sent = alerted["sent"][0]
     assert sent["is_video"] is True
-    assert sent["media"] == [b"clip"]
+    assert sent["media"] == ["https://x/f.mp4"]
     # The whole card, not a bare caption: there is no earlier message to refer back to.
     assert "HARD BRAKE" in sent["text"]
     assert "1269" in sent["text"]
@@ -343,7 +339,7 @@ async def test_the_crash_clip_follows_under_a_short_caption(crash):
 
     clip = crash["sent"][1]
     assert clip["is_video"] is True
-    assert clip["media"] == [b"clip"]
+    assert clip["media"] == ["https://x/f.mp4"]
     # Not the card a second time: everything on it was in the first message.
     assert clip["text"] == "💥 <b>CRASH</b> · <code>1269</code>"
 
@@ -409,7 +405,7 @@ async def test_a_critical_hard_brake_that_was_no_crash_waits_for_its_clip(crash)
     sent = crash["sent"][0]
     assert "HARD BRAKE" in sent["text"]
     assert "CRASH" not in sent["text"]
-    assert sent["media"] == [b"clip"]
+    assert sent["media"] == ["https://x/f.mp4"]
     assert sent["to"] == [-100111, 777]
 
 
@@ -422,7 +418,7 @@ async def test_a_crash_that_arrived_with_its_clip_is_one_message(crash):
     assert crash["waited"] == 0
     assert len(crash["sent"]) == 1
     assert "CRASH DETECTED" in crash["sent"][0]["text"]
-    assert crash["sent"][0]["media"] == [b"clip"]
+    assert crash["sent"][0]["media"] == ["https://x/f.mp4"]
 
 
 async def test_a_hard_brake_still_waits_and_arrives_as_one_message(crash):

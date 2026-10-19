@@ -864,7 +864,8 @@ async def _note_crash(coro, event_id) -> None:
 
 async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = None,
                         crash_resume_elapsed: float | None = None):
-    """Filter → format → send to Telegram (URLs sent directly, no download).
+    """Filter → format → send to Telegram (media by URL, downloaded only if Telegram
+    cannot fetch it).
 
     For Samsara harsh events (those carrying `_samsara_vehicle_id`), first poll the
     harsh-event API to resolve the real type, location and video before continuing.
@@ -1084,9 +1085,10 @@ async def _handle_event(bot: Bot, event: dict, samsara_api_key: str | None = Non
                     and event_type != "speeding"):
                 text += "\n\n📷 <i>No camera media available</i>"
 
-        # Download the media ONCE up front and reuse the bytes for every recipient,
-        # rather than re-downloading (potentially large crash clips) per chat.
-        media, is_video = await _download_media(video_urls, image_urls)
+        # Hand Telegram the URLs and let it fetch the clip itself: nothing is held in
+        # this process. A URL it cannot fetch makes _send_with_retry download the clip
+        # once (shared by the remaining chats) and upload the bytes instead.
+        media, is_video = _media_urls(video_urls, image_urls)
         await _send_all(bot, [*group_ids, *dm_ids], text, media, is_video)
 
     except Exception as e:
@@ -1200,6 +1202,15 @@ async def _send_all(bot: Bot, chat_ids: list[int], text: str,
             logger.error(f"Send to {chat_id} failed, continuing with the rest: {e}", exc_info=True)
 
 
+def _media_urls(video_urls: list[str], image_urls: list[str]) -> tuple[list[str], bool]:
+    """The URLs an alert's media is sent by, and whether they are videos."""
+    return list(video_urls or image_urls or []), bool(video_urls)
+
+
+def _is_url(src) -> bool:
+    return isinstance(src, str) and src.startswith(("http://", "https://"))
+
+
 async def _download_media(video_urls: list[str], image_urls: list[str]) -> tuple[list[bytes], bool]:
     """Download each media URL exactly once so the bytes can be reused for every
     recipient, instead of re-downloading (potentially large) clips per chat.
@@ -1220,8 +1231,9 @@ async def _download_media(video_urls: list[str], image_urls: list[str]) -> tuple
 async def _send_with_retry(bot: Bot, chat_id: int, text: str,
                            media: list[bytes | str] = None,
                            is_video: bool = False, retries: int = 3, delay: float = 5.0):
-    """Send one alert to one chat. `media` is bytes already downloaded once for all
-    recipients (see _download_media); falls back to text only if the media send fails.
+    """Send one alert to one chat. `media` is URLs Telegram fetches itself, or bytes
+    already downloaded for all recipients. A URL Telegram cannot fetch is downloaded and
+    sent as bytes; text only if the media send fails altogether.
 
     An item may also be a Telegram file_id string, which uploads nothing: Telegram already
     holds that file and re-sends it from its own storage. Alert clips are each seen once,
@@ -1269,6 +1281,16 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str,
                 return
             except (TimeoutError, NetworkError, TelegramAPIError) as e:
                 logger.warning(f"Media send failed for {chat_id} (attempt {attempt+1}/3): {e} — retrying")
+                if isinstance(media, list) and any(_is_url(s) for s in media):
+                    # Telegram could not take the clip by URL (over its 20 MB limit for
+                    # URLs, an expired link, a host that refuses it). Download it here,
+                    # once: the list is the caller's, so the chats after this one reuse
+                    # the bytes instead of failing the same way.
+                    fetched = [await _download(s) if _is_url(s) else s for s in media]
+                    fetched = [s for s in fetched if s]
+                    if fetched:
+                        media[:] = fetched
+                        continue
                 await asyncio.sleep(5)
 
         # Last resort: text only so the alert is never lost

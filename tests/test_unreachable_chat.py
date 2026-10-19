@@ -122,3 +122,60 @@ async def test_register_group_clears_the_mute_and_the_departure(monkeypatch):
     assert "ON CONFLICT (telegram_group_id) DO UPDATE" in q
     assert "enabled = TRUE" in q
     assert "left_at = NULL" in q
+
+
+# ── media goes by URL, and is downloaded only when Telegram cannot take it ─────
+
+class _UrlBot:
+    """Refuses URL sources the way Telegram does for a clip it cannot fetch."""
+
+    def __init__(self, refuse_urls=True):
+        self.refuse_urls = refuse_urls
+        self.sent: list = []
+
+    async def send_video(self, chat_id, media, caption=None, parse_mode=None):
+        if isinstance(media, str) and self.refuse_urls:
+            from aiogram.utils.exceptions import BadRequest
+            raise BadRequest("wrong file identifier/HTTP URL specified")
+        self.sent.append((chat_id, media))
+
+    async def send_message(self, chat_id, text, parse_mode=None, disable_web_page_preview=None):
+        self.sent.append((chat_id, "TEXT"))
+
+
+async def test_a_clip_telegram_can_fetch_is_never_downloaded(retired, monkeypatch):
+    async def _boom(url):
+        raise AssertionError("downloaded a clip Telegram could fetch itself")
+
+    monkeypatch.setattr(wh, "_download", _boom)
+    bot = _UrlBot(refuse_urls=False)
+    await wh._send_all(bot, [1, 2], "alert", ["https://x/c.mp4"], True)
+
+    assert bot.sent == [(1, "https://x/c.mp4"), (2, "https://x/c.mp4")]
+
+
+async def test_a_clip_telegram_refuses_is_downloaded_once_for_every_chat(retired, monkeypatch):
+    downloads = []
+
+    async def _download(url):
+        downloads.append(url)
+        return b"clip"
+
+    monkeypatch.setattr(wh, "_download", _download)
+    bot = _UrlBot()
+    await wh._send_all(bot, [1, 2, 3], "alert", ["https://x/c.mp4"], True)
+
+    assert downloads == ["https://x/c.mp4"]
+    assert [chat for chat, _ in bot.sent] == [1, 2, 3]
+    assert all(src != "TEXT" and not isinstance(src, str) for _, src in bot.sent)
+
+
+async def test_a_clip_that_cannot_be_fetched_or_downloaded_still_sends_the_text(retired, monkeypatch):
+    async def _download(url):
+        return None
+
+    monkeypatch.setattr(wh, "_download", _download)
+    bot = _UrlBot()
+    await wh._send_with_retry(bot, 1, "alert", media=["https://x/c.mp4"], is_video=True)
+
+    assert bot.sent == [(1, "TEXT")]
