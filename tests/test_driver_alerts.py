@@ -21,10 +21,22 @@ from utils.samsara import safety
 ET = ZoneInfo("America/New_York")
 
 
+_GROUP_TITLE = "T-120 SMITH, JOHN / LEE, ANN"
+
+
 class _FakeDriverBot:
     def __init__(self, fail_with=None):
         self.calls = []          # (kind, chat_id, caption_or_text)
         self.fail_with = list(fail_with or [])
+        self.titles = {}         # chat_id -> title; others get _GROUP_TITLE
+        self.chat_error = None   # raised by get_chat when set
+        self.get_chat_calls = []
+
+    async def get_chat(self, chat_id):
+        self.get_chat_calls.append(chat_id)
+        if self.chat_error is not None:
+            raise self.chat_error
+        return types.SimpleNamespace(title=self.titles.get(chat_id, _GROUP_TITLE))
 
     def _maybe_fail(self):
         if self.fail_with:
@@ -78,8 +90,9 @@ class _FakeStore:
         async def record_driver(event_id, driver_ref, ordinal):
             self.notifications[event_id].update(driver_ref=driver_ref, ordinal=ordinal)
 
-        async def record_sent(event_id, sent_group, sent_email):
-            self.notifications[event_id].update(sent_group=sent_group, sent_email=sent_email)
+        async def record_sent(event_id, sent_group, sent_email, name_match=None):
+            self.notifications[event_id].update(sent_group=sent_group, sent_email=sent_email,
+                                                name_match=name_match)
 
         async def update_driver(event_id, driver_ref, driver_name, driver_source, on_duty):
             for v in self.violations:
@@ -171,9 +184,9 @@ def _fake_email_module(monkeypatch, configured=True, fail=False):
     return mod
 
 
-def _with_driver(monkeypatch, email=None, name="John Smith", ref=None):
+def _with_driver(monkeypatch, email=None, name="John Smith", ref=None, source="vitality"):
     async def resolve(company_slug, event, vehicle, occurred_at):
-        return dl.DriverInfo(name=name, ref=ref, email=email, source="event")
+        return dl.DriverInfo(name=name, ref=ref, email=email, source=source)
     monkeypatch.setattr(dl, "resolve_driver", resolve)
 
 
@@ -184,6 +197,7 @@ def env(monkeypatch):
     bot = _FakeDriverBot()
     monkeypatch.setattr(da, "_get_driver_bot", lambda: bot)
     monkeypatch.setattr(da.config, "DRIVER_ALERTS_DRY_RUN", False, raising=False)
+    monkeypatch.setattr(da, "_title_cache", {})
     email = _fake_email_module(monkeypatch)
     _with_driver(monkeypatch, email="driver@example.com")
     return types.SimpleNamespace(store=store, bot=bot, email=email)
@@ -294,7 +308,7 @@ async def test_same_name_from_different_sources_counts_as_the_same_driver(env, m
     _drivers_in_turn(
         monkeypatch,
         dl.DriverInfo(name="John Smith", ref="vitality:abc", source="vitality"),
-        dl.DriverInfo(name="  john   SMITH ", ref="motive:77", source="motive"),
+        dl.DriverInfo(name="  john   SMITH ", ref="vitality:def", source="vitality"),
     )
     await _notify(env.store, 70, datetime(2026, 10, 5, 14, tzinfo=timezone.utc))
     await _notify(env.store, 71, datetime(2026, 10, 5, 15, tzinfo=timezone.utc))
@@ -308,42 +322,20 @@ async def test_same_name_when_a_source_gives_no_ref_still_matches(env, monkeypat
     _drivers_in_turn(
         monkeypatch,
         dl.DriverInfo(name="Ann Lee", ref="vitality:abc", source="vitality"),
-        dl.DriverInfo(name="Ann Lee", source="event"),
+        dl.DriverInfo(name="Ann Lee", source="vitality"),
     )
     await _notify(env.store, 72, datetime(2026, 10, 5, 14, tzinfo=timezone.utc))
     await _notify(env.store, 73, datetime(2026, 10, 5, 15, tzinfo=timezone.utc))
     assert env.store.notifications[73]["ordinal"] == 2
 
 
-async def test_without_a_name_the_ref_is_the_key(env, monkeypatch):
-    env.store.groups["T-120"] = -100
-    _drivers_in_turn(
-        monkeypatch,
-        dl.DriverInfo(ref="motive:77", source="motive"),
-        dl.DriverInfo(ref="motive:99", source="motive"),
-        dl.DriverInfo(ref="motive:77", source="motive"),
-    )
-    await _notify(env.store, 74, datetime(2026, 10, 5, 13, tzinfo=timezone.utc))
-    await _notify(env.store, 75, datetime(2026, 10, 5, 14, tzinfo=timezone.utc))
-    await _notify(env.store, 76, datetime(2026, 10, 5, 15, tzinfo=timezone.utc))
-    assert [env.store.notifications[i]["ordinal"] for i in (74, 75, 76)] == [1, 1, 2]
-
-
-async def test_with_nothing_known_the_truck_is_the_key(env, monkeypatch):
-    env.store.groups["T-120"] = -100
-    _drivers_in_turn(monkeypatch, dl.DriverInfo(), dl.DriverInfo())
-    await _notify(env.store, 77, datetime(2026, 10, 5, 14, tzinfo=timezone.utc))
-    await _notify(env.store, 78, datetime(2026, 10, 5, 15, tzinfo=timezone.utc))
-    assert env.store.notifications[78]["ordinal"] == 2
-
-
 async def test_different_names_on_the_same_truck_are_counted_separately(env, monkeypatch):
     env.store.groups["T-120"] = -100
     _drivers_in_turn(
         monkeypatch,
-        dl.DriverInfo(name="John Smith", source="event"),
-        dl.DriverInfo(name="Ann Lee", source="event"),
-        dl.DriverInfo(name="john smith", source="event"),
+        dl.DriverInfo(name="John Smith", source="vitality"),
+        dl.DriverInfo(name="Ann Lee", source="vitality"),
+        dl.DriverInfo(name="john smith", source="vitality"),
     )
     await _notify(env.store, 79, datetime(2026, 10, 5, 13, tzinfo=timezone.utc))
     await _notify(env.store, 80, datetime(2026, 10, 5, 14, tzinfo=timezone.utc))
@@ -497,6 +489,178 @@ async def test_long_text_goes_after_the_clip(env):
                            video_urls=["u"], image_urls=[])
     assert [c[0] for c in env.bot.calls] == ["video", "message"]
     assert env.bot.calls[0][2] is None
+
+
+# ── driver-name verification ─────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("name,title", [
+    ("John Smith", "T-120 SMITH, JOHN / LEE, ANN"),
+    ("John A Smith", "4063 Smith, John"),                       # middle initial dropped
+    ("John Allen Smith", "4063 SMITH, JOHN ALLEN"),
+    ("Ann Lee", "T-120 SMITH, JOHN / LEE, ANN"),                # second of a team
+    ("SMITH, JOHN", "120 john smith."),                         # any order, case, trailing dot
+    ("John Smith", "T-120 SMITH, JOHN (Owner Operator)"),       # "(...)" suffix
+    ("José Núñez", "77 NÚÑEZ, JOSÉ"),
+    ("Madonna", "12 MADONNA, LOUISE"),                          # one-token name needs one hit
+])
+def test_driver_name_in_title_matches(name, title):
+    assert da.driver_name_in_title(name, title) is True
+
+
+@pytest.mark.parametrize("name,title", [
+    ("John Smith", "T-120 JONES, MARK / LEE, ANN"),
+    ("John Smith", "T-120 SMITH, ROBERT"),                      # only the surname: 1 of 2
+    ("John Smith", "T-120 JOHN DEERE"),                         # only the first name
+    ("John Smith", ""),
+    ("John Smith", None),
+    ("", "T-120 SMITH, JOHN"),
+    (None, "T-120 SMITH, JOHN"),
+    ("J S", "T-120 SMITH, JOHN"),                               # no token of 2+ letters
+    ("Madonna", "12 SMITH, JOHN"),
+])
+def test_driver_name_in_title_mismatches(name, title):
+    assert da.driver_name_in_title(name, title) is False
+
+
+async def test_unidentified_driver_is_not_notified(env, monkeypatch):
+    env.store.groups["T-120"] = -100
+    _drivers_in_turn(monkeypatch, dl.DriverInfo(), dl.DriverInfo(name="Ann Lee", source="vitality"))
+    await _notify(env.store, 200, _TS)
+    n = env.store.notifications[200]
+    assert env.bot.calls == [] and env.email.sent == [] and env.bot.get_chat_calls == []
+    assert n["skip_reason"] == da.SKIP_DRIVER_UNKNOWN == "driver_unknown"
+    assert "ordinal" not in n and "sent_group" not in n
+    # A Vitality driver with a blank name is as good as unknown.
+    _drivers_in_turn(monkeypatch, dl.DriverInfo(name="  ", ref="vitality:1", source="vitality"))
+    await _notify(env.store, 201, _TS)
+    assert env.store.notifications[201]["skip_reason"] == "driver_unknown"
+    assert env.bot.calls == [] and env.email.sent == []
+
+
+async def test_event_sourced_driver_is_not_notified_but_is_kept_on_the_violation(env, monkeypatch):
+    env.store.groups["T-120"] = -100
+    _with_driver(monkeypatch, email="driver@example.com", name="John Smith", source="event")
+    await _notify(env.store, 202, _TS)
+    assert env.bot.calls == [] and env.email.sent == []
+    assert env.store.notifications[202]["skip_reason"] == da.SKIP_DRIVER_UNKNOWN
+    assert env.store.violation(202)["driver_name"] == "John Smith"
+
+
+async def test_vitality_match_sends_and_records_name_match_true(env):
+    env.store.groups["T-120"] = -100
+    await _notify(env.store, 203, _TS)
+    assert len(env.bot.calls) == 1 and env.bot.get_chat_calls == [-100]
+    n = env.store.notifications[203]
+    assert n["name_match"] is True and n["sent_group"] is True
+    assert n.get("skip_reason") is None
+
+
+async def test_name_mismatch_still_sends_and_records_name_match_false(env, caplog):
+    env.store.groups["T-120"] = -100
+    env.bot.titles[-100] = "T-120 JONES, MARK"
+    with caplog.at_level("INFO", logger=da.logger.name):
+        await _notify(env.store, 204, _TS)
+    assert len(env.bot.calls) == 1 and env.bot.calls[0][1] == -100
+    n = env.store.notifications[204]
+    assert n["name_match"] is False and n["sent_group"] is True
+    info = [r.getMessage() for r in caplog.records
+            if r.levelname == "INFO" and "-100" in r.getMessage() and "T-120" in r.getMessage()
+            and "not in the title" in r.getMessage()]
+    assert len(info) == 1 and "Smith" not in info[0] and "JONES" not in info[0]
+
+
+async def test_unreadable_title_sends_and_records_name_match_none(env, caplog):
+    env.store.groups["T-120"] = -100
+    env.bot.chat_error = RuntimeError("Bad Request: chat not found")
+    with caplog.at_level("WARNING", logger=da.logger.name):
+        await _notify(env.store, 205, _TS)
+    assert len(env.bot.calls) == 1
+    n = env.store.notifications[205]
+    assert n["name_match"] is None and n["sent_group"] is True
+    assert any(r.levelname == "WARNING" and "-100" in r.getMessage() for r in caplog.records)
+
+    env.bot.chat_error = None
+    env.bot.titles[-100] = ""        # a chat without a title
+    await _notify(env.store, 206, _TS)
+    assert env.store.notifications[206]["name_match"] is None and len(env.bot.calls) == 2
+
+
+async def test_no_group_means_no_title_lookup_and_no_name_match(env):
+    await _notify(env.store, 207, _TS)
+    assert env.bot.get_chat_calls == []
+    assert env.store.notifications[207]["name_match"] is None
+
+
+async def test_group_title_is_cached_for_an_hour(env, monkeypatch):
+    env.store.groups["T-120"] = -100
+    now = [1000.0]
+    monkeypatch.setattr(da.time, "monotonic", lambda: now[0])
+    await _notify(env.store, 208, datetime(2026, 10, 5, 13, tzinfo=timezone.utc))
+    now[0] += 3599
+    await _notify(env.store, 209, datetime(2026, 10, 5, 14, tzinfo=timezone.utc))
+    assert env.bot.get_chat_calls == [-100]
+    assert env.store.notifications[209]["name_match"] is True
+    now[0] += 2                       # past the hour: read again
+    env.bot.titles[-100] = "T-120 JONES, MARK"
+    await _notify(env.store, 210, datetime(2026, 10, 5, 15, tzinfo=timezone.utc))
+    assert env.bot.get_chat_calls == [-100, -100]
+    assert env.store.notifications[210]["name_match"] is False
+
+
+async def test_failed_title_read_is_not_cached(env):
+    env.store.groups["T-120"] = -100
+    env.bot.chat_error = RuntimeError("timeout")
+    await _notify(env.store, 211, datetime(2026, 10, 5, 13, tzinfo=timezone.utc))
+    env.bot.chat_error = None
+    await _notify(env.store, 212, datetime(2026, 10, 5, 14, tzinfo=timezone.utc))
+    assert len(env.bot.get_chat_calls) == 2
+    assert env.store.notifications[212]["name_match"] is True
+
+
+async def test_migrated_group_title_is_treated_as_unknown(env):
+    env.store.groups["T-120"] = -100
+    migrate = MigrateToChat("Group migrated to supergroup")
+    migrate.migrate_to_chat_id = -1009
+    env.bot.chat_error = migrate
+    await _notify(env.store, 213, _TS)
+    assert len(env.bot.calls) == 1
+    assert env.store.notifications[213]["name_match"] is None
+
+
+async def test_dry_run_logs_the_driver_decision_and_sends_nothing(env, monkeypatch, caplog):
+    monkeypatch.setattr(da.config, "DRIVER_ALERTS_DRY_RUN", True, raising=False)
+    env.store.groups["T-120"] = -100
+    _drivers_in_turn(monkeypatch, dl.DriverInfo(name="Bob Roe", source="event"),
+                     dl.DriverInfo(name="John Smith", source="vitality"))
+    with caplog.at_level("INFO", logger=da.logger.name):
+        await _notify(env.store, 214, _TS)
+        await _notify(env.store, 215, _TS)
+    logs = [r.getMessage() for r in caplog.records if "DRY RUN" in r.getMessage()]
+    assert len(logs) == 2
+    assert "skipped" in logs[0] and "driver_unknown" in logs[0]
+    assert "would send" in logs[1] and "name_match=True" in logs[1]
+    assert env.bot.calls == [] and env.email.sent == []
+    assert env.store.notifications[214]["skip_reason"] == "driver_unknown"
+
+
+async def test_samsara_rejection_wins_over_driver_unknown(env, monkeypatch):
+    env.store.groups["T-120"] = -100
+    _with_driver(monkeypatch, name="John Smith", source="event")
+    _fake_wait(monkeypatch, _lookup_result("dismissed"))
+    await _notify_samsara(env.store, 216, _TS)
+    n = env.store.notifications[216]
+    assert n["skip_reason"] == da.SKIP_NOT_ALLOWED and n["coaching_state"] == "dismissed"
+    assert env.bot.calls == [] and env.email.sent == []
+
+
+async def test_samsara_allowed_with_unknown_driver_is_driver_unknown(env, monkeypatch):
+    env.store.groups["T-120"] = -100
+    _with_driver(monkeypatch, name="", source="unknown")
+    _fake_wait(monkeypatch, _lookup_result("needsReview"))
+    await _notify_samsara(env.store, 217, _TS)
+    n = env.store.notifications[217]
+    assert n["skip_reason"] == da.SKIP_DRIVER_UNKNOWN and n["coaching_state"] == "needsReview"
+    assert env.bot.calls == [] and env.email.sent == []
 
 
 # ── driver lookup stub ───────────────────────────────────────────────────────────

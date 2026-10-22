@@ -21,6 +21,12 @@ to the violation either way, and a rejected event is not counted toward later
 ordinals. The caller runs a Samsara notification as a background task so that wait
 never holds up the webhook handling. Motive events are not gated.
 
+Only a driver Vitality identified is notified (a driver from the event payload or
+none -> skip_reason "driver_unknown", nothing sent, email included). The truck's group
+title (read from Telegram, cached an hour) is compared with the Vitality name: the
+event is sent either way, and driver_notifications.name_match records TRUE / FALSE /
+NULL (title unreadable) so a wrongly mapped group can be found afterwards.
+
 notify_driver never raises: it runs after the company alerts went out, and nothing
 here may cost them or the rest of the event handling.
 """
@@ -29,6 +35,7 @@ import html
 import io
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -74,6 +81,11 @@ _CAPTION_LIMIT = 1024
 _ATTEMPTS = 3
 _RETRY_DELAY = 5.0
 _TAG_RE = re.compile(r"<[^>]+>")
+_NAME_TOKEN_RE = re.compile(r"[^\W\d_]{2,}")
+
+# A group's Telegram title, per chat id, for an hour: chat id -> (monotonic time, title).
+_TITLE_TTL = 3600.0
+_title_cache: dict[int, tuple[float, str]] = {}
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────────
@@ -127,6 +139,24 @@ def parse_count_from(raw: str | None) -> datetime | None:
                            f"datetime — ignored, counting from the day start")
         return None
     return ts.replace(tzinfo=ET) if ts.tzinfo is None else ts
+
+
+def _name_tokens(text: str | None) -> set[str]:
+    return set(_NAME_TOKEN_RE.findall((text or "").lower()))
+
+
+def driver_name_in_title(name: str | None, title: str | None) -> bool:
+    """Whether a driver's name appears in a driver group's title.
+
+    Both are reduced to lowercase alphabetic tokens of 2+ letters (split on anything
+    that is not a letter), so "SMITH, JOHN" matches "John A Smith" whatever the order,
+    commas or middle initials. It is a match when at least min(2, number of name
+    tokens) of the name's tokens are in the title's tokens; a name with no usable token
+    or an empty title never matches."""
+    wanted = _name_tokens(name)
+    if not wanted:
+        return False
+    return len(wanted & _name_tokens(title)) >= min(2, len(wanted))
 
 
 def _ordinal(n: int) -> str:
@@ -201,10 +231,12 @@ async def _record_driver(event_id: int, driver_ref: str | None, ordinal: int) ->
     )
 
 
-async def _record_sent(event_id: int, sent_group: bool, sent_email: bool) -> None:
+async def _record_sent(event_id: int, sent_group: bool, sent_email: bool,
+                       name_match: bool | None = None) -> None:
     await db.execute(
-        "UPDATE driver_notifications SET sent_group = $2, sent_email = $3 WHERE event_id = $1",
-        event_id, sent_group, sent_email,
+        "UPDATE driver_notifications SET sent_group = $2, sent_email = $3, name_match = $4 "
+        "WHERE event_id = $1",
+        event_id, sent_group, sent_email, name_match,
     )
 
 
@@ -226,6 +258,31 @@ async def _quietly(coro, what: str) -> None:
 
 
 # ── Telegram ─────────────────────────────────────────────────────────────────────
+
+async def _group_title(bot, chat_id: int) -> str | None:
+    """The group's current Telegram title, cached for an hour; None when it cannot be
+    read (a failed read is not cached, so the next event tries again). A group that
+    migrated to a supergroup is treated as unreadable: the send that follows handles
+    the migration."""
+    now = time.monotonic()
+    cached = _title_cache.get(chat_id)
+    if cached and now - cached[0] < _TITLE_TTL:
+        return cached[1]
+    try:
+        chat = await bot.get_chat(chat_id)
+    except MigrateToChat:
+        logger.info(f"[driver] Group {chat_id} migrated to a supergroup — title not read")
+        return None
+    except Exception as e:
+        logger.warning(f"[driver] Could not read the title of group {chat_id}: "
+                       f"{type(e).__name__}: {e}")
+        return None
+    title = (getattr(chat, "title", None) or "").strip()
+    if not title:
+        return None
+    _title_cache[chat_id] = (now, title)
+    return title
+
 
 def _is_gone(exc: Exception) -> bool:
     """The driver bot will never post in this chat again: kicked, or the chat is dead."""
@@ -341,6 +398,7 @@ SKIP_NOT_FOUND = "safety_event_not_found"
 SKIP_LOOKUP_ERROR = "safety_lookup_error"
 SKIP_NO_API_KEY = "no_samsara_api_key"
 SKIP_NO_VEHICLE_ID = "no_samsara_vehicle_id"
+SKIP_DRIVER_UNKNOWN = "driver_unknown"
 
 
 def _samsara_event_time(event: dict, occurred_at: datetime | None) -> datetime:
@@ -443,6 +501,15 @@ async def notify_driver(*, company_slug: str, event: dict, event_id: int | None,
                             f"skipped — coachingState={coaching_state} ({skip_reason})")
                 return
 
+        if driver.source != "vitality" or not (driver.name or "").strip():
+            dry = "DRY RUN " if config.DRIVER_ALERTS_DRY_RUN else ""
+            logger.info(f"[driver] {dry}Event {event_id} {company_slug}/{vehicle} ({who}): "
+                        f"skipped — driver not identified by Vitality (source={driver.source}) "
+                        f"({SKIP_DRIVER_UNKNOWN})")
+            await _quietly(_record_gate(event_id, coaching_state, SKIP_DRIVER_UNKNOWN),
+                           f"record the driver-unknown decision for notification {event_id}")
+            return
+
         day_start = day_start_et(occurred_at)
         before = occurred_at or datetime.now(timezone.utc)
         if before.tzinfo is None:
@@ -476,10 +543,26 @@ async def notify_driver(*, company_slug: str, event: dict, event_id: int | None,
             logger.error(f"[driver] Could not look up the driver group for {company_slug}/{vehicle}: {e}")
             group_id = None
 
+        # Does the group look like this driver's? Informational only: the event is sent
+        # to the truck's group whatever the answer. None = the title could not be read.
+        name_match = None
+        if group_id is not None:
+            title = await _group_title(bot, group_id)
+            if title is None:
+                logger.warning(f"[driver] Event {event_id} {company_slug}/{vehicle}: title of "
+                               f"group {group_id} unreadable — name match unknown")
+            else:
+                name_match = driver_name_in_title(driver.name, title)
+                if not name_match:
+                    logger.info(f"[driver] Event {event_id} {company_slug}/{vehicle}: Vitality "
+                                f"driver not in the title of group {group_id} — sending anyway")
+                    logger.debug(f"[driver] Event {event_id}: driver {driver.name!r}, "
+                                 f"group title {title!r}")
+
         if config.DRIVER_ALERTS_DRY_RUN:
             logger.info(f"[driver] DRY RUN event {event_id} ({who}, #{ordinal} today, "
                         f"charged={charged}{state_note}): would send — group={group_id} "
-                        f"email={'yes' if driver.email else 'no'} "
+                        f"name_match={name_match} email={'yes' if driver.email else 'no'} "
                         f"media={len(media or [])} — text:\n{_plain(text)}")
             return
 
@@ -503,9 +586,10 @@ async def notify_driver(*, company_slug: str, event: dict, event_id: int | None,
         else:
             logger.info(f"[driver] No email for {who} ({company_slug}/{vehicle}) — skipping email")
 
-        await _quietly(_record_sent(event_id, sent_group, sent_email),
+        await _quietly(_record_sent(event_id, sent_group, sent_email, name_match),
                        f"record delivery of notification {event_id}")
         logger.info(f"[driver] Event {event_id} {company_slug}/{vehicle} ({who}): #{ordinal} "
-                    f"today, charged={charged}{state_note}, group={sent_group}, email={sent_email}")
+                    f"today, charged={charged}{state_note}, group={sent_group}, "
+                    f"name_match={name_match}, email={sent_email}")
     except Exception as e:
         logger.error(f"[driver] notify_driver failed for event {event_id}: {e}", exc_info=True)

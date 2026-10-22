@@ -49,6 +49,7 @@ _DRIVER_SCHEMA = [
     "ALTER TABLE violations ADD COLUMN IF NOT EXISTS coaching_state VARCHAR(30)",
     "ALTER TABLE driver_notifications ADD COLUMN IF NOT EXISTS coaching_state VARCHAR(30)",
     "ALTER TABLE driver_notifications ADD COLUMN IF NOT EXISTS skip_reason    VARCHAR(50)",
+    "ALTER TABLE driver_notifications ADD COLUMN IF NOT EXISTS name_match BOOLEAN",
     "ALTER TABLE companies ADD COLUMN IF NOT EXISTS quickmanage_carrier_id VARCHAR(100)",
     "ALTER TABLE companies ADD COLUMN IF NOT EXISTS vitality_company_key   VARCHAR(255)",
 ]

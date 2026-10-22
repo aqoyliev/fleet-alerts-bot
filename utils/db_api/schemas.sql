@@ -191,5 +191,11 @@ ALTER TABLE violations ADD COLUMN IF NOT EXISTS coaching_state VARCHAR(30);
 ALTER TABLE driver_notifications ADD COLUMN IF NOT EXISTS coaching_state VARCHAR(30);
 ALTER TABLE driver_notifications ADD COLUMN IF NOT EXISTS skip_reason    VARCHAR(50);
 
+-- Driver-name verification. Only a driver identified by Vitality is notified (otherwise
+-- skip_reason = 'driver_unknown'). name_match: whether that driver's name is in the
+-- title of the truck's driver group at send time. TRUE / FALSE (sent anyway, the
+-- group may be mapped wrongly) / NULL (title unreadable, or no group / not sent).
+ALTER TABLE driver_notifications ADD COLUMN IF NOT EXISTS name_match BOOLEAN;
+
 -- QuickManage carrier id, for looking up the driver of a truck. NULL = not linked.
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS quickmanage_carrier_id VARCHAR(100);
