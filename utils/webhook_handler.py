@@ -37,6 +37,7 @@ from utils.db_api.crash_confirmations import (
     VERDICT_EXPIRED,
 )
 from utils.motive import crash_still_listed
+from utils.driver_alerts import notify_driver, is_enabled as driver_alerts_enabled
 from utils.samsara.client import fetch_speeding_details
 
 logger = logging.getLogger(__name__)
@@ -657,6 +658,31 @@ def _verdict_name(listed: bool | None) -> str:
     return VERDICT_WITHDRAWN if listed is False else VERDICT_UNKNOWN
 
 
+# Background jobs started from _handle_event. The event loop holds only weak references
+# to tasks, so one nobody references can be garbage-collected mid-wait; this set keeps
+# each alive until it finishes.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro, what: str) -> asyncio.Task:
+    """Run `coro` as a fire-and-forget task, kept referenced until done, with any
+    exception it ends on logged rather than lost."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+
+    def _done(t: asyncio.Task) -> None:
+        _background_tasks.discard(t)
+        if t.cancelled():
+            logger.warning(f"Background {what} was cancelled")
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.error(f"Background {what} failed: {exc}", exc_info=exc)
+
+    task.add_done_callback(_done)
+    return task
+
+
 async def _note_crash(coro, event_id) -> None:
     """Run a confirmation bookkeeping write, swallowing anything it raises.
 
@@ -838,9 +864,15 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
         if event_type == "crash":
             # Crash alerts go to subscribed DMs only — never to groups.
             group_ids = []
+        # A cell_phone event also goes to the driver (utils/driver_alerts.py), so it is
+        # handled even when no company group or DM wants it.
+        notify_driver_too = event_type == "cell_phone" and driver_alerts_enabled()
         if not group_ids and not dm_ids:
-            logger.info(f"No targets for company='{company_slug}' event='{event_type}' — skipping")
-            return
+            if not notify_driver_too:
+                logger.info(f"No targets for company='{company_slug}' event='{event_type}' — skipping")
+                return
+            logger.info(f"No company targets for company='{company_slug}' event='{event_type}' "
+                        f"— notifying the driver only")
 
         video_urls, image_urls = _get_camera_media_info(event)
 
@@ -883,6 +915,27 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
         media, is_video = await _download_media(video_urls, image_urls)
         for chat_id in [*group_ids, *dm_ids]:
             await _send_with_retry(bot, chat_id, text, media, is_video)
+
+        if notify_driver_too:
+            driver_job = notify_driver(
+                company_slug=company_slug,
+                event=event,
+                event_id=_event_id_to_bigint(event.get("id")),
+                vehicle=_get_vehicle(event),
+                occurred_at=_parse_occurred(event),
+                base_text=text,
+                media=media,
+                is_video=is_video,
+                video_urls=video_urls,
+                image_urls=image_urls,
+                samsara_api_key=samsara_api_key if alert_source == "samsara" else None,
+            )
+            if alert_source == "samsara":
+                # Waits minutes for Samsara's coaching state before deciding, so it
+                # must not hold this handler; Motive is not gated and stays inline.
+                _spawn_background(driver_job, f"driver notification {event_id}")
+            else:
+                await driver_job
 
     except Exception as e:
         logger.error(f"Event handling error: {e}", exc_info=True)
@@ -943,6 +996,13 @@ async def _migrate_group(old_id: int, new_id: int) -> None:
         new_id, old_id,
     )
     logger.info(f"DB updated: group {old_id} → {new_id}")
+    # The chat id changed for every bot in it, so a driver group with the same chat
+    # follows. Best-effort: driver_groups may not exist on an unmigrated database.
+    try:
+        from utils.db_api.driver_groups import migrate_driver_group
+        await migrate_driver_group(old_id, new_id)
+    except Exception as e:
+        logger.warning(f"Could not migrate driver group {old_id} → {new_id}: {e}")
 
 
 async def _download_media(video_urls: list[str], image_urls: list[str]) -> tuple[list[bytes], bool]:

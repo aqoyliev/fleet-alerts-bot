@@ -169,3 +169,109 @@ async def get_top_violators_all_companies(since) -> list[dict]:
         since,
     )
     return [dict(r) for r in rows]
+
+
+async def update_violation_driver(event_id: int | None, driver_ref: str | None,
+                                  driver_name: str | None, driver_source: str | None,
+                                  on_duty: bool | None) -> None:
+    """Record who was driving for an already-saved violation — what the month-end
+    charge is billed against. No-op without an event_id (the row cannot be found)."""
+    if event_id is None:
+        return
+    await db.execute(
+        """
+        UPDATE violations
+        SET driver_ref = $2, driver_name = $3, driver_source = $4, on_duty = $5
+        WHERE event_id = $1
+        """,
+        event_id,
+        (driver_ref or None) and str(driver_ref)[:100],
+        (driver_name or None) and str(driver_name)[:255],
+        (driver_source or None) and str(driver_source)[:30],
+        on_duty,
+    )
+
+
+async def update_violation_coaching_state(event_id: int | None, coaching_state: str | None) -> None:
+    """Record the Samsara safety event's coachingState (or one of the stand-ins in
+    utils.samsara.safety) on a violation. It decides whether the driver was told, whether
+    the event counts toward their daily ordinal, and whether it is charged at month end."""
+    if event_id is None:
+        return
+    await db.execute(
+        "UPDATE violations SET coaching_state = $2 WHERE event_id = $1",
+        event_id, (coaching_state or None) and str(coaching_state)[:30],
+    )
+
+
+def _coaching_clause() -> str:
+    """Rows a Samsara coaching-state gate rejected do not count. NULL — Motive, and rows
+    from before the gate — still does. Built from the closed constant, never from input."""
+    from utils.samsara.safety import ALLOWED_COACHING_STATES
+    allowed = ", ".join(f"'{s}'" for s in sorted(ALLOWED_COACHING_STATES))
+    return f"(coaching_state IS NULL OR coaching_state IN ({allowed}))"
+
+
+# How a driver is identified when counting their violations, best key first. A closed
+# choice rather than an interpolated value, like _SOURCE_CLAUSES above.
+#
+# The NAME leads because it is the only key every source agrees on: driver_ref depends on
+# who answered ("vitality:<uuid>", "motive:<id>", or none), so the same driver's events on
+# one day can carry different refs, and counting by ref would call their 2nd event the
+# 1st. The trade-off: two different drivers with the same full name in one company on the
+# same day are counted as one. That is rare and accepted.
+#
+# The SQL expression and normalize_driver_name must agree: collapse whitespace, trim,
+# lower-case. Python's .lower() (not casefold) is used because it matches Postgres lower()
+# for the letters that differ between the two (casefold folds e.g. "ß" to "ss").
+# The vehicle form compares normalized units (utils.unit_key.normalize_unit, in SQL), so
+# the same truck reported as "T-120" by one provider and "T120" by another is one truck.
+_DRIVER_KEY_CLAUSES = {
+    "name":    r"lower(btrim(regexp_replace(driver_name, '\s+', ' ', 'g'))) = $5",
+    "driver":  "driver_ref = $5",
+    "vehicle": "regexp_replace(upper(vehicle_number), '[^0-9A-Z]', '', 'g') = $5",
+}
+
+
+def normalize_driver_name(name: str | None) -> str:
+    """The cross-source key for a driver's name: whitespace collapsed and trimmed,
+    lower-cased. "" when there is no usable name."""
+    return " ".join((name or "").split()).lower()
+
+
+async def count_driver_cell_phone_events(company_slug: str, driver_name: str | None,
+                                         driver_ref: str | None, vehicle_number: str | None,
+                                         window_start, before_ts,
+                                         exclude_event_id: int | None) -> int:
+    """cell_phone violations of this driver in [window_start, before_ts), not counting
+    `exclude_event_id` (the event being notified about), nor events whose Samsara
+    coaching state kept them from the driver (see _coaching_clause).
+
+    The driver is identified by, in order: their name (normalized, so it matches whichever
+    source identified them — see _DRIVER_KEY_CLAUSES for why and the trade-off), else
+    driver_ref, else the truck, which counts whoever drove it in the window — the best
+    available without a driver identity."""
+    from utils.unit_key import normalize_unit
+
+    name_key = normalize_driver_name(driver_name)
+    if name_key:
+        clause, key = _DRIVER_KEY_CLAUSES["name"], name_key
+    elif driver_ref:
+        clause, key = _DRIVER_KEY_CLAUSES["driver"], str(driver_ref)
+    else:
+        key = normalize_unit(vehicle_number)
+        if not key:
+            return 0
+        clause = _DRIVER_KEY_CLAUSES["vehicle"]
+    count = await db.fetchval(
+        f"""
+        SELECT COUNT(*) FROM violations
+        WHERE company_slug = $1 AND event_type = 'cell_phone'
+          AND occurred_at >= $2 AND occurred_at < $3
+          AND event_id IS DISTINCT FROM $4
+          AND {_coaching_clause()}
+          AND {clause}
+        """,
+        company_slug, window_start, before_ts, exclude_event_id, key,
+    )
+    return int(count or 0)

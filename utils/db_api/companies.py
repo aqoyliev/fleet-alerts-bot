@@ -131,6 +131,18 @@ async def get_motive_api_key(slug: str) -> str | None:
     return row["motive_api_key"] if row else None
 
 
+async def get_vitality_company_key(slug: str) -> str | None:
+    """Returns the company's Vitality ELD (DriveHOS) company key, or None if it has none.
+
+    Used to look up who is driving a truck for the driver alerts. It goes in the
+    X-API-Company-Key header next to the single global VITALITY_PROVIDER_KEY; each
+    carrier has its own, so it is stored per row."""
+    row = await db.fetchrow(
+        "SELECT vitality_company_key FROM companies WHERE slug = $1", slug
+    )
+    return (row["vitality_company_key"] or None) if row else None
+
+
 async def get_speeding_min_severity(slug: str) -> str:
     """Returns the minimum severity level for speeding alerts (e.g., 'high', 'medium', 'critical')."""
     row = await db.fetchrow("SELECT speeding_min_severity FROM companies WHERE slug = $1", slug)
