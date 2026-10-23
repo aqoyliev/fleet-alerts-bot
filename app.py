@@ -23,6 +23,12 @@ async def on_startup(dispatcher):
 
 async def on_shutdown(_):
     await close_pool()
+    try:
+        from utils import driver_forward
+        await driver_forward.close()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Could not close the driver-forward session: {e}")
 
 
 if __name__ == '__main__':
