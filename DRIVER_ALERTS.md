@@ -56,6 +56,21 @@ A skipped event sends nothing (no group post, no email) and records its `skip_re
 
 Needs `DRIVER_ALERTS_BOT_TOKEN` and `PTI_DATABASE_URL_JRD` (from `.env` or the environment). For every usable pti group it asks Telegram whether the driver bot is in it and prints the counts (member / admin / restricted / not member / error) and the units and group ids where it cannot post. Read-only; titles are not printed. Exit 0 = all good, 1 = some groups need the bot, 2 = configuration/DB error.
 
+## QuickManage (driver emails; not wired in yet)
+
+`utils/quickmanage.py` is the client for the QuickManage TMS API (`https://api.quickmanage.com`), the planned source of a truck's drivers and their emails. **`notify_driver` does not use it yet**; the audit below shows whether QuickManage agrees with Vitality and pti first.
+
+- Credentials are per company (a token belongs to one carrier): `QUICKMANAGE_CLIENT_ID_<SLUG>` and `QUICKMANAGE_CLIENT_SECRET_<SLUG>` (slug as for `PTI_DATABASE_URL_<SLUG>`, e.g. `QUICKMANAGE_CLIENT_ID_JRD`). Both are secrets that are never logged. Either one missing = QuickManage is off for that company (`quickmanage.is_configured(slug)`). `QUICKMANAGE_BASE_URL` overrides the host.
+- The bearer token (`POST /auth/token`) is cached per company, renewed 5 min before it expires, or at once on a 401 (that request is repeated once). Requests time out after 8 s and are retried twice on a network error, 429 or 5xx.
+- `truck_drivers(slug, unit)`: searches trucks by `unit_number` (a partial match), keeps the trucks whose normalized unit (`utils/unit_key`) equals the asked one, and returns that truck with its **active** drivers (name `first last`, email, phone, id, status). No truck → `no_truck`; several → `ambiguous` (a sold / written-off truck is ignored when a live one has the unit). Cached 10 min per company and unit; failures are not cached.
+- Errors: `QuickManageUnavailable` (not configured, credentials refused, or QuickManage down after the retries) and `QuickManageError` (any other bad answer); both are `QuickManageError`.
+
+### Audit QuickManage against Vitality and pti
+
+    python -m scripts.qm_audit --company jrd [--vitality-key-env NAME]
+
+Needs `PTI_DATABASE_URL_JRD`, `QUICKMANAGE_CLIENT_ID_JRD` / `QUICKMANAGE_CLIENT_SECRET_JRD`, `VITALITY_PROVIDER_KEY` and the carrier's Vitality company key: the env var named by `--vitality-key-env` (default `VITALITY_COMPANY_KEY_JRD`), else, when `DATABASE_URL` is a real one, `companies.vitality_company_key` (one SELECT). For every usable pti group it takes the unit, asks QuickManage for the truck's active drivers and Vitality for the unit's current driver, and prints counts: units found / not found / ambiguous in QuickManage; trucks with 0 / 1 / 2+ active drivers; whether the Vitality name matches a QuickManage driver, a QuickManage driver is in the pti title or `group_drivers`, and all three agree (same token rule as the name check); how many drivers have an email. Then the **unit numbers** of each mismatch category. Read-only; names, emails and titles are never printed. Exit 0 = every unit agrees, 1 = some do not, 2 = configuration / database / refused credentials.
+
 ## The userbot: adding a missing driver bot
 
 The driver bot cannot join a group by itself. When an alert's group (found and name-checked as above) answers `bot_not_in_group`, a Telegram **user** account — the userbot, logged in through Telethon (`utils/userbot.py`) — gets it in. One group at a time per process; every step is logged with `[driver-bot]`, the unit and the group id.

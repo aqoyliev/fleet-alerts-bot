@@ -100,3 +100,30 @@ DRIVER_ALERTS_FORWARD_SECRET = env.str("DRIVER_ALERTS_FORWARD_SECRET", "")
 # Empty provider key = Vitality is not queried and the event's driver is used.
 VITALITY_PROVIDER_KEY = env.str("VITALITY_PROVIDER_KEY", "")
 VITALITY_BASE_URL = env.str("VITALITY_BASE_URL", "https://api.drivehos.app")
+
+
+# QuickManage TMS (https://api.quickmanage.com): the truck -> drivers/emails source for
+# the driver alerts (utils/quickmanage.py). A token is bound to one carrier, so each
+# company has its own API credentials: QUICKMANAGE_CLIENT_ID_<SLUG> and
+# QUICKMANAGE_CLIENT_SECRET_<SLUG> (slug as for PTI_DATABASE_URL_<SLUG>), e.g.
+# QUICKMANAGE_CLIENT_ID_JRD. Either one missing = QuickManage is off for that company.
+QUICKMANAGE_BASE_URL = env.str("QUICKMANAGE_BASE_URL", "https://api.quickmanage.com")
+QUICKMANAGE_CLIENT_ID_PREFIX = "QUICKMANAGE_CLIENT_ID_"
+QUICKMANAGE_CLIENT_SECRET_PREFIX = "QUICKMANAGE_CLIENT_SECRET_"
+
+
+def quickmanage_client_id(company_slug: str | None) -> str:
+    """The company's QuickManage client id, "" when not configured."""
+    suffix = slug_env_suffix(company_slug)
+    if not suffix:
+        return ""
+    return os.environ.get(QUICKMANAGE_CLIENT_ID_PREFIX + suffix, "").strip()
+
+
+def quickmanage_client_secret(company_slug: str | None) -> str:
+    """The company's QuickManage client secret, "" when not configured. A secret: never
+    log it."""
+    suffix = slug_env_suffix(company_slug)
+    if not suffix:
+        return ""
+    return os.environ.get(QUICKMANAGE_CLIENT_SECRET_PREFIX + suffix, "").strip()
