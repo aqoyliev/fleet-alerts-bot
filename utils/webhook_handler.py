@@ -37,7 +37,12 @@ from utils.db_api.crash_confirmations import (
     VERDICT_EXPIRED,
 )
 from utils.motive import crash_still_listed
-from utils.driver_alerts import notify_driver, is_enabled as driver_alerts_enabled
+from utils import driver_forward
+from utils.driver_forward import (
+    build_payload as build_driver_forward_payload,
+    forward_cell_phone_event,
+    is_enabled as driver_alerts_enabled,
+)
 from utils.samsara.client import fetch_speeding_details
 
 logger = logging.getLogger(__name__)
@@ -864,15 +869,16 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
         if event_type == "crash":
             # Crash alerts go to subscribed DMs only — never to groups.
             group_ids = []
-        # A cell_phone event also goes to the driver (utils/driver_alerts.py), so it is
-        # handled even when no company group or DM wants it.
-        notify_driver_too = event_type == "cell_phone" and driver_alerts_enabled()
+        # A cell_phone event is also handed to the driver-alerts service
+        # (utils/driver_forward.py → driver_service.py), so it is handled even when no
+        # company group or DM wants it.
+        forward_to_driver = event_type == "cell_phone" and driver_alerts_enabled()
         if not group_ids and not dm_ids:
-            if not notify_driver_too:
+            if not forward_to_driver:
                 logger.info(f"No targets for company='{company_slug}' event='{event_type}' — skipping")
                 return
             logger.info(f"No company targets for company='{company_slug}' event='{event_type}' "
-                        f"— notifying the driver only")
+                        f"— forwarding to the driver service only")
 
         video_urls, image_urls = _get_camera_media_info(event)
 
@@ -911,31 +917,31 @@ async def _handle_event(bot: Bot, event: dict, company_slug: str = "gurman",
                 text += "\n\n📷 <i>No camera media available</i>"
 
         # Download the media ONCE up front and reuse the bytes for every recipient,
-        # rather than re-downloading (potentially large crash clips) per chat.
-        media, is_video = await _download_media(video_urls, image_urls)
-        for chat_id in [*group_ids, *dm_ids]:
-            await _send_with_retry(bot, chat_id, text, media, is_video)
+        # rather than re-downloading (potentially large crash clips) per chat. With no
+        # company recipient there is nothing to download for: the driver service
+        # fetches the URLs itself.
+        if group_ids or dm_ids:
+            media, is_video = await _download_media(video_urls, image_urls)
+            for chat_id in [*group_ids, *dm_ids]:
+                await _send_with_retry(bot, chat_id, text, media, is_video)
 
-        if notify_driver_too:
-            driver_job = notify_driver(
+        if forward_to_driver:
+            # Fire-and-forget: the driver side (Vitality, the Samsara coaching-state
+            # wait, the driver bot) runs in the driver-alerts service. The forward never
+            # raises, and this handler does not wait for it.
+            payload = build_driver_forward_payload(
                 company_slug=company_slug,
-                event=event,
+                alert_source=alert_source,
                 event_id=_event_id_to_bigint(event.get("id")),
+                raw_event_id=event.get("id"),
                 vehicle=_get_vehicle(event),
                 occurred_at=_parse_occurred(event),
                 base_text=text,
-                media=media,
-                is_video=is_video,
                 video_urls=video_urls,
                 image_urls=image_urls,
-                samsara_api_key=samsara_api_key if alert_source == "samsara" else None,
+                event=event,
             )
-            if alert_source == "samsara":
-                # Waits minutes for Samsara's coaching state before deciding, so it
-                # must not hold this handler; Motive is not gated and stays inline.
-                _spawn_background(driver_job, f"driver notification {event_id}")
-            else:
-                await driver_job
+            _spawn_background(forward_cell_phone_event(payload), f"driver forward {event_id}")
 
     except Exception as e:
         logger.error(f"Event handling error: {e}", exc_info=True)
@@ -1209,9 +1215,16 @@ async def start_webhook_server(bot: Bot, port: int = 8080):
     app.router.add_get("/health", lambda r: web.Response(text="OK"))
     # Close the shared aiohttp session when the server shuts down.
     app.on_cleanup.append(_close_http_session)
+    app.on_cleanup.append(lambda _app: driver_forward.close())
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     logger.info(f"Webhook server listening on port {port} (Motive + Samsara)")
+    if driver_alerts_enabled():
+        logger.info(f"Driver cell-phone alerts: forwarding to {config.DRIVER_ALERTS_FORWARD_URL.strip()}"
+                    + ("" if config.DRIVER_ALERTS_FORWARD_SECRET else
+                       " — WARNING: DRIVER_ALERTS_FORWARD_SECRET is empty, the service will refuse them"))
+    else:
+        logger.info("Driver cell-phone alerts: off (DRIVER_ALERTS_FORWARD_URL unset)")

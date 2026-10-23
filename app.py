@@ -37,6 +37,11 @@ async def on_shutdown(_):
     except Exception as e:
         logging.getLogger(__name__).warning(f"Could not close the email session: {e}")
     try:
+        from utils import driver_forward
+        await driver_forward.close()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Could not close the driver-forward session: {e}")
+    try:
         from utils import vitality
         await vitality.close()
     except Exception as e:

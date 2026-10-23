@@ -1,5 +1,5 @@
-"""Tests for the driver notification of cell_phone events (utils/driver_alerts.py) and
-its hook in _handle_event. No Postgres: the DB-facing functions are replaced with an
+"""Tests for the driver notification of cell_phone events (utils/driver_alerts.py),
+as run by the driver-alerts service. No Postgres: the DB-facing functions are replaced with an
 in-memory fake, the driver bot with a recorder, and utils.email_sender with a fake
 module injected through sys.modules."""
 import asyncio
@@ -737,77 +737,6 @@ async def test_get_driver_group_falls_back_to_first_token(monkeypatch):
     assert await driver_groups.get_driver_group("co", "9999 SUB") is None
 
 
-# ── _handle_event hook ───────────────────────────────────────────────────────────
-
-def _async_const(value):
-    async def _f(*_a, **_k):
-        return value
-    return _f
-
-
-class _FakeMainBot:
-    def __init__(self):
-        self.sent = []
-
-    async def send_message(self, chat_id, text, parse_mode=None, disable_web_page_preview=None):
-        self.sent.append(chat_id)
-
-    async def send_video(self, chat_id, media, caption=None, parse_mode=None):
-        self.sent.append(chat_id)
-
-
-def _patch_handle_event(monkeypatch, group_ids, dm_ids):
-    calls = []
-
-    async def fake_notify(**kwargs):
-        calls.append(kwargs)
-
-    monkeypatch.setattr(wh, "get_company_name", _async_const("Co"))
-    monkeypatch.setattr(wh, "save_violation", _async_const(None))
-    monkeypatch.setattr(wh, "get_groups_for_event", _async_const(group_ids))
-    monkeypatch.setattr(wh, "get_subscribed_admins", _async_const(dm_ids))
-    monkeypatch.setattr(wh, "notify_driver", fake_notify)
-    monkeypatch.setattr(wh, "driver_alerts_enabled", lambda: True)
-    return calls
-
-
-async def test_handle_event_other_types_do_not_notify_driver(monkeypatch):
-    calls = _patch_handle_event(monkeypatch, [1], [])
-    bot = _FakeMainBot()
-    await wh._handle_event(bot, {"id": "900", "type": "hard_brake", "vehicle": {"number": "T1"},
-                                 "start_time": "2026-10-05T15:00:00Z"}, "co")
-    assert bot.sent == [1] and calls == []
-
-
-async def test_handle_event_cell_phone_without_company_targets_still_notifies(monkeypatch):
-    calls = _patch_handle_event(monkeypatch, [], [])
-    bot = _FakeMainBot()
-    await wh._handle_event(bot, {"id": "901", "type": "cell_phone", "vehicle": {"number": "T1"},
-                                 "start_time": "2026-10-05T15:00:00Z"}, "co")
-    assert bot.sent == []
-    assert len(calls) == 1
-    c = calls[0]
-    assert c["event_id"] == 901 and c["vehicle"] == "T1" and c["company_slug"] == "co"
-    assert "CELL PHONE USAGE" in c["base_text"]
-    assert c["occurred_at"] == datetime(2026, 10, 5, 15, tzinfo=timezone.utc)
-
-
-async def test_handle_event_cell_phone_with_targets_sends_both(monkeypatch):
-    calls = _patch_handle_event(monkeypatch, [1], [2])
-    bot = _FakeMainBot()
-    await wh._handle_event(bot, {"id": "902", "type": "cell_phone", "vehicle": {"number": "T1"},
-                                 "start_time": "2026-10-05T15:00:00Z"}, "co")
-    assert bot.sent == [1, 2] and len(calls) == 1
-
-
-async def test_handle_event_cell_phone_driver_disabled_no_targets_skips(monkeypatch):
-    calls = _patch_handle_event(monkeypatch, [], [])
-    monkeypatch.setattr(wh, "driver_alerts_enabled", lambda: False)
-    await wh._handle_event(_FakeMainBot(), {"id": "903", "type": "cell_phone",
-                                            "vehicle": {"number": "T1"}}, "co")
-    assert calls == []
-
-
 # ── Samsara coaching-state gate ──────────────────────────────────────────────────
 
 def _lookup_result(state=None, status="found"):
@@ -973,58 +902,9 @@ async def test_samsara_dry_run_looks_up_and_logs_the_decision(env, monkeypatch, 
     assert len(logs) == 1 and word in logs[0] and f"coachingState={state}" in logs[0]
 
 
-# ── _handle_event: Samsara in the background, Motive inline ─────────────────────
-
-async def test_handle_event_samsara_driver_notification_runs_in_background(monkeypatch):
-    _patch_handle_event(monkeypatch, [1], [])
-    release, finished, seen = asyncio.Event(), [], []
-
-    async def slow_notify(**kwargs):
-        seen.append(kwargs)
-        await release.wait()          # stands in for the coaching-state wait
-        finished.append(kwargs["event_id"])
-
-    async def fake_poll(vehicle_id, timestamp_ms, api_key, on_first=None):
-        return {"harshEventType": "Mobile Usage", "downloadInwardVideoUrl": "http://i.mp4",
-                "location": {"address": "I-95"}}
-
-    monkeypatch.setattr(wh, "notify_driver", slow_notify)
-    monkeypatch.setattr(wh, "_fetch_samsara_harsh_event", fake_poll)
-    monkeypatch.setattr(wh, "_download", _async_const(b"VID"))
-    bot = _FakeMainBot()
-    event = {"id": "uuid-abc", "type": "harsh_event", "_source": "samsara",
-             "_samsara_vehicle_id": "v9", "_samsara_timestamp_ms": 1759676400000,
-             "vehicle": {"number": "T1"}, "start_time": "2026-10-05T15:00:00Z"}
-
-    await asyncio.wait_for(wh._handle_event(bot, event, "co", "SAMSARA_KEY"), 1)
-    assert finished == []                         # returned while the wait is still open
-    assert bot.sent == [1]                        # the company alert is not held back
-    tasks = list(wh._background_tasks)
-    assert len(tasks) == 1
-    await asyncio.sleep(0)
-    assert seen and seen[0]["samsara_api_key"] == "SAMSARA_KEY"
-    assert seen[0]["event"]["_samsara_vehicle_id"] == "v9"
-    release.set()
-    await tasks[0]
-    await asyncio.sleep(0)
-    assert finished == [wh._event_id_to_bigint("uuid-abc")]
-    assert wh._background_tasks == set()          # reference dropped once done
-
-
-async def test_handle_event_motive_driver_notification_stays_inline(monkeypatch):
-    _patch_handle_event(monkeypatch, [1], [])
-    finished = []
-
-    async def notify(**kwargs):
-        await asyncio.sleep(0)
-        finished.append(kwargs)
-
-    monkeypatch.setattr(wh, "notify_driver", notify)
-    await wh._handle_event(_FakeMainBot(), {"id": "905", "type": "cell_phone",
-                                            "vehicle": {"number": "T1"},
-                                            "start_time": "2026-10-05T15:00:00Z"}, "co", "KEY")
-    assert len(finished) == 1 and finished[0]["samsara_api_key"] is None
-    assert wh._background_tasks == set()
+# ── _handle_event ────────────────────────────────────────────────────────────────
+# _handle_event no longer calls notify_driver: it forwards cell_phone events to the
+# driver-alerts service. See tests/test_driver_forward.py and tests/test_driver_service.py.
 
 
 async def test_background_task_failure_is_logged(caplog):
