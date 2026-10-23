@@ -10,3 +10,5 @@ os.environ.setdefault("GROUP_CHAT_ID", "0")
 os.environ.setdefault("DATABASE_URL", "postgresql://u:p@localhost/db")
 # Never reach the real Vitality API from tests, whatever a local .env holds.
 os.environ.setdefault("VITALITY_PROVIDER_KEY", "")
+# Nor Telegram through the userbot; tests that exercise it patch its client.
+os.environ.setdefault("USERBOT_ENABLED", "false")

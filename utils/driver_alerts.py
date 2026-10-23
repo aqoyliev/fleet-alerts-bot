@@ -34,8 +34,11 @@ an hour — by driver_name_in_title; with DRIVER_ALERTS_NAME_MISMATCH=skip (the 
 a mismatch is skip_reason name_mismatch (name_unverified when the title is
 unreadable). driver_notifications.name_match records TRUE / FALSE / NULL. Last, the
 driver bot's own membership is checked (utils/bot_membership.py, read-only):
-not in the group / muted -> bot_not_in_group / bot_cannot_post. All of this runs in
-DRY RUN too, and one decision line per event is logged. A skipped event sends nothing,
+not in the group / muted -> bot_not_in_group / bot_cannot_post. Not in the group: with
+USERBOT_ENABLED the userbot adds the bot and, once it is in, this same (already
+claimed) event is sent; otherwise it asks HOS / the admin (utils/bot_join.py) and the
+event stays skipped. All of this runs in DRY RUN too (the userbot step only logs what
+it would do), and one decision line per event is logged. A skipped event sends nothing,
 email included. DRIVER_ALERTS_COMPANIES limits which companies are handled at all.
 
 notify_driver never raises: it runs after the company alerts went out, and nothing
@@ -710,6 +713,17 @@ async def notify_driver(*, company_slug: str, event: dict, event_id: int | None,
                 skip_reason = membership.reason
 
         dry = config.DRIVER_ALERTS_DRY_RUN
+        joined = False
+        if skip_reason == bot_membership.REASON_NOT_IN_GROUP:
+            # The userbot may add the bot (utils/bot_join.py; logs only in DRY RUN). This
+            # event is already claimed, so it is sent right here once the bot is in.
+            joined = await bot_membership.request_bot_join(
+                bot, company_slug, route.unit, group_id, membership,
+                driver_name=driver.name, dry_run=dry)
+            if joined:
+                membership = await bot_membership.check(bot, group_id)
+                skip_reason = membership.reason
+
         if skip_reason is not None:
             decision = f"skipped ({skip_reason})"
         elif group_id is None:
@@ -718,6 +732,8 @@ async def notify_driver(*, company_slug: str, event: dict, event_id: int | None,
             decision = "name mismatch — " + ("would send anyway" if dry else "sending anyway")
         else:
             decision = "would send" if dry else "sending"
+        if joined and skip_reason is None:
+            decision += " (driver bot just added by the userbot)"
         line = _decision_line(dry=dry, event_id=event_id, company_slug=company_slug,
                               vehicle=vehicle, who=who, route=route, membership=membership,
                               ordinal=ordinal, charged=charged, state_note=state_note,
@@ -729,8 +745,6 @@ async def notify_driver(*, company_slug: str, event: dict, event_id: int | None,
                            f"record the {skip_reason} decision for notification {event_id}")
             await _quietly(_record_name_match(event_id, name_match),
                            f"record the name match of notification {event_id}")
-            if not dry and skip_reason == bot_membership.REASON_NOT_IN_GROUP:
-                await bot_membership.request_bot_join(company_slug, route.unit, group_id, membership)
             return
 
         if dry:

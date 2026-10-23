@@ -5,8 +5,8 @@ added to (or was removed from, or muted in) is skipped and logged instead of fai
 send time. A definitive answer is cached for CACHE_TTL per chat; a failed check is not
 cached and fails closed (bot_check_failed).
 
-request_bot_join is the hook for the next phase (a userbot that adds the driver bot to
-the group); for now it only logs and changes nothing.
+request_bot_join is called when the bot is not in the group: utils/bot_join.py has the
+userbot add it (or asks HOS / the admin). It is off unless USERBOT_ENABLED.
 """
 import logging
 import time
@@ -114,11 +114,18 @@ def invalidate(chat_id: int) -> None:
         _cache.pop(key, None)
 
 
-async def request_bot_join(company_slug: str, unit: str | None, group_id: int,
-                           membership: Membership) -> bool:
-    """Hook for the next phase: have a userbot add the driver bot to group_id (then
-    invalidate(group_id) so the next check sees it). Not implemented — it only logs and
-    returns False, so the event stays skipped."""
-    logger.info(f"[driver-bot] {company_slug}/{unit}: driver bot not usable in group {group_id} "
-                f"({membership.reason}) — auto-join not implemented, add it by hand")
-    return False
+async def request_bot_join(bot, company_slug: str, unit: str | None, group_id: int,
+                           membership: Membership, *, driver_name: str | None = None,
+                           dry_run: bool = False) -> bool:
+    """The driver bot is not in group_id (membership.reason == REASON_NOT_IN_GROUP): have
+    the userbot add it, or ask HOS / the admin (utils/bot_join.py). True only when the
+    bot can post there now — the caller then sends as usual. In DRY RUN nothing is
+    added or sent, only logged. Never raises."""
+    try:
+        from utils import bot_join  # lazy: pulls in Telethon
+    except Exception as e:
+        logger.error(f"[driver-bot] {company_slug}/{unit}: driver bot not usable in group "
+                     f"{group_id} ({membership.reason}) and the userbot module failed to load: {e}")
+        return False
+    return await bot_join.request_join(bot, company_slug, unit, group_id,
+                                       driver_name=driver_name, dry_run=dry_run)

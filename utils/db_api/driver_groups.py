@@ -52,6 +52,20 @@ _DRIVER_SCHEMA = [
     "ALTER TABLE driver_notifications ADD COLUMN IF NOT EXISTS name_match BOOLEAN",
     "ALTER TABLE companies ADD COLUMN IF NOT EXISTS quickmanage_carrier_id VARCHAR(100)",
     "ALTER TABLE companies ADD COLUMN IF NOT EXISTS vitality_company_key   VARCHAR(255)",
+    """
+    CREATE TABLE IF NOT EXISTS driver_bot_join_requests (
+        id           BIGSERIAL    PRIMARY KEY,
+        company_slug VARCHAR(50)  NOT NULL,
+        group_id     BIGINT       NOT NULL,
+        unit_number  VARCHAR(50),
+        action       VARCHAR(30)  NOT NULL,
+        outcome      VARCHAR(30),
+        detail       VARCHAR(255),
+        created_at   TIMESTAMPTZ  DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS driver_bot_join_requests_group "
+    "ON driver_bot_join_requests (company_slug, group_id, created_at)",
 ]
 
 _schema_ready = False
@@ -117,6 +131,44 @@ async def migrate_driver_group(old_id: int, new_id: int) -> None:
     await db.execute(
         "UPDATE driver_groups SET telegram_group_id = $1 WHERE telegram_group_id = $2",
         new_id, old_id,
+    )
+
+
+async def recent_join_actions(company_slug: str, group_id: int, hours: int = 24) -> set[str]:
+    """The driver-bot join actions (utils/bot_join.ACTION_*) taken for this group in the
+    last `hours`, whatever their outcome."""
+    rows = await db.fetch(
+        """
+        SELECT DISTINCT action FROM driver_bot_join_requests
+        WHERE company_slug = $1 AND group_id = $2
+          AND created_at > NOW() - make_interval(hours => $3)
+        """,
+        company_slug, int(group_id), int(hours),
+    )
+    return {r["action"] for r in rows}
+
+
+async def record_join_request(company_slug: str, group_id: int, unit_number: str | None,
+                              action: str, outcome: str, detail: str | None = None) -> int:
+    """Log a join action BEFORE it is taken (outcome "pending"); returns its id."""
+    return await db.fetchval(
+        """
+        INSERT INTO driver_bot_join_requests
+            (company_slug, group_id, unit_number, action, outcome, detail)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id
+        """,
+        company_slug, int(group_id), (unit_number or "")[:50] or None, action[:30],
+        outcome[:30], (detail or "")[:255] or None,
+    )
+
+
+async def set_join_request_outcome(request_id: int, outcome: str,
+                                   detail: str | None = None) -> None:
+    await db.execute(
+        "UPDATE driver_bot_join_requests SET outcome = $2, detail = COALESCE($3, detail) "
+        "WHERE id = $1",
+        request_id, outcome[:30], (detail or "")[:255] or None,
     )
 
 

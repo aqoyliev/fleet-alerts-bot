@@ -257,7 +257,16 @@ async def _on_startup(_app: web.Application) -> None:
                 f"pti DB={pti_note}, "
                 f"COUNT_FROM={config.DRIVER_ALERTS_COUNT_FROM or '(day start)'}, "
                 f"Vitality={'on' if config.VITALITY_PROVIDER_KEY else 'off'}, "
-                f"email={'on' if config.RESEND_API_KEY and config.EMAIL_FROM else 'off'}")
+                f"email={'on' if config.RESEND_API_KEY and config.EMAIL_FROM else 'off'}, "
+                f"userbot={_userbot_note()}")
+
+
+def _userbot_note() -> str:
+    """USERBOT_ENABLED / configured, for the Ready line (never the session itself)."""
+    if not config.USERBOT_ENABLED:
+        return "off"
+    from utils import userbot
+    return "on" if userbot.is_configured() else "on but NOT configured"
 
 
 async def _close_module(name: str) -> None:
@@ -282,7 +291,8 @@ async def _on_cleanup(_app: web.Application) -> None:
     for name, closer in (("download", close_download_session),
                          ("Vitality", lambda: _close_module("utils.vitality")),
                          ("email", lambda: _close_module("utils.email_sender")),
-                         ("pti database", pti_groups.close)):
+                         ("pti database", pti_groups.close),
+                         ("userbot", lambda: _close_module("utils.userbot"))):
         try:
             await closer()
         except Exception as e:

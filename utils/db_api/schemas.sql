@@ -199,3 +199,22 @@ ALTER TABLE driver_notifications ADD COLUMN IF NOT EXISTS name_match BOOLEAN;
 
 -- QuickManage carrier id, for looking up the driver of a truck. NULL = not linked.
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS quickmanage_carrier_id VARCHAR(100);
+
+-- Driver-bot join requests (utils/bot_join.py). When an alert's group lacks the driver
+-- bot, the userbot adds it, or asks HOS / the admin. One row per action taken, written
+-- before it is taken: action 'add' / 'hos_message' / 'admin_message', outcome 'pending'
+-- then e.g. 'added', 'add_failed', 'sent', 'failed'. A group gets at most one add and
+-- one message (HOS or admin) per 24 hours, whatever the outcome. DRY RUN writes none.
+CREATE TABLE IF NOT EXISTS driver_bot_join_requests (
+    id           BIGSERIAL    PRIMARY KEY,
+    company_slug VARCHAR(50)  NOT NULL,
+    group_id     BIGINT       NOT NULL,
+    unit_number  VARCHAR(50),
+    action       VARCHAR(30)  NOT NULL,
+    outcome      VARCHAR(30),
+    detail       VARCHAR(255),
+    created_at   TIMESTAMPTZ  DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS driver_bot_join_requests_group
+    ON driver_bot_join_requests (company_slug, group_id, created_at);

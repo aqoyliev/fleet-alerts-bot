@@ -46,6 +46,9 @@ class _FakeDriverBot:
             return types.SimpleNamespace(status=answer)
         return answer
 
+    async def get_me(self):
+        return types.SimpleNamespace(id=self.id, username="driver_alerts_bot")
+
     async def get_chat(self, chat_id):
         self.get_chat_calls.append(chat_id)
         if self.chat_error is not None:
@@ -1075,7 +1078,8 @@ async def test_pti_failures_skip_without_falling_back(env, pti, caplog, setup, r
 async def test_bot_not_able_to_post_skips(env, pti, monkeypatch, caplog, answer, reason):
     joins = []
 
-    async def join(company_slug, unit, group_id, membership):
+    async def join(bot, company_slug, unit, group_id, membership, *, driver_name=None,
+                   dry_run=False):
         joins.append((company_slug, unit, group_id))
         return False
 
@@ -1095,8 +1099,9 @@ async def test_dry_run_line_has_everything_to_audit_the_route(env, pti, monkeypa
     monkeypatch.setattr(da.config, "DRIVER_ALERTS_DRY_RUN", True, raising=False)
     joins = []
 
-    async def join(*a):
-        joins.append(a)
+    async def join(bot, company_slug, unit, group_id, membership, *, driver_name=None,
+                   dry_run=False):
+        joins.append((company_slug, unit, group_id, driver_name, dry_run))
         return False
 
     monkeypatch.setattr(da.bot_membership, "request_bot_join", join)
@@ -1105,7 +1110,9 @@ async def test_dry_run_line_has_everything_to_audit_the_route(env, pti, monkeypa
         env.bot.members[-500] = "left"
         da.bot_membership.invalidate(-500)
         await _notify(env.store, 306, datetime(2026, 10, 5, 15, tzinfo=timezone.utc))
-    assert env.bot.calls == [] and env.email.sent == [] and joins == []
+    assert env.bot.calls == [] and env.email.sent == []
+    # The userbot step runs in DRY RUN too, told so (it only logs there).
+    assert joins == [("co", "T-120", -500, "John Smith", True)]
     assert env.bot.member_calls == [(-500, 777), (-500, 777)]     # checked in DRY RUN too
     first, second = [m for m in _decisions(caplog) if "DRY RUN" in m]
     for part in ("Event 305 co/T-120", "route=pti", "group=-500", "unit=T-120",
@@ -1176,6 +1183,91 @@ async def test_company_not_in_the_allowlist_is_ignored_before_the_claim(env, mon
 ])
 def test_name_check_sources(name, title, drivers, expected):
     assert da.name_check(name, title, drivers) == expected
+
+
+# ── the userbot adds a missing driver bot (utils/bot_join.py) ─────────────────────
+
+async def test_bot_added_by_the_userbot_sends_the_same_event(env, pti, monkeypatch, caplog):
+    joins = []
+
+    async def join(bot, company_slug, unit, group_id, membership, *, driver_name=None,
+                   dry_run=False):
+        joins.append((company_slug, unit, group_id, driver_name, dry_run))
+        env.bot.members[group_id] = "member"           # the userbot added it
+        await da.bot_membership.check(bot, group_id, use_cache=False)
+        return True
+
+    monkeypatch.setattr(da.bot_membership, "request_bot_join", join)
+    env.bot.members[-500] = "left"
+    with caplog.at_level("INFO", logger=da.logger.name):
+        await _notify(env.store, 320, _TS)
+    assert joins == [("co", "T-120", -500, "John Smith", False)]
+    assert [c[:2] for c in env.bot.calls] == [("video", -500)] and len(env.email.sent) == 1
+    n = env.store.notifications[320]
+    assert n["sent_group"] is True and n.get("skip_reason") is None
+    line = _decisions(caplog)[0]
+    assert "bot=member" in line and "→ sending (driver bot just added by the userbot)" in line
+    # A redelivery of the event is still claimed once.
+    await _notify(env.store, 320, _TS, save=False)
+    assert len(env.bot.calls) == 1
+
+
+async def test_no_join_attempt_on_a_name_mismatch(env, pti, monkeypatch):
+    joins = []
+
+    async def join(*a, **k):
+        joins.append(a)
+        return True
+
+    monkeypatch.setattr(da.bot_membership, "request_bot_join", join)
+    env.bot.members[-500] = "left"
+    _with_driver(monkeypatch, name="Mark Jones")
+    await _notify(env.store, 321, _TS)
+    assert joins == [] and env.store.notifications[321]["skip_reason"] == "name_mismatch"
+
+
+async def test_real_userbot_flow_adds_the_bot_and_sends(env, pti, monkeypatch):
+    import userbot_fakes as fx
+    ub = fx.install(monkeypatch)
+    ub.world.dialogs[-500] = fx.basic_chat(-500)
+    ub.world.perms[-500] = fx.perms(creator=True)
+
+    def on_add(request):
+        env.bot.members[-500] = "member"
+    ub.world.on_add = on_add
+    env.bot.members[-500] = "left"
+    await _notify(env.store, 322, _TS)
+    assert len(ub.world.requests) == 1 and ub.store.actions() == [("add", "added")]
+    assert [c[:2] for c in env.bot.calls] == [("video", -500)]
+    assert env.store.notifications[322]["sent_group"] is True
+
+
+async def test_real_userbot_flow_asks_hos_and_skips_the_event(env, pti, monkeypatch):
+    import userbot_fakes as fx
+    ub = fx.install(monkeypatch, company_name=None)
+    monkeypatch.setenv("HOS_USERNAMES_CO", "@hos_anna,@hos_bek")
+    env.bot.members[-500] = "left"
+    await _notify(env.store, 323, _TS)
+    await _notify(env.store, 324, datetime(2026, 10, 5, 16, tzinfo=timezone.utc))
+    assert ub.world.sent == [("hos_anna", "Can you please add me to this group?\nCO\nT-120 - John Smith")]
+    assert env.bot.calls == [] and env.email.sent == []
+    assert env.store.notifications[323]["skip_reason"] == "bot_not_in_group"
+    assert env.store.notifications[324]["skip_reason"] == "bot_not_in_group"
+
+
+async def test_real_userbot_flow_in_dry_run_only_logs(env, pti, monkeypatch, caplog):
+    import userbot_fakes as fx
+    ub = fx.install(monkeypatch)
+    monkeypatch.setattr(da.config, "DRIVER_ALERTS_DRY_RUN", True, raising=False)
+    ub.world.dialogs[-500] = fx.basic_chat(-500)
+    ub.world.perms[-500] = fx.perms(creator=True)
+    env.bot.members[-500] = "left"
+    with caplog.at_level("INFO"):
+        await _notify(env.store, 325, _TS)
+    assert ub.world.requests == [] and ub.world.sent == [] and ub.store.rows == []
+    assert env.bot.calls == [] and env.email.sent == []
+    assert "would add @driver_alerts_bot (unit T-120, group -500)" in caplog.text
+    assert "skipped (bot_not_in_group)" in caplog.text
 
 
 def test_company_enabled(monkeypatch):

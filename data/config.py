@@ -53,6 +53,38 @@ def pti_database_url(company_slug: str | None) -> str:
     return os.environ.get(PTI_DATABASE_URL_PREFIX + suffix, "").strip()
 
 
+def slug_env_suffix(company_slug: str | None) -> str:
+    """The slug as a variable-name suffix: upper-cased, anything not A-Z/0-9 as "_"."""
+    return re.sub(r"[^0-9A-Z]", "_", (company_slug or "").strip().upper())
+
+
+# The userbot (utils/userbot.py, utils/bot_join.py): a Telegram user account that adds
+# the driver bot to a driver group the bot is missing from, or asks HOS / the admin.
+# USERBOT_ENABLED is the kill switch (default off: the whole userbot path is skipped).
+# USERBOT_SESSION is a Telethon StringSession — a login, keep it secret, and never use
+# it from two places at once (Telegram may revoke it: AUTH_KEY_DUPLICATED).
+# USERBOT_USER_ID: the userbot account's own user id, where the driver bot sends the
+# "could not add" notices; empty = read once from Telegram (get_me).
+USERBOT_ENABLED = env.bool("USERBOT_ENABLED", False)
+USERBOT_SESSION = env.str("USERBOT_SESSION", "")
+USERBOT_API_ID = env.str("USERBOT_API_ID", "")
+USERBOT_API_HASH = env.str("USERBOT_API_HASH", "")
+USERBOT_USER_ID = env.str("USERBOT_USER_ID", "")
+# HOS staff the userbot asks to add it to a group it is not in: HOS_USERNAMES_<SLUG>
+# (slug as for PTI_DATABASE_URL_<SLUG>), a comma list of Telegram usernames, "@" optional,
+# e.g. HOS_USERNAMES_JRD=@hos_anna,@hos_bek. Empty/unset = the admin is told instead.
+HOS_USERNAMES_PREFIX = "HOS_USERNAMES_"
+
+
+def hos_usernames(company_slug: str | None) -> list[str]:
+    """The company's HOS usernames, without "@", in the configured order."""
+    suffix = slug_env_suffix(company_slug)
+    if not suffix:
+        return []
+    raw = os.environ.get(HOS_USERNAMES_PREFIX + suffix, "")
+    return [u.strip().lstrip("@").strip() for u in raw.split(",") if u.strip().lstrip("@").strip()]
+
+
 # The driver alerts run in their own Railway service (driver_service.py). web forwards
 # each cell_phone event to it at DRIVER_ALERTS_FORWARD_URL over the private network,
 # e.g. http://driver-alerts.railway.internal:8080/events, with the shared secret in the

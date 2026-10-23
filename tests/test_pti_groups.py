@@ -360,6 +360,9 @@ async def test_membership_is_cached_ten_minutes_per_chat(clock):
     assert len(bot.calls) == 4
 
 
-async def test_join_hook_does_nothing_yet():
+async def test_join_hook_does_nothing_while_the_userbot_is_off(monkeypatch):
+    monkeypatch.setattr(config, "USERBOT_ENABLED", False, raising=False)
+    bot = _Bot("left")
     m = bm.Membership("left", bm.REASON_NOT_IN_GROUP)
-    assert await bm.request_bot_join("jrd", "1304", -100, m) is False
+    assert await bm.request_bot_join(bot, "jrd", "1304", -100, m) is False
+    assert bot.calls == []
