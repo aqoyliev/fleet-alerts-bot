@@ -28,7 +28,8 @@ process) and the DM is retried.
 
 De-duplication: driver_bot_join_requests holds one row per action, written before it
 is taken. A group gets at most one add and one message (HOS or admin) per DEDUP_HOURS,
-whatever their outcome; an unreadable table means nothing is done (fail closed).
+whatever their outcome; an unreadable table means nothing is done (fail closed). HOS is
+asked only ONCE per group, ever (HOS_ONCE_HOURS): no repeat, no follow-up.
 
 DRY RUN (DRIVER_ALERTS_DRY_RUN): nothing outward and nothing written — no add, no DM,
 no /start; "would add" / "would message HOS @x" / "would notify admin" is logged with
@@ -63,6 +64,7 @@ ACTION_ADMIN = "admin_message"
 MESSAGE_ACTIONS = {ACTION_HOS, ACTION_ADMIN}
 
 DEDUP_HOURS = 24
+HOS_ONCE_HOURS = 24 * 365 * 10   # "ever": the owner wants HOS written to once per group
 ADD_RECHECK_DELAY = 2.0
 OUTAGE_NOTICE_INTERVAL = 3600.0
 
@@ -161,9 +163,9 @@ async def _bot_username(bot) -> str:
     return _bot_usernames[bot_id]
 
 
-def _dry_recent(ctx: _Ctx) -> set[str]:
+def _dry_recent(ctx: _Ctx, hours: int = DEDUP_HOURS) -> set[str]:
     done = _dry_done.get((ctx.company_slug, ctx.group_id), {})
-    horizon = _now() - DEDUP_HOURS * 3600
+    horizon = _now() - hours * 3600
     return {a for a, at in done.items() if at > horizon}
 
 
@@ -334,11 +336,14 @@ async def _run(ctx: _Ctx) -> bool:
 
     try:
         recent = await recent_join_actions(ctx.company_slug, ctx.group_id, DEDUP_HOURS)
+        hos_asked = ACTION_HOS in await recent_join_actions(ctx.company_slug, ctx.group_id,
+                                                            HOS_ONCE_HOURS)
     except Exception as e:
         logger.error(f"{ctx.tag}{ctx.where}: join history unreadable — doing nothing: {e}")
         return False
     if ctx.dry:
         recent = set(recent) | _dry_recent(ctx)
+        hos_asked = hos_asked or ACTION_HOS in _dry_recent(ctx, HOS_ONCE_HOURS)
     add_done, message_done = ACTION_ADD in recent, bool(recent & MESSAGE_ACTIONS)
     if add_done and message_done:
         logger.info(f"{ctx.tag}{ctx.where}: add and notice already done in the last "
@@ -369,6 +374,10 @@ async def _run(ctx: _Ctx) -> bool:
                         f"not retrying")
             return False
         return await _add(ctx, message_done)
+    if access.status == userbot.NOT_MEMBER and hos_asked:
+        logger.info(f"{ctx.tag}{ctx.where}: HOS was already asked once for this group — "
+                    f"not asking again")
+        return False
     if message_done:
         logger.info(f"{ctx.tag}{ctx.where}: a notice went out in the last {DEDUP_HOURS}h — "
                     f"not sending another")

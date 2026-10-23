@@ -340,17 +340,15 @@ async def test_dialogs_are_reread_for_a_group_the_userbot_was_just_added_to(ub, 
 
 # ── de-duplication ───────────────────────────────────────────────────────────────
 
-async def test_a_burst_sends_one_hos_message_per_24h(ub, monkeypatch):
+async def test_hos_is_asked_only_once_per_group_ever(ub, monkeypatch):
     monkeypatch.setenv("HOS_USERNAMES_JRD", "hos_anna")
     results = await asyncio.gather(*[_join(ub) for _ in range(5)])
     assert results == [False] * 5
     assert len(ub.world.sent) == 1 and ub.store.actions() == [("hos_message", "sent")]
-    ub.clock[0] += 23 * 3600
+    ub.clock[0] += 30 * 24 * 3600                       # a month later: still not again
     await _join(ub)
-    assert len(ub.world.sent) == 1
-    ub.clock[0] += 3600 + 1
-    await _join(ub)
-    assert len(ub.world.sent) == 2
+    assert len(ub.world.sent) == 1 and ub.bot.dms == []
+    assert ub.store.actions() == [("hos_message", "sent")]
 
 
 async def test_one_admin_message_per_24h(ub):
