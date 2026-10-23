@@ -1266,7 +1266,12 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str,
 
         for attempt in range(3):
             try:
-                return await _try_send_group(media)
+                by_url = any(_is_url(s) for s in media)
+                sent = await _try_send_group(media)
+                if is_video or by_url:
+                    how = "by URL" if by_url else "as uploaded bytes"
+                    logger.info(f"Media sent {how} to {chat_id} ({len(media)} item(s))")
+                return sent
             except MigrateToChat as e:
                 logger.warning(f"Group {chat_id} migrated to supergroup {e.migrate_to_chat_id} — updating DB and retrying")
                 await _migrate_group(chat_id, e.migrate_to_chat_id)
@@ -1289,8 +1294,12 @@ async def _send_with_retry(bot: Bot, chat_id: int, text: str,
                     fetched = [await _download(s) if _is_url(s) else s for s in media]
                     fetched = [s for s in fetched if s]
                     if fetched:
+                        logger.info(f"URL not accepted by Telegram — downloaded "
+                                    f"{sum(len(s) for s in fetched if isinstance(s, bytes))} bytes "
+                                    f"in {len(fetched)} item(s), sending as upload")
                         media[:] = fetched
                         continue
+                    logger.error(f"URL not accepted by Telegram and the download failed for {chat_id}")
                 await asyncio.sleep(5)
 
         # Last resort: text only so the alert is never lost
