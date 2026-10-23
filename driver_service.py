@@ -48,6 +48,10 @@ logger = logging.getLogger("driver_service")
 
 DEFAULT_PORT = 8080
 _SOURCES = ("motive", "samsara")
+# How long a Motive delivery that has no clip yet waits for the delivery that carries it
+# (usually 10-60 s later, sometimes ~5 min) before the driver gets a text-only alert.
+MEDIA_WAIT_S = 600
+_sleep = asyncio.sleep     # tests patch this
 # The forwarded event dict can carry Motive's GPS/speed arrays; well above that.
 _MAX_BODY = 4 * 1024 * 1024
 
@@ -112,14 +116,43 @@ def validate_payload(data) -> dict:
     }
 
 
+def _media_pending(p: dict) -> bool:
+    """A Motive delivery with no media URL. Motive often sends the event first without
+    camera_media at all (not only with available=true and null URLs) and redelivers it
+    with the clip once transcoded, so any media-less Motive delivery waits for that one;
+    a truck with no camera just gets its text-only alert MEDIA_WAIT_S later."""
+    return p["alert_source"] == "motive" and not p["video_urls"] and not p["image_urls"]
+
+
 async def process_event(p: dict) -> None:
     """Download the evidence, look up the Samsara key if needed, notify the driver.
-    Never raises (notify_driver itself never does)."""
+    A Motive delivery whose clip is still transcoding waits for the redelivery that
+    carries it, then falls back to a text-only alert (a no-op if that redelivery already
+    notified: notify_driver claims each event once). Never raises (notify_driver itself
+    never does)."""
     event_id = p["event_id"]
     try:
         if not driver_alerts.is_enabled():
             logger.warning(f"[driver-service] Event {event_id}: DRIVER_ALERTS_BOT_TOKEN unset — "
                            f"not notifying the driver")
+            return
+        if _media_pending(p):
+            logger.info(f"[driver-service] Event {event_id}: media pending, waiting for the "
+                        f"delivery with the clip ({MEDIA_WAIT_S}s)")
+            await _sleep(MEDIA_WAIT_S)
+            await notify_driver(
+                company_slug=p["company_slug"],
+                event=p["event"],
+                event_id=event_id,
+                vehicle=p["vehicle"],
+                occurred_at=p["occurred_at"],
+                base_text=p["base_text"],
+                media=None,
+                is_video=False,
+                video_urls=[],
+                image_urls=[],
+                clip_wait_over=True,
+            )
             return
         media, is_video = await download_media(p["video_urls"], p["image_urls"])
         samsara_api_key = None

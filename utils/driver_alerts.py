@@ -455,11 +455,13 @@ async def notify_driver(*, company_slug: str, event: dict, event_id: int | None,
                         occurred_at: datetime | None, base_text: str,
                         media: list[bytes] | None, is_video: bool,
                         video_urls: list[str] | None, image_urls: list[str] | None,
-                        samsara_api_key: str | None = None) -> None:
+                        samsara_api_key: str | None = None,
+                        clip_wait_over: bool = False) -> None:
     """Notify the driver of a cell_phone event: driver group (via the driver bot) and
     email, and record the driver on the violation. A Samsara event first waits on its
     coaching state (see _samsara_gate) — minutes, so callers run it in the background.
-    Never raises."""
+    clip_wait_over: the caller has waited for the clip and none came — send text-only
+    instead of deferring to a later delivery (see _clip_still_coming). Never raises."""
     try:
         bot = _get_driver_bot()
         if bot is None:
@@ -469,7 +471,7 @@ async def notify_driver(*, company_slug: str, event: dict, event_id: int | None,
             logger.warning(f"[driver] Event without an id for {company_slug}/{vehicle} — "
                            f"cannot be made idempotent, not notifying the driver")
             return
-        if _clip_still_coming(event, video_urls, image_urls):
+        if not clip_wait_over and _clip_still_coming(event, video_urls, image_urls):
             logger.info(f"[driver] Event {event_id}: clip not ready yet — notifying the driver "
                         f"on the delivery that carries it")
             return

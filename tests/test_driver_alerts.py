@@ -466,6 +466,19 @@ async def test_motive_clip_pending_waits_for_the_delivery_with_media(env):
     assert len(env.bot.calls) == 1
 
 
+async def test_motive_clip_wait_over_sends_text_only_then_the_late_clip_is_a_redelivery(env):
+    env.store.groups["T-120"] = -100
+    ts = datetime(2026, 10, 5, 15, tzinfo=timezone.utc)
+    pending = {"id": "41", "type": "cell_phone", "camera_media": {"available": True}}
+    env.store.add_violation(41, "T-120", ts)
+    await da.notify_driver(company_slug="co", event=pending, event_id=41, vehicle="T-120",
+                           occurred_at=ts, base_text="x", media=None, is_video=False,
+                           video_urls=[], image_urls=[], clip_wait_over=True)
+    assert len(env.bot.calls) == 1 and 41 in env.store.notifications
+    await _notify(env.store, 41, ts, save=False)
+    assert len(env.bot.calls) == 1
+
+
 async def test_kicked_group_is_deactivated_and_migration_followed(env, monkeypatch):
     env.store.groups["T-120"] = -100
     env.bot.fail_with = [BotKicked("Forbidden: bot was kicked from the group chat")]

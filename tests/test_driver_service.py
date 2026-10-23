@@ -213,6 +213,106 @@ async def test_processing_errors_are_contained(client, fakes, monkeypatch, caplo
     assert (await client.get("/health")).status == 200      # still serving
 
 
+# ── Motive clip still transcoding ────────────────────────────────────────────────
+
+_PENDING = {"id": "901", "type": "cell_phone", "camera_media": {"available": True}}
+
+
+@pytest.fixture
+def waits(monkeypatch):
+    """Replaces the media wait: records it and parks until released."""
+    rec = {"slept": [], "release": asyncio.Event()}
+
+    async def fake_sleep(seconds):
+        rec["slept"].append(seconds)
+        await rec["release"].wait()
+
+    monkeypatch.setattr(ds, "_sleep", fake_sleep)
+    return rec
+
+
+def _motive_body(**over):
+    over = {"video_urls": [], "image_urls": [], "event": _PENDING, **over}
+    return _body(alert_source="motive", event_id=901, raw_event_id="901", **over)
+
+
+async def test_motive_media_pending_waits_then_sends_text_only(client, fakes, waits, caplog):
+    with caplog.at_level("INFO", logger=ds.logger.name):
+        assert (await _post(client, _motive_body())).status == 202
+        await asyncio.sleep(0.05)
+    assert waits["slept"] == [ds.MEDIA_WAIT_S] == [600]
+    assert fakes["notify"] == [] and fakes["downloads"] == []       # still waiting
+    assert any("media pending" in r.getMessage() for r in caplog.records)
+    waits["release"].set()
+    await _drain()
+    assert len(fakes["notify"]) == 1
+    n = fakes["notify"][0]
+    assert n["event_id"] == 901 and n["media"] is None and n["is_video"] is False
+    assert n["video_urls"] == [] and n["image_urls"] == [] and n["clip_wait_over"] is True
+    assert "samsara_api_key" not in n and fakes["creds"] == []
+
+
+async def test_pending_then_media_delivery_sends_only_once(client, fakes, waits, monkeypatch):
+    claimed, sent = set(), []
+
+    async def claiming_notify(**kwargs):         # notify_driver's _claim, in miniature
+        if kwargs["event_id"] in claimed:
+            return
+        claimed.add(kwargs["event_id"])
+        sent.append(kwargs)
+
+    monkeypatch.setattr(ds, "notify_driver", claiming_notify)
+    assert (await _post(client, _motive_body())).status == 202
+    await asyncio.sleep(0.05)
+    assert (await _post(client, _motive_body(video_urls=["http://clip.mp4"]))).status == 202
+    await asyncio.sleep(0.05)
+    assert len(sent) == 1 and sent[0]["media"] == [b"VID"]          # the media one went at once
+    waits["release"].set()
+    await _drain()
+    assert len(sent) == 1                                           # the fallback hit the claim
+    assert waits["slept"] == [ds.MEDIA_WAIT_S]
+
+
+async def test_motive_with_media_does_not_wait(client, fakes, waits):
+    for urls in ({"video_urls": ["http://clip.mp4"], "image_urls": []},
+                 {"video_urls": [], "image_urls": ["http://p.jpg"]}):
+        fakes["notify"].clear()
+        assert (await _post(client, _motive_body(**urls))).status == 202
+        await _drain()
+        assert len(fakes["notify"]) == 1
+        assert "clip_wait_over" not in fakes["notify"][0]
+    assert waits["slept"] == []
+
+
+async def test_samsara_does_not_wait_for_media(client, fakes, waits):
+    assert (await _post(client, _body(video_urls=[], image_urls=[],
+                                      event={"id": "uuid-abc", "_source": "samsara",
+                                             "camera_media": {"available": True}}))).status == 202
+    await _drain()
+    assert waits["slept"] == [] and len(fakes["notify"]) == 1
+
+
+@pytest.mark.parametrize("camera_media", [None, {}, {"available": False}, "yes"])
+async def test_motive_without_media_urls_always_waits(client, fakes, waits, camera_media):
+    # Motive's first delivery may carry no camera_media at all; the clip still follows.
+    event = {"id": "901", "type": "cell_phone", "camera_media": camera_media}
+    assert (await _post(client, _motive_body(event=event))).status == 202
+    await asyncio.sleep(0.05)
+    assert waits["slept"] == [ds.MEDIA_WAIT_S] and fakes["notify"] == []
+    waits["release"].set()
+    await _drain()
+    assert len(fakes["notify"]) == 1 and fakes["notify"][0]["clip_wait_over"] is True
+
+
+async def test_shutdown_cancels_a_waiting_notification(client, fakes, waits):
+    assert (await _post(client, _motive_body())).status == 202
+    await asyncio.sleep(0.05)
+    task = next(iter(ds._tasks))
+    task.cancel()
+    await _drain()
+    assert fakes["notify"] == [] and ds._tasks == set()
+
+
 async def test_health(client):
     r = await client.get("/health")
     assert r.status == 200 and await r.text() == "OK"
