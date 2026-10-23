@@ -14,7 +14,9 @@ Start command (Procfile-style; the Procfile itself only runs `web`):
 Endpoints:
     POST /events  — X-Forward-Secret must equal DRIVER_ALERTS_FORWARD_SECRET (401
                     otherwise). A valid payload is answered 202 at once and processed
-                    in the background; a malformed one gets 400.
+                    in the background; a malformed one gets 400. An event of a company
+                    not in DRIVER_ALERTS_COMPANIES (when set) is answered 202 and
+                    dropped: no download, no DB write, no claim.
     GET  /health  — 200.
 
 Listens on PORT (default 8080) on 0.0.0.0 and :: (Railway's private network is IPv6).
@@ -29,12 +31,13 @@ import logging
 import os
 import socket
 import sys
+import time
 from datetime import datetime, timezone
 
 from aiohttp import web
 
 from data import config
-from utils import driver_alerts
+from utils import driver_alerts, pti_groups
 from utils.db_api import init_pool, close_pool
 from utils.db_api.companies import get_samsara_credentials
 from utils.driver_alerts import notify_driver
@@ -57,6 +60,10 @@ _MAX_BODY = 4 * 1024 * 1024
 
 # In-flight notifications, kept referenced until done (the loop holds only weak refs).
 _tasks: set[asyncio.Task] = set()
+
+# A dropped (not allowlisted) company is logged at INFO at most this often.
+IGNORED_LOG_INTERVAL = 3600.0
+_ignored_logged_at: dict[str, float] = {}
 
 
 class PayloadError(ValueError):
@@ -193,6 +200,18 @@ def _spawn(coro, what: str) -> asyncio.Task:
     return task
 
 
+def _log_ignored(p: dict) -> None:
+    slug = p["company_slug"].lower()
+    logger.debug(f"[driver-service] Ignored {p['alert_source']} event {p['event_id']} "
+                 f"({p['company_slug']}/{p['vehicle']}): not in DRIVER_ALERTS_COMPANIES")
+    now = time.monotonic()
+    last = _ignored_logged_at.get(slug)
+    if last is None or now - last >= IGNORED_LOG_INTERVAL:
+        _ignored_logged_at[slug] = now
+        logger.info(f"[driver-service] Ignoring {p['company_slug']} events: not in "
+                    f"DRIVER_ALERTS_COMPANIES ({', '.join(config.DRIVER_ALERTS_COMPANIES)})")
+
+
 def _secret_ok(expected: str, provided: str | None) -> bool:
     if not expected or not provided:
         return False
@@ -213,6 +232,9 @@ async def handle_events(request: web.Request) -> web.Response:
     except PayloadError as e:
         logger.warning(f"[driver-service] Rejected malformed payload: {e}")
         return web.json_response({"error": str(e)}, status=400)
+    if not driver_alerts.company_enabled(p["company_slug"]):
+        _log_ignored(p)
+        return web.json_response({"status": "ignored"}, status=202)
     logger.info(f"[driver-service] Accepted {p['alert_source']} event {p['event_id']} "
                 f"({p['company_slug']}/{p['vehicle']}, raw id {p['raw_event_id']})")
     _spawn(process_event(p), f"driver notification {p['event_id']}")
@@ -225,9 +247,14 @@ async def health(_request: web.Request) -> web.Response:
 
 async def _on_startup(_app: web.Application) -> None:
     await init_pool()
+    pti_note = ", ".join(f"{slug}:{'yes' if pti_groups.is_configured(slug) else 'no'}"
+                         for slug in config.DRIVER_ALERTS_COMPANIES) or "(per company)"
     logger.info(f"[driver-service] Ready — driver bot "
                 f"{'configured' if driver_alerts.is_enabled() else 'NOT configured (nothing will be sent)'}, "
                 f"DRY_RUN={config.DRIVER_ALERTS_DRY_RUN}, "
+                f"companies={','.join(config.DRIVER_ALERTS_COMPANIES) or '(all)'}, "
+                f"name_mismatch={config.DRIVER_ALERTS_NAME_MISMATCH}, "
+                f"pti DB={pti_note}, "
                 f"COUNT_FROM={config.DRIVER_ALERTS_COUNT_FROM or '(day start)'}, "
                 f"Vitality={'on' if config.VITALITY_PROVIDER_KEY else 'off'}, "
                 f"email={'on' if config.RESEND_API_KEY and config.EMAIL_FROM else 'off'}")
@@ -254,7 +281,8 @@ async def _on_cleanup(_app: web.Application) -> None:
         logger.warning(f"[driver-service] Could not close the driver bot session: {e}")
     for name, closer in (("download", close_download_session),
                          ("Vitality", lambda: _close_module("utils.vitality")),
-                         ("email", lambda: _close_module("utils.email_sender"))):
+                         ("email", lambda: _close_module("utils.email_sender")),
+                         ("pti database", pti_groups.close)):
         try:
             await closer()
         except Exception as e:

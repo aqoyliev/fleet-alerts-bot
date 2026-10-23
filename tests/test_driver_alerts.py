@@ -9,12 +9,13 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
-from aiogram.utils.exceptions import BotKicked, MigrateToChat
+from aiogram.utils.exceptions import BotKicked, ChatNotFound, MigrateToChat
 
 import utils
 import utils.driver_alerts as da
 import utils.driver_lookup as dl
 import utils.webhook_handler as wh
+from utils import pti_groups
 from utils.db_api import driver_groups, violations
 from utils.samsara import safety
 
@@ -25,12 +26,25 @@ _GROUP_TITLE = "T-120 SMITH, JOHN / LEE, ANN"
 
 
 class _FakeDriverBot:
+    id = 777
+
     def __init__(self, fail_with=None):
         self.calls = []          # (kind, chat_id, caption_or_text)
         self.fail_with = list(fail_with or [])
         self.titles = {}         # chat_id -> title; others get _GROUP_TITLE
         self.chat_error = None   # raised by get_chat when set
         self.get_chat_calls = []
+        self.members = {}        # chat_id -> ChatMember-like or Exception; others: "member"
+        self.member_calls = []   # (chat_id, user_id)
+
+    async def get_chat_member(self, chat_id, user_id):
+        self.member_calls.append((chat_id, user_id))
+        answer = self.members.get(chat_id, "member")
+        if isinstance(answer, Exception):
+            raise answer
+        if isinstance(answer, str):
+            return types.SimpleNamespace(status=answer)
+        return answer
 
     async def get_chat(self, chat_id):
         self.get_chat_calls.append(chat_id)
@@ -131,6 +145,9 @@ class _FakeStore:
             self.notifications[event_id].update(coaching_state=coaching_state,
                                                 skip_reason=skip_reason)
 
+        async def record_name_match(event_id, name_match):
+            self.notifications[event_id].update(name_match=name_match)
+
         async def get_group(company_slug, vehicle):
             return self.groups.get(vehicle)
 
@@ -148,6 +165,7 @@ class _FakeStore:
         monkeypatch.setattr(da, "count_driver_cell_phone_events", count)
         monkeypatch.setattr(da, "update_violation_coaching_state", update_coaching)
         monkeypatch.setattr(da, "_record_gate", record_gate)
+        monkeypatch.setattr(da, "_record_name_match", record_name_match)
         monkeypatch.setattr(da, "get_driver_group", get_group)
         monkeypatch.setattr(da, "deactivate_driver_group", deactivate)
         monkeypatch.setattr(da, "migrate_driver_group", migrate)
@@ -197,7 +215,11 @@ def env(monkeypatch):
     bot = _FakeDriverBot()
     monkeypatch.setattr(da, "_get_driver_bot", lambda: bot)
     monkeypatch.setattr(da.config, "DRIVER_ALERTS_DRY_RUN", False, raising=False)
+    monkeypatch.setattr(da.config, "DRIVER_ALERTS_COMPANIES", [], raising=False)
+    monkeypatch.setattr(da.config, "DRIVER_ALERTS_NAME_MISMATCH", "skip", raising=False)
+    monkeypatch.delenv("PTI_DATABASE_URL_CO", raising=False)   # "co" routes from driver_groups
     monkeypatch.setattr(da, "_title_cache", {})
+    monkeypatch.setattr(da.bot_membership, "_cache", {})
     email = _fake_email_module(monkeypatch)
     _with_driver(monkeypatch, email="driver@example.com")
     return types.SimpleNamespace(store=store, bot=bot, email=email)
@@ -568,34 +590,60 @@ async def test_vitality_match_sends_and_records_name_match_true(env):
     assert n.get("skip_reason") is None
 
 
-async def test_name_mismatch_still_sends_and_records_name_match_false(env, caplog):
+async def test_name_mismatch_skips_by_default_and_records_name_match_false(env, caplog):
     env.store.groups["T-120"] = -100
     env.bot.titles[-100] = "T-120 JONES, MARK"
     with caplog.at_level("INFO", logger=da.logger.name):
         await _notify(env.store, 204, _TS)
-    assert len(env.bot.calls) == 1 and env.bot.calls[0][1] == -100
+    assert env.bot.calls == [] and env.email.sent == []
     n = env.store.notifications[204]
-    assert n["name_match"] is False and n["sent_group"] is True
+    assert n["name_match"] is False and n["skip_reason"] == da.SKIP_NAME_MISMATCH == "name_mismatch"
+    assert "sent_group" not in n
     info = [r.getMessage() for r in caplog.records
-            if r.levelname == "INFO" and "-100" in r.getMessage() and "T-120" in r.getMessage()
-            and "not in the title" in r.getMessage()]
-    assert len(info) == 1 and "Smith" not in info[0] and "JONES" not in info[0]
+            if r.levelname == "INFO" and "group=-100" in r.getMessage()]
+    assert len(info) == 1 and "skipped (name_mismatch)" in info[0]
+    assert "name_match=False (none)" in info[0] and "JONES" not in info[0]
 
 
-async def test_unreadable_title_sends_and_records_name_match_none(env, caplog):
+async def test_name_mismatch_send_mode_still_sends(env, monkeypatch, caplog):
+    monkeypatch.setattr(da.config, "DRIVER_ALERTS_NAME_MISMATCH", "send", raising=False)
+    env.store.groups["T-120"] = -100
+    env.bot.titles[-100] = "T-120 JONES, MARK"
+    with caplog.at_level("INFO", logger=da.logger.name):
+        await _notify(env.store, 224, _TS)
+    assert len(env.bot.calls) == 1 and env.bot.calls[0][1] == -100
+    n = env.store.notifications[224]
+    assert n["name_match"] is False and n["sent_group"] is True
+    assert any("sending anyway" in r.getMessage() for r in caplog.records)
+
+
+async def test_unknown_mismatch_mode_fails_closed(env, monkeypatch):
+    monkeypatch.setattr(da.config, "DRIVER_ALERTS_NAME_MISMATCH", "maybe", raising=False)
+    env.store.groups["T-120"] = -100
+    env.bot.titles[-100] = "T-120 JONES, MARK"
+    await _notify(env.store, 225, _TS)
+    assert env.bot.calls == [] and env.store.notifications[225]["skip_reason"] == "name_mismatch"
+
+
+async def test_unreadable_title_is_name_unverified(env, monkeypatch, caplog):
     env.store.groups["T-120"] = -100
     env.bot.chat_error = RuntimeError("Bad Request: chat not found")
     with caplog.at_level("WARNING", logger=da.logger.name):
         await _notify(env.store, 205, _TS)
-    assert len(env.bot.calls) == 1
+    assert env.bot.calls == [] and env.email.sent == []
     n = env.store.notifications[205]
-    assert n["name_match"] is None and n["sent_group"] is True
+    assert n["name_match"] is None and n["skip_reason"] == da.SKIP_NAME_UNVERIFIED
     assert any(r.levelname == "WARNING" and "-100" in r.getMessage() for r in caplog.records)
 
     env.bot.chat_error = None
     env.bot.titles[-100] = ""        # a chat without a title
     await _notify(env.store, 206, _TS)
-    assert env.store.notifications[206]["name_match"] is None and len(env.bot.calls) == 2
+    assert env.store.notifications[206]["skip_reason"] == da.SKIP_NAME_UNVERIFIED
+
+    # send mode: sent, name_match NULL.
+    monkeypatch.setattr(da.config, "DRIVER_ALERTS_NAME_MISMATCH", "send", raising=False)
+    await _notify(env.store, 226, _TS)
+    assert env.store.notifications[226]["name_match"] is None and len(env.bot.calls) == 1
 
 
 async def test_no_group_means_no_title_lookup_and_no_name_match(env):
@@ -630,7 +678,8 @@ async def test_failed_title_read_is_not_cached(env):
     assert env.store.notifications[212]["name_match"] is True
 
 
-async def test_migrated_group_title_is_treated_as_unknown(env):
+async def test_migrated_group_title_is_treated_as_unknown(env, monkeypatch):
+    monkeypatch.setattr(da.config, "DRIVER_ALERTS_NAME_MISMATCH", "send", raising=False)
     env.store.groups["T-120"] = -100
     migrate = MigrateToChat("Group migrated to supergroup")
     migrate.migrate_to_chat_id = -1009
@@ -931,3 +980,207 @@ async def test_background_task_failure_is_logged(caplog):
         await asyncio.sleep(0)
     assert wh._background_tasks == set()
     assert any("Background test job failed" in r.getMessage() for r in caplog.records)
+
+
+# ── live pti routing, name check, bot membership ─────────────────────────────────
+
+_PTI_TITLE = "T-120 SMITH, JOHN / LEE, ANN"
+
+
+@pytest.fixture
+def pti(env, monkeypatch):
+    """Company "co" has a pti database; its usable groups are `rec["groups"]` (or the
+    refresh raises `rec["error"]`)."""
+    monkeypatch.setenv("PTI_DATABASE_URL_CO", "postgresql://pti/co")
+    for name in ("_pools", "_snapshots", "_failed_at", "_locks"):
+        monkeypatch.setattr(pti_groups, name, {})
+    rec = {"groups": [pti_groups.PtiGroup(-500, _PTI_TITLE, "T-120", ("Johnny S", "Ann Lee"))],
+           "error": None, "calls": 0}
+
+    async def fetch(company_slug):
+        rec["calls"] += 1
+        if rec["error"] is not None:
+            raise rec["error"]
+        return tuple(rec["groups"])
+
+    monkeypatch.setattr(pti_groups, "fetch_usable_groups", fetch)
+    return rec
+
+
+def _decisions(caplog):
+    return [r.getMessage() for r in caplog.records if "route=" in r.getMessage()]
+
+
+async def test_pti_group_is_used_and_driver_groups_is_not(env, pti, caplog):
+    env.store.groups["T-120"] = -100          # a stale import pointing elsewhere
+    with caplog.at_level("INFO", logger=da.logger.name):
+        await _notify(env.store, 300, _TS)
+    assert [c[:2] for c in env.bot.calls] == [("video", -500)]
+    assert env.bot.get_chat_calls == []       # the pti title is used, not Telegram's
+    assert env.bot.member_calls == [(-500, 777)]
+    n = env.store.notifications[300]
+    assert n["sent_group"] is True and n["name_match"] is True
+    line = _decisions(caplog)[0]
+    assert "route=pti group=-500 unit=T-120" in line and "(title)" in line and "→ sending" in line
+
+
+async def test_pti_group_drivers_name_matches_when_the_title_does_not(env, pti, caplog):
+    pti["groups"] = [pti_groups.PtiGroup(-500, "T-120 JONES, MARK", "T-120",
+                                         ("Mark Jones", "John Smith"))]
+    with caplog.at_level("INFO", logger=da.logger.name):
+        await _notify(env.store, 301, _TS)
+    assert env.bot.calls[0][1] == -500
+    assert env.store.notifications[301]["name_match"] is True
+    assert "name_match=True (group_drivers)" in _decisions(caplog)[0]
+
+
+async def test_pti_name_mismatch_is_skipped(env, pti, caplog):
+    pti["groups"] = [pti_groups.PtiGroup(-500, "T-120 JONES, MARK", "T-120", ("Mark Jones",))]
+    with caplog.at_level("INFO", logger=da.logger.name):
+        await _notify(env.store, 302, _TS)
+    assert env.bot.calls == [] and env.email.sent == []
+    n = env.store.notifications[302]
+    assert n["skip_reason"] == "name_mismatch" and n["name_match"] is False
+    assert "name_match=False (none)" in _decisions(caplog)[0]
+
+
+@pytest.mark.parametrize("setup,reason", [
+    ({"groups": []}, "pti_no_group"),
+    ({"groups": [pti_groups.PtiGroup(-500, _PTI_TITLE, "T-120"),
+                 pti_groups.PtiGroup(-501, _PTI_TITLE, "T120")]}, "pti_ambiguous"),
+    ({"error": OSError("connection refused")}, "pti_unavailable"),
+])
+async def test_pti_failures_skip_without_falling_back(env, pti, caplog, setup, reason):
+    pti.update(setup)
+    env.store.groups["T-120"] = -100          # must not be used
+    with caplog.at_level("INFO", logger=da.logger.name):
+        await _notify(env.store, 303, _TS)
+    assert env.bot.calls == [] and env.email.sent == [] and env.bot.member_calls == []
+    n = env.store.notifications[303]
+    assert n["skip_reason"] == reason and n["ordinal"] == 1 and "sent_group" not in n
+    line = _decisions(caplog)[0]
+    assert f"skipped ({reason})" in line and "group=none" in line
+    if reason == "pti_ambiguous":
+        assert "-500 (unit T-120)" in line and "-501 (unit T120)" in line
+
+
+@pytest.mark.parametrize("answer,reason", [
+    ("left", "bot_not_in_group"),
+    ("kicked", "bot_not_in_group"),
+    (ChatNotFound("Bad Request: chat not found"), "bot_not_in_group"),
+    (types.SimpleNamespace(status="restricted", is_member=True, can_send_messages=False),
+     "bot_cannot_post"),
+    (RuntimeError("timeout"), "bot_check_failed"),
+])
+async def test_bot_not_able_to_post_skips(env, pti, monkeypatch, caplog, answer, reason):
+    joins = []
+
+    async def join(company_slug, unit, group_id, membership):
+        joins.append((company_slug, unit, group_id))
+        return False
+
+    monkeypatch.setattr(da.bot_membership, "request_bot_join", join)
+    env.bot.members[-500] = answer
+    with caplog.at_level("INFO", logger=da.logger.name):
+        await _notify(env.store, 304, _TS)
+    assert env.bot.calls == [] and env.email.sent == []
+    n = env.store.notifications[304]
+    assert n["skip_reason"] == reason and n["name_match"] is True
+    line = _decisions(caplog)[0]
+    assert f"skipped ({reason})" in line and "group=-500 unit=T-120" in line
+    assert joins == ([("co", "T-120", -500)] if reason == "bot_not_in_group" else [])
+
+
+async def test_dry_run_line_has_everything_to_audit_the_route(env, pti, monkeypatch, caplog):
+    monkeypatch.setattr(da.config, "DRIVER_ALERTS_DRY_RUN", True, raising=False)
+    joins = []
+
+    async def join(*a):
+        joins.append(a)
+        return False
+
+    monkeypatch.setattr(da.bot_membership, "request_bot_join", join)
+    with caplog.at_level("INFO", logger=da.logger.name):
+        await _notify(env.store, 305, datetime(2026, 10, 5, 14, tzinfo=timezone.utc))
+        env.bot.members[-500] = "left"
+        da.bot_membership.invalidate(-500)
+        await _notify(env.store, 306, datetime(2026, 10, 5, 15, tzinfo=timezone.utc))
+    assert env.bot.calls == [] and env.email.sent == [] and joins == []
+    assert env.bot.member_calls == [(-500, 777), (-500, 777)]     # checked in DRY RUN too
+    first, second = [m for m in _decisions(caplog) if "DRY RUN" in m]
+    for part in ("Event 305 co/T-120", "route=pti", "group=-500", "unit=T-120",
+                 "driver='John Smith'", "name_match=True (title)", "bot=member",
+                 "#1 today", "→ would send"):
+        assert part in first, part
+    assert "bot=left" in second and "#2 today" in second and "skipped (bot_not_in_group)" in second
+    assert env.store.notifications[306]["skip_reason"] == "bot_not_in_group"
+
+
+async def test_membership_is_cached_across_events_and_reset_by_a_failed_send(env, pti):
+    await _notify(env.store, 307, datetime(2026, 10, 5, 13, tzinfo=timezone.utc))
+    await _notify(env.store, 308, datetime(2026, 10, 5, 14, tzinfo=timezone.utc))
+    assert len(env.bot.member_calls) == 1 and len(env.bot.calls) == 2
+    env.bot.fail_with = [ChatNotFound("Bad Request: chat not found")]
+    await _notify(env.store, 309, datetime(2026, 10, 5, 15, tzinfo=timezone.utc))
+    assert env.store.notifications[309]["sent_group"] is False
+    await _notify(env.store, 310, datetime(2026, 10, 5, 16, tzinfo=timezone.utc))
+    assert len(env.bot.member_calls) == 2
+
+
+async def test_driver_groups_path_checks_membership_too(env, caplog):
+    env.store.groups["T-120"] = -100
+    env.bot.members[-100] = "left"
+    with caplog.at_level("INFO", logger=da.logger.name):
+        await _notify(env.store, 311, _TS)
+    assert env.bot.calls == [] and env.email.sent == []
+    assert env.store.notifications[311]["skip_reason"] == "bot_not_in_group"
+    assert "route=driver_groups group=-100" in _decisions(caplog)[0]
+
+
+async def test_driver_groups_migration_is_followed_for_the_next_event(env):
+    env.store.groups["T-120"] = -100
+    migrate = MigrateToChat("Group migrated to supergroup")
+    migrate.migrate_to_chat_id = -1009
+    env.bot.members[-100] = migrate
+    await _notify(env.store, 312, _TS)
+    assert env.bot.calls == [] and env.store.migrated == [(-100, -1009)]
+    assert env.store.notifications[312]["skip_reason"] == "group_migrated"
+
+
+async def test_pti_migration_does_not_touch_driver_groups(env, pti):
+    migrate = MigrateToChat("Group migrated to supergroup")
+    migrate.migrate_to_chat_id = -1009
+    env.bot.members[-500] = migrate
+    await _notify(env.store, 313, _TS)
+    assert env.bot.calls == [] and env.store.migrated == []
+    assert env.store.notifications[313]["skip_reason"] == "group_migrated"
+
+
+async def test_company_not_in_the_allowlist_is_ignored_before_the_claim(env, monkeypatch):
+    monkeypatch.setattr(da.config, "DRIVER_ALERTS_COMPANIES", ["jrd"], raising=False)
+    env.store.groups["T-120"] = -100
+    await _notify(env.store, 314, _TS)
+    assert env.store.notifications == {} and env.bot.calls == []
+    monkeypatch.setattr(da.config, "DRIVER_ALERTS_COMPANIES", ["jrd", "co"], raising=False)
+    await _notify(env.store, 314, _TS, save=False)
+    assert len(env.bot.calls) == 1
+
+
+@pytest.mark.parametrize("name,title,drivers,expected", [
+    ("John Smith", "T-120 SMITH, JOHN", (), (True, "title")),
+    ("John Smith", "T-120 JONES, MARK", ("Mark", "John Smith"), (True, "group_drivers")),
+    ("John Smith", "T-120 JONES, MARK", ("John",), (False, "none")),
+    ("John Smith", "", (), (None, "unknown")),
+    ("John Smith", None, ("  ",), (None, "unknown")),
+    ("John Smith", "", ("Smith John",), (True, "group_drivers")),
+])
+def test_name_check_sources(name, title, drivers, expected):
+    assert da.name_check(name, title, drivers) == expected
+
+
+def test_company_enabled(monkeypatch):
+    monkeypatch.setattr(da.config, "DRIVER_ALERTS_COMPANIES", [], raising=False)
+    assert da.company_enabled("anything")
+    monkeypatch.setattr(da.config, "DRIVER_ALERTS_COMPANIES", ["jrd"], raising=False)
+    assert da.company_enabled("JRD ") and not da.company_enabled("acme")
+    assert not da.company_enabled(None)

@@ -51,6 +51,8 @@ def fakes(monkeypatch):
     monkeypatch.setattr(ds, "download_media", fake_download)
     monkeypatch.setattr(ds, "get_samsara_credentials", fake_creds)
     monkeypatch.setattr(ds.driver_alerts, "is_enabled", lambda: True)
+    monkeypatch.setattr(ds.config, "DRIVER_ALERTS_COMPANIES", [])
+    monkeypatch.setattr(ds, "_ignored_logged_at", {})
     return rec
 
 
@@ -211,6 +213,64 @@ async def test_processing_errors_are_contained(client, fakes, monkeypatch, caplo
     assert fakes["notify"] == []
     assert any("disk full" in r.getMessage() for r in caplog.records)
     assert (await client.get("/health")).status == 200      # still serving
+
+
+# ── company allowlist (DRIVER_ALERTS_COMPANIES) ──────────────────────────────────
+
+async def test_company_not_allowed_is_202_and_untouched(client, fakes, monkeypatch, caplog):
+    monkeypatch.setattr(ds.config, "DRIVER_ALERTS_COMPANIES", ["jrd"])
+    claims = []
+    monkeypatch.setattr(ds.driver_alerts, "_claim", lambda *a: claims.append(a))
+    with caplog.at_level("DEBUG", logger=ds.logger.name):
+        for event_id in (1, 2, 3):
+            r = await _post(client, _body(event_id=event_id))
+            assert r.status == 202 and (await r.json())["status"] == "ignored"
+        await _drain()
+    assert fakes["notify"] == [] and fakes["downloads"] == [] and fakes["creds"] == []
+    assert claims == [] and ds._tasks == set()
+    info = [r for r in caplog.records if r.levelname == "INFO" and "Ignoring co" in r.getMessage()]
+    debug = [r for r in caplog.records if r.levelname == "DEBUG" and "Ignored" in r.getMessage()]
+    assert len(info) == 1 and len(debug) == 3
+
+
+async def test_ignored_company_is_logged_again_after_an_hour(client, fakes, monkeypatch, caplog):
+    monkeypatch.setattr(ds.config, "DRIVER_ALERTS_COMPANIES", ["jrd"])
+    now = [5000.0]
+    monkeypatch.setattr(ds.time, "monotonic", lambda: now[0])
+    with caplog.at_level("INFO", logger=ds.logger.name):
+        await _post(client, _body())
+        now[0] += ds.IGNORED_LOG_INTERVAL - 1
+        await _post(client, _body())
+        now[0] += 2
+        await _post(client, _body())
+    assert sum("Ignoring co" in r.getMessage() for r in caplog.records) == 2
+
+
+async def test_allowed_company_is_processed_whatever_the_case(client, fakes, monkeypatch):
+    monkeypatch.setattr(ds.config, "DRIVER_ALERTS_COMPANIES", ["jrd"])
+    r = await _post(client, _body(company_slug="JRD"))
+    assert r.status == 202 and (await r.json())["status"] == "accepted"
+    await _drain()
+    assert len(fakes["notify"]) == 1 and fakes["notify"][0]["company_slug"] == "JRD"
+
+
+async def test_cleanup_closes_the_pti_pools(monkeypatch):
+    closed = []
+
+    async def nothing():
+        return None
+
+    async def close_pti():
+        closed.append("pti")
+
+    monkeypatch.setattr(ds, "close_download_session", nothing)
+    monkeypatch.setattr(ds, "_close_module", lambda name: nothing())
+    monkeypatch.setattr(ds, "close_pool", nothing)
+    monkeypatch.setattr(ds.pti_groups, "close", close_pti)
+    import loader
+    monkeypatch.setattr(loader, "driver_bot", None)
+    await ds._on_cleanup(None)
+    assert closed == ["pti"]
 
 
 # ── Motive clip still transcoding ────────────────────────────────────────────────

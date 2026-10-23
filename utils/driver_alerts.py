@@ -22,10 +22,21 @@ ordinals. The caller runs a Samsara notification as a background task so that wa
 never holds up the webhook handling. Motive events are not gated.
 
 Only a driver Vitality identified is notified (a driver from the event payload or
-none -> skip_reason "driver_unknown", nothing sent, email included). The truck's group
-title (read from Telegram, cached an hour) is compared with the Vitality name: the
-event is sent either way, and driver_notifications.name_match records TRUE / FALSE /
-NULL (title unreadable) so a wrongly mapped group can be found afterwards.
+none -> skip_reason "driver_unknown", nothing sent, email included).
+
+Routing. A company with a pti-checker-bot database (PTI_DATABASE_URL_<SLUG>) is routed
+only from it (utils/pti_groups.py: the live groups, refreshed every minute): no group,
+an ambiguous unit or the database unreachable -> skip_reason pti_no_group /
+pti_ambiguous / pti_unavailable, nothing sent. Any other company uses the imported
+driver_groups mapping as before. The Vitality name must then match the group — the pti
+title or any of its group_drivers names, or (driver_groups) the Telegram title, cached
+an hour — by driver_name_in_title; with DRIVER_ALERTS_NAME_MISMATCH=skip (the default)
+a mismatch is skip_reason name_mismatch (name_unverified when the title is
+unreadable). driver_notifications.name_match records TRUE / FALSE / NULL. Last, the
+driver bot's own membership is checked (utils/bot_membership.py, read-only):
+not in the group / muted -> bot_not_in_group / bot_cannot_post. All of this runs in
+DRY RUN too, and one decision line per event is logged. A skipped event sends nothing,
+email included. DRIVER_ALERTS_COMPANIES limits which companies are handled at all.
 
 notify_driver never raises: it runs after the company alerts went out, and nothing
 here may cost them or the rest of the event handling.
@@ -36,6 +47,7 @@ import io
 import logging
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -50,6 +62,7 @@ from aiogram.utils.exceptions import (
 )
 
 from data import config
+from utils import bot_membership, pti_groups
 from utils.db_api import db
 from utils.db_api.driver_groups import (
     ensure_driver_schema,
@@ -159,6 +172,48 @@ def driver_name_in_title(name: str | None, title: str | None) -> bool:
     return len(wanted & _name_tokens(title)) >= min(2, len(wanted))
 
 
+NAME_IN_TITLE = "title"
+NAME_IN_GROUP_DRIVERS = "group_drivers"
+NAME_NOWHERE = "none"
+NAME_UNKNOWN = "unknown"   # nothing to compare with (title unreadable / empty)
+
+
+def name_check(name: str | None, title: str | None,
+               driver_names=()) -> tuple[bool | None, str]:
+    """(name_match, source): whether the driver is the group title's or one of the
+    group's drivers' (pti group_drivers, their Telegram names), and which matched.
+    None / NAME_UNKNOWN when there is nothing to compare with."""
+    names = [n for n in (driver_names or ()) if (n or "").strip()]
+    if not (title or "").strip() and not names:
+        return None, NAME_UNKNOWN
+    if driver_name_in_title(name, title):
+        return True, NAME_IN_TITLE
+    if any(driver_name_in_title(name, n) for n in names):
+        return True, NAME_IN_GROUP_DRIVERS
+    return False, NAME_NOWHERE
+
+
+def company_enabled(company_slug: str | None) -> bool:
+    """DRIVER_ALERTS_COMPANIES allowlist; empty = every company."""
+    allowed = config.DRIVER_ALERTS_COMPANIES
+    return not allowed or (company_slug or "").strip().lower() in allowed
+
+
+_warned_mismatch_mode: set[str] = set()
+
+
+def _skip_on_name_mismatch() -> bool:
+    """DRIVER_ALERTS_NAME_MISMATCH: "send" sends anyway; "skip" and anything else skip."""
+    mode = (config.DRIVER_ALERTS_NAME_MISMATCH or "skip").strip().lower()
+    if mode == "send":
+        return False
+    if mode != "skip" and mode not in _warned_mismatch_mode:
+        _warned_mismatch_mode.add(mode)
+        logger.warning(f"[driver] DRIVER_ALERTS_NAME_MISMATCH={mode!r} is neither skip nor send "
+                       f"— skipping on a mismatch")
+    return True
+
+
 def _ordinal(n: int) -> str:
     if 10 <= n % 100 <= 20:
         suffix = "th"
@@ -237,6 +292,13 @@ async def _record_sent(event_id: int, sent_group: bool, sent_email: bool,
         "UPDATE driver_notifications SET sent_group = $2, sent_email = $3, name_match = $4 "
         "WHERE event_id = $1",
         event_id, sent_group, sent_email, name_match,
+    )
+
+
+async def _record_name_match(event_id: int, name_match: bool | None) -> None:
+    await db.execute(
+        "UPDATE driver_notifications SET name_match = $2 WHERE event_id = $1",
+        event_id, name_match,
     )
 
 
@@ -449,6 +511,88 @@ async def _samsara_gate(event: dict, event_id: int, occurred_at: datetime | None
     return state, reason
 
 
+# ── routing: which group, is it this driver's, can the bot post there ────────────
+
+SKIP_PTI_UNAVAILABLE = "pti_unavailable"
+SKIP_PTI_NO_GROUP = "pti_no_group"
+SKIP_PTI_AMBIGUOUS = "pti_ambiguous"
+SKIP_NAME_MISMATCH = "name_mismatch"
+SKIP_NAME_UNVERIFIED = "name_unverified"
+# Also bot_membership.REASON_*: bot_not_in_group, bot_cannot_post, group_migrated,
+# bot_check_failed.
+
+_PTI_SKIPS = {
+    pti_groups.REASON_NO_GROUP: SKIP_PTI_NO_GROUP,
+    pti_groups.REASON_AMBIGUOUS: SKIP_PTI_AMBIGUOUS,
+    pti_groups.REASON_UNAVAILABLE: SKIP_PTI_UNAVAILABLE,
+}
+
+ROUTE_PTI = "pti"
+ROUTE_IMPORT = "driver_groups"
+
+
+@dataclass
+class _Route:
+    source: str                     # ROUTE_PTI | ROUTE_IMPORT
+    group_id: int | None = None
+    unit: str | None = None         # the unit as the routing source spells it
+    name_match: bool | None = None
+    name_source: str = "n/a"        # NAME_* once there is a group
+    skip_reason: str | None = None  # a routing failure (pti only)
+    detail: str = ""
+
+
+async def _route(bot, company_slug: str, vehicle: str, driver_name: str,
+                 event_id: int) -> _Route:
+    """The truck's driver group and whether it is this driver's. Never raises."""
+    if pti_groups.is_configured(company_slug):
+        # pti only: a missing or doubtful answer is a skip, never a fallback to the import.
+        lookup = await pti_groups.find_group(company_slug, vehicle)
+        if not lookup.ok:
+            detail = ", ".join(f"{g.group_id} (unit {g.unit_number})" for g in lookup.matches)
+            return _Route(ROUTE_PTI, skip_reason=_PTI_SKIPS.get(lookup.reason, SKIP_PTI_UNAVAILABLE),
+                          detail=f"matches {detail}" if detail else "")
+        g = lookup.group
+        name_match, source = name_check(driver_name, g.title, g.driver_names)
+        if not name_match:
+            logger.debug(f"[driver] Event {event_id}: driver {driver_name!r}, pti group "
+                         f"{g.group_id} title {g.title!r}, drivers {list(g.driver_names)!r}")
+        return _Route(ROUTE_PTI, g.group_id, g.unit_number, name_match, source)
+
+    try:
+        group_id = await get_driver_group(company_slug, vehicle)
+    except Exception as e:
+        logger.error(f"[driver] Could not look up the driver group for {company_slug}/{vehicle}: {e}")
+        group_id = None
+    if group_id is None:
+        return _Route(ROUTE_IMPORT)
+    title = await _group_title(bot, group_id)
+    if title is None:
+        logger.warning(f"[driver] Event {event_id} {company_slug}/{vehicle}: title of "
+                       f"group {group_id} unreadable — name match unknown")
+    name_match, source = name_check(driver_name, title)
+    if name_match is False:
+        logger.debug(f"[driver] Event {event_id}: driver {driver_name!r}, group title {title!r}")
+    return _Route(ROUTE_IMPORT, group_id, vehicle, name_match, source)
+
+
+def _decision_line(*, dry: bool, event_id: int, company_slug: str, vehicle: str, who: str,
+                   route: _Route, membership, ordinal: int, charged: bool, state_note: str,
+                   decision: str) -> str:
+    """One line per event with everything needed to audit where it went and why."""
+    if membership is None:
+        bot_state = "n/a"
+    else:
+        bot_state = membership.status + (f" ({membership.detail})" if membership.reason
+                                          and membership.detail else "")
+    detail = f" [{route.detail}]" if route.detail else ""
+    group = route.group_id if route.group_id is not None else "none"
+    return (f"[driver] {'DRY RUN ' if dry else ''}Event {event_id} {company_slug}/{vehicle}: "
+            f"route={route.source} group={group} unit={route.unit or '-'}{detail} "
+            f"driver={who!r} name_match={route.name_match} ({route.name_source}) "
+            f"bot={bot_state} #{ordinal} today, charged={charged}{state_note} → {decision}")
+
+
 # ── entry point ──────────────────────────────────────────────────────────────────
 
 async def notify_driver(*, company_slug: str, event: dict, event_id: int | None, vehicle: str,
@@ -467,6 +611,11 @@ async def notify_driver(*, company_slug: str, event: dict, event_id: int | None,
         if bot is None:
             return
         video_urls, image_urls = list(video_urls or []), list(image_urls or [])
+        if not company_enabled(company_slug):
+            # driver_service drops these already; this keeps any other caller in line.
+            logger.debug(f"[driver] Event {event_id}: {company_slug} not in "
+                         f"DRIVER_ALERTS_COMPANIES — ignored")
+            return
         if event_id is None:
             logger.warning(f"[driver] Event without an id for {company_slug}/{vehicle} — "
                            f"cannot be made idempotent, not notifying the driver")
@@ -539,34 +688,56 @@ async def notify_driver(*, company_slug: str, event: dict, event_id: int | None,
         links = video_urls or image_urls
         state_note = f", coachingState={coaching_state}" if coaching_state else ""
 
-        try:
-            group_id = await get_driver_group(company_slug, vehicle)
-        except Exception as e:
-            logger.error(f"[driver] Could not look up the driver group for {company_slug}/{vehicle}: {e}")
-            group_id = None
+        route = await _route(bot, company_slug, vehicle, driver.name, event_id)
+        group_id, name_match = route.group_id, route.name_match
 
-        # Does the group look like this driver's? Informational only: the event is sent
-        # to the truck's group whatever the answer. None = the title could not be read.
-        name_match = None
+        # Checked even when the name already decided, so the decision line shows it.
+        membership = None
         if group_id is not None:
-            title = await _group_title(bot, group_id)
-            if title is None:
-                logger.warning(f"[driver] Event {event_id} {company_slug}/{vehicle}: title of "
-                               f"group {group_id} unreadable — name match unknown")
-            else:
-                name_match = driver_name_in_title(driver.name, title)
-                if not name_match:
-                    logger.info(f"[driver] Event {event_id} {company_slug}/{vehicle}: Vitality "
-                                f"driver not in the title of group {group_id} — sending anyway")
-                    logger.debug(f"[driver] Event {event_id}: driver {driver.name!r}, "
-                                 f"group title {title!r}")
+            membership = await bot_membership.check(bot, group_id)
+            if (membership.reason == bot_membership.REASON_MIGRATED and route.source == ROUTE_IMPORT
+                    and membership.migrate_to):
+                # The imported mapping follows the migration for the next event. (pti's
+                # own bot updates its database; until then that group is skipped.)
+                await _quietly(migrate_driver_group(group_id, membership.migrate_to),
+                               f"migrate driver group {group_id}")
 
-        if config.DRIVER_ALERTS_DRY_RUN:
-            logger.info(f"[driver] DRY RUN event {event_id} ({who}, #{ordinal} today, "
-                        f"charged={charged}{state_note}): would send — group={group_id} "
-                        f"name_match={name_match} email={'yes' if driver.email else 'no'} "
-                        f"media={len(media or [])} — text:\n{_plain(text)}")
+        skip_reason = route.skip_reason
+        if skip_reason is None and group_id is not None:
+            if name_match is not True and _skip_on_name_mismatch():
+                skip_reason = SKIP_NAME_MISMATCH if name_match is False else SKIP_NAME_UNVERIFIED
+            elif not membership.can_post:
+                skip_reason = membership.reason
+
+        dry = config.DRIVER_ALERTS_DRY_RUN
+        if skip_reason is not None:
+            decision = f"skipped ({skip_reason})"
+        elif group_id is None:
+            decision = "no driver group — email only"
+        elif name_match is not True:
+            decision = "name mismatch — " + ("would send anyway" if dry else "sending anyway")
+        else:
+            decision = "would send" if dry else "sending"
+        line = _decision_line(dry=dry, event_id=event_id, company_slug=company_slug,
+                              vehicle=vehicle, who=who, route=route, membership=membership,
+                              ordinal=ordinal, charged=charged, state_note=state_note,
+                              decision=decision)
+
+        if skip_reason is not None:
+            logger.info(line)
+            await _quietly(_record_gate(event_id, coaching_state, skip_reason),
+                           f"record the {skip_reason} decision for notification {event_id}")
+            await _quietly(_record_name_match(event_id, name_match),
+                           f"record the name match of notification {event_id}")
+            if not dry and skip_reason == bot_membership.REASON_NOT_IN_GROUP:
+                await bot_membership.request_bot_join(company_slug, route.unit, group_id, membership)
             return
+
+        if dry:
+            logger.info(f"{line} (email={'yes' if driver.email else 'no'}, "
+                        f"media={len(media or [])}) — text:\n{_plain(text)}")
+            return
+        logger.info(line)
 
         sent_group = False
         if group_id is None:
@@ -577,6 +748,8 @@ async def notify_driver(*, company_slug: str, event: dict, event_id: int | None,
                 sent_group = await _send_to_group(bot, group_id, text, media, is_video)
             except Exception as e:
                 logger.error(f"[driver] Driver group send failed for event {event_id}: {e}", exc_info=True)
+            if not sent_group:
+                bot_membership.invalidate(group_id)   # re-check before the next send
 
         sent_email = False
         if driver.email:

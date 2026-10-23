@@ -1,3 +1,6 @@
+import os
+import re
+
 from environs import Env
 
 # environs kutubxonasidan foydalanish
@@ -27,6 +30,28 @@ DRIVER_ALERTS_DRY_RUN = env.bool("DRIVER_ALERTS_DRY_RUN", False)
 # first notice after a mid-day switch-on is not already a charge. ISO date (2026-11-01,
 # midnight New York) or ISO datetime (naive = New York). Empty = count from day start.
 DRIVER_ALERTS_COUNT_FROM = env.str("DRIVER_ALERTS_COUNT_FROM", "")
+# Companies whose cell_phone events driver-alerts acts on: comma list of slugs, any case,
+# e.g. "jrd". Empty = every company. Others are answered 202 and dropped untouched.
+DRIVER_ALERTS_COMPANIES = [s.strip().lower() for s in env.list("DRIVER_ALERTS_COMPANIES", [])
+                           if s.strip()]
+# The Vitality driver's name not in the group (title or its pti group_drivers): "skip"
+# (default — nothing is sent, skip_reason name_mismatch) or "send" (send anyway, logged).
+DRIVER_ALERTS_NAME_MISMATCH = env.str("DRIVER_ALERTS_NAME_MISMATCH", "skip").strip().lower()
+
+# pti-checker-bot's own Postgres, one per company, read (read-only) for the live truck ->
+# driver group mapping: PTI_DATABASE_URL_<SLUG>, the slug upper-cased with anything not
+# a letter or digit as "_", e.g. PTI_DATABASE_URL_JRD. A company with one is routed
+# only from it (utils/pti_groups.py); without one, from the imported driver_groups.
+PTI_DATABASE_URL_PREFIX = "PTI_DATABASE_URL_"
+
+
+def pti_database_url(company_slug: str | None) -> str:
+    """The company's pti-checker-bot database URL, "" when not configured."""
+    suffix = re.sub(r"[^0-9A-Z]", "_", (company_slug or "").strip().upper())
+    if not suffix:
+        return ""
+    return os.environ.get(PTI_DATABASE_URL_PREFIX + suffix, "").strip()
+
 
 # The driver alerts run in their own Railway service (driver_service.py). web forwards
 # each cell_phone event to it at DRIVER_ALERTS_FORWARD_URL over the private network,
