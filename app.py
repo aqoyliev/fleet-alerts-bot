@@ -10,6 +10,7 @@ from utils.db_api.groups import ensure_main_group
 from utils.db_api.admins import seed_super_admins
 from utils.daily_report import schedule_daily_reports
 from utils.pti_reminder import schedule_pti_reminders
+from utils.memory_watch import watch_memory
 from data import config
 from data.config import ADMINS
 
@@ -18,6 +19,7 @@ from data.config import ADMINS
 # the nightly report simply stops happening.
 _daily_report_task = None
 _pti_reminder_task = None
+_memory_task = None
 
 
 def _admin_ids() -> list[int]:
@@ -42,10 +44,11 @@ async def on_startup(dispatcher):
     await resume_pending_crash_confirmations(bot)
 
     import asyncio
-    global _daily_report_task, _pti_reminder_task
+    global _daily_report_task, _pti_reminder_task, _memory_task
     _daily_report_task = asyncio.ensure_future(schedule_daily_reports(bot))
     # Returns straight away unless this company set PTI_REMINDER_TIME.
     _pti_reminder_task = asyncio.ensure_future(schedule_pti_reminders(bot))
+    _memory_task = asyncio.ensure_future(watch_memory())
 
 
 async def on_shutdown(_):
