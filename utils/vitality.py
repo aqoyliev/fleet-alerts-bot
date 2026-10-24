@@ -91,15 +91,58 @@ def is_configured() -> bool:
     return bool(config.VITALITY_PROVIDER_KEY)
 
 
-def _headers(company_key: str) -> dict:
+def _headers(company_key: str, provider_key: str | None = None) -> dict:
     return {
         "accept": "application/json",
-        "X-API-Provider-Key": config.VITALITY_PROVIDER_KEY,
+        "X-API-Provider-Key": provider_key or config.VITALITY_PROVIDER_KEY,
         "X-API-Company-Key": company_key,
     }
 
 
-async def _get(path: str, company_key: str, params: dict | None = None) -> dict:
+# Which provider key last worked for a company key (Vitality vs Vitality Plus).
+_provider_for: dict[str, str] = {}
+
+
+def _provider_keys(company_key: str) -> list[str]:
+    """Provider keys to try, the one that last worked for this carrier first."""
+    keys = [k for k in (config.VITALITY_PROVIDER_KEY, config.VITALITY_PLUS_PROVIDER_KEY) if k]
+    keys = list(dict.fromkeys(keys))
+    known = _provider_for.get(company_key)
+    if known in keys:
+        keys.remove(known)
+        keys.insert(0, known)
+    return keys
+
+
+async def _get_any(path: str, company_key: str, params: dict | None = None) -> dict:
+    """_get with the Vitality Plus fallback: carriers that moved to Plus keep their
+    company key, but the first provider key answers 403 or an empty first page for them
+    — then the other provider key is tried, and whichever worked is remembered."""
+    keys = _provider_keys(company_key)
+    last: Exception | None = None
+    for i, provider in enumerate(keys):
+        try:
+            env = await _get(path, company_key, params, provider)
+        except VitalityUnavailable as e:
+            last = e
+            continue
+        first_page = (params or {}).get("page", 1) == 1
+        if env.get("data") in (None, []) and first_page and "page" in (params or {}) \
+                and i < len(keys) - 1:
+            last = VitalityUnavailable(f"{path} returned no data")
+            continue
+        if _provider_for.get(company_key) != provider:
+            _provider_for[company_key] = provider
+            if i:
+                logger.info(f"[vitality] {path}: using the "
+                            f"{'Plus' if provider == config.VITALITY_PLUS_PROVIDER_KEY else 'primary'} "
+                            f"provider key for this carrier")
+        return env
+    raise last or VitalityUnavailable(f"{path}: no provider key")
+
+
+async def _get(path: str, company_key: str, params: dict | None = None,
+               provider_key: str | None = None) -> dict:
     """One GET, returning the success envelope. At most one retry, and only on 5xx or
     a network error/timeout. 401/403 raise VitalityUnavailable; anything else that is
     not a success raises VitalityError."""
@@ -108,7 +151,7 @@ async def _get(path: str, company_key: str, params: dict | None = None) -> dict:
         retry = attempt == 1
         try:
             session = _get_http_session()
-            async with session.get(url, headers=_headers(company_key), params=params,
+            async with session.get(url, headers=_headers(company_key, provider_key), params=params,
                                    timeout=_REQUEST_TIMEOUT) as resp:
                 status = resp.status
                 if status in (401, 403):
@@ -151,7 +194,7 @@ async def _fetch_pages(path: str, company_key: str, page_size: int,
     page = 1
     while page <= _MAX_PAGES:
         params = {"limit": page_size, "page": page, **(extra or {})}
-        env = await _get(path, company_key, params)
+        env = await _get_any(path, company_key, params)
         data = env.get("data")
         if data is None:
             if page == 1:
@@ -280,7 +323,7 @@ async def driver_status(company_key: str, driver_id: str) -> dict | None:
     cached = _statuses.get(ck)
     if cached and time.monotonic() < cached[0]:
         return cached[1]
-    env = await _get("/v2/latest-driver-status", company_key, {"driver_id": driver_id})
+    env = await _get_any("/v2/latest-driver-status", company_key, {"driver_id": driver_id})
     data = env.get("data")
     items = [data] if isinstance(data, dict) else [d for d in (data or []) if isinstance(d, dict)]
     item = next((d for d in items if str(d.get("driver_id") or "") == driver_id), None)
@@ -324,7 +367,7 @@ async def driver_name(company_key: str, driver_id: str) -> str:
     names = await _roster(company_key)
     if driver_id in names:
         return names[driver_id]
-    env = await _get(f"/v2/driver/{driver_id}", company_key)
+    env = await _get_any(f"/v2/driver/{driver_id}", company_key)
     data = env.get("data")
     if isinstance(data, list):
         data = next((d for d in data if isinstance(d, dict)), None)
@@ -339,3 +382,4 @@ def _reset_caches() -> None:
     _snapshot_locks.clear()
     _statuses.clear()
     _rosters.clear()
+    _provider_for.clear()

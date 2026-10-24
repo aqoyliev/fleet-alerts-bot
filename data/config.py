@@ -99,6 +99,9 @@ DRIVER_ALERTS_FORWARD_SECRET = env.str("DRIVER_ALERTS_FORWARD_SECRET", "")
 # anomaly bot); each carrier's own key is companies.vitality_company_key.
 # Empty provider key = Vitality is not queried and the event's driver is used.
 VITALITY_PROVIDER_KEY = env.str("VITALITY_PROVIDER_KEY", "")
+# Vitality Plus: same API and company keys under a second provider key, for carriers
+# that moved over (they get 403 / an empty fleet with the first one). Optional.
+VITALITY_PLUS_PROVIDER_KEY = env.str("VITALITY_PLUS_PROVIDER_KEY", "")
 VITALITY_BASE_URL = env.str("VITALITY_BASE_URL", "https://api.drivehos.app")
 
 
