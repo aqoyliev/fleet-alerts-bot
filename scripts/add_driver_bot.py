@@ -28,6 +28,7 @@ from telethon import errors  # noqa: E402
 from telethon.tl.types import Channel  # noqa: E402
 
 from utils import pti_groups, userbot  # noqa: E402
+from utils.unit_key import normalize_unit  # noqa: E402
 
 IN_GROUP = ("creator", "administrator", "member")
 MAX_FAILURES_IN_A_ROW = 3
@@ -49,7 +50,9 @@ async def main() -> int:
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--pace", type=float, default=60.0, help="seconds between adds")
     ap.add_argument("--limit", type=int, default=0, help="add at most this many (0 = all)")
+    ap.add_argument("--skip-units", default="", help="comma list of units to leave alone")
     args = ap.parse_args()
+    skip = {normalize_unit(u) for u in args.skip_units.split(",") if u.strip()}
     e = os.environ
 
     groups = await pti_groups.fetch_usable_groups(args.company)
@@ -79,6 +82,9 @@ async def main() -> int:
 
         plan, for_hos, blocked = [], [], []
         for g in sorted(missing, key=lambda g: g.unit_number):
+            if normalize_unit(g.unit_number) in skip:
+                print(f"  unit {g.unit_number:<10} skipped (--skip-units)")
+                continue
             ent = dialogs.get(g.group_id)
             if ent is None:
                 for_hos.append(g)
