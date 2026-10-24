@@ -370,7 +370,9 @@ async def test_a_sold_truck_does_not_make_a_live_one_ambiguous(fake):
     assert (await qm.truck_drivers("co", "7000")).reason == qm.REASON_AMBIGUOUS
 
 
-async def test_only_active_drivers_are_returned(fake):
+async def test_terminated_drivers_are_dropped(fake):
+    # The real truck record lists drivers as {id, first_name, last_name} only; status and
+    # email come from GET /x/drivers/{id}.
     fake.add_truck("a", "4042", drivers=[
         _driver("d1", "John", "Smith", "active", email="john@example.com", phone="+1555"),
         _driver("d2", "Ann", "Invited", "invited", email="ann@example.com"),
@@ -378,8 +380,8 @@ async def test_only_active_drivers_are_returned(fake):
         _driver("d4", " Mary  ", " Jones ", "ACTIVE", middle="Q"),
     ])
     r = await qm.truck_drivers("co", "4042")
-    assert [d.id for d in r.drivers] == ["d1", "d4"]
-    d1, d4 = r.drivers
+    assert [d.id for d in r.drivers] == ["d1", "d2", "d4"]
+    d1, _, d4 = r.drivers
     assert (d1.name, d1.email, d1.phone, d1.status) == ("John Smith", "john@example.com", "+1555", "active")
     assert d4.name == "Mary Jones" and d4.email is None and d4.phone is None
     assert d1.truck_unit == "4042"

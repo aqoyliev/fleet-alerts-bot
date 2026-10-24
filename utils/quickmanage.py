@@ -57,6 +57,7 @@ _MAX_RETRY_AFTER = 5.0
 _SEARCH_PAGE_SIZE = 50
 _MAX_PAGES = 5                 # guards against a misbehaving ``count``
 _DEAD_TRUCK_STATUSES = {"sold", "total_loss"}
+_GONE_DRIVER_STATUSES = {"terminated"}
 
 _NAME_TOKEN_RE = re.compile(r"[^\W\d_]{2,}")   # as utils.driver_alerts (not imported: cycle)
 
@@ -440,10 +441,25 @@ async def _fetch_truck_drivers(company_slug: str, unit: str) -> TruckDrivers:
     truck = _truck_from(data)
     if not truck.id:
         truck = hits[0]
-    drivers = tuple(d for d in (_driver_from(r) for r in (data.get("drivers") or [])
-                                if isinstance(r, dict))
-                    if d.status == "active")
-    return TruckDrivers(unit=unit, truck=truck, drivers=drivers)
+    # The truck lists its assigned drivers as {id, first_name, last_name} only — no status
+    # or email — so each is read in full; a terminated one is dropped. If that read fails
+    # the brief record is kept (status/email unknown): the truck says it is assigned.
+    drivers = []
+    for raw in data.get("drivers") or []:
+        if not isinstance(raw, dict):
+            continue
+        brief = _driver_from(raw)
+        full = brief
+        if brief.id:
+            try:
+                detail = await _call(company_slug, "GET", f"/x/drivers/{brief.id}")
+                if isinstance(detail, dict):
+                    full = _driver_from(detail)
+            except QuickManageError as e:
+                logger.info(f"[quickmanage] driver {brief.id} of truck {truck.unit}: {e}")
+        if full.status not in _GONE_DRIVER_STATUSES:
+            drivers.append(full)
+    return TruckDrivers(unit=unit, truck=truck, drivers=tuple(drivers))
 
 
 async def truck_drivers(company_slug: str, unit: str) -> TruckDrivers:
